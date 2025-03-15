@@ -33,11 +33,11 @@ class PDAggregationController:
 
         self._request_dispatcher = TypeBasedDispatcher(
             [
-                (BatchEmbeddingOut, self.handle_batch_out),
-                (BatchStrOut, self.handle_batch_out),
-                (PrefilledReqInput, self.handle_prefilled_req),
-                (KVTransferFetch, self.handle_kv_transfer_req),
-                (KVTransferAck, self.handle_kv_transfer_resp),
+                (BatchEmbeddingOut, self._handle_batch_out),
+                (BatchStrOut, self._handle_batch_out),
+                (PrefilledReqInput, self._handle_prefilled_req),
+                (KVTransferFetch, self._handle_kv_transfer_req),
+                (KVTransferAck, self._handle_kv_transfer_resp),
             ]
         )
 

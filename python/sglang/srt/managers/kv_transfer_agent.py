@@ -122,7 +122,7 @@ class KVTransferAgent:
             self.send_to_pd_disagg_controller = get_zmq_socket(context, zmq.PUSH, f"tcp://{config.decode_dist_init_host}:{PD_DISAGGREGATION_PORT+rank}", False)
 
         self.device = device
-        self.engine = TransferEngine(config.transfor_engine_local_host, config.transfor_engine_metadata_server, device)
+        self.engine = TransferEngine(self.addr, config.transfor_engine_metadata_server, device)
 
     def set_kv_buffer(self, req: Req) -> int:
         token_ids = (req.origin_input_ids + req.output_ids)[:-1]
@@ -142,18 +142,12 @@ class KVTransferAgent:
             dst_addr=self.addr,
             dst_ptr=dst_ptr
         ))
-        kv_cache = self._read_bytes_from_buffer(dst_ptr, req.kv_cache_length)
-        # send control-plan message to get kv cache from prefill node
-        # TODO: 缺少 kv cache 源地址, 目的地址。能否将message的源地址和目的地址作为header，rid，dst_ptr，length 作为 payload
-        self.send_to_pd_disagg_controller.send_pyobj(KVTransferFetch(req.rid, req.kv_transfer_src, req.kv_transfer_dst, dst_ptr))
         # wait fro transfor done
         await self._wait_for_transfer_done(req.rid)
         # read from buffer
         kv_cache = self._read_bytes_from_buffer(dst_ptr, req.kv_cache_length)
         # free buffer
         self._free_transfer_kv_buffer(dst_ptr, req.kv_cache_length)
-        # TODO: why del self.kv_buffer[req.rid]
-        # del self.kv_buffer[req.rid]
         
         # load to device
         loaded_tensor = safetensors_load(kv_cache)["tensor"].to(self.device)
@@ -177,9 +171,10 @@ class KVTransferAgent:
         op_write = 1
         self.engine.transfer_sync(req.dst_addr, src_ptr, req.dst_ptr, kv_cache_length, op_write)
         # send ack to remote addr
-        self.send_to_pd_disagg_controller.send_pyobj(KVTransferAck(req.rid, 0))
+        self.send_to_pd_disagg_controller.send_pyobj(KVTransferAck(req.rid, req.dst_addr, 0))
         # free buffer
         self._free_transfer_kv_buffer(src_ptr, kv_cache_length)
+        del self.kv_buffer[req.rid]
 
     # when decode node receive kv transfer ACK request
     def _handle_kv_transfer_ack(self, req: KVTransferAck):

@@ -667,17 +667,17 @@ class PrefilledReqInput(TokenizedGenerateReqInput):
 
 @dataclass
 class KVTransferFetch:
-    rid: str
-    src_addr: str
-    dst_addr: str
-    dst_ptr: int
+    rid: str         # request id
+    src_addr: str    # the address of the prefill node which has the kv cache
+    dst_addr: str    # the address of the decode node which needs the kv cache
+    dst_ptr: int     # the pointer to the buffer of the decode node which needs the kv cache
 
 
 @dataclass
 class KVTransferAck:
-    dst_addr: str
-    rid: str
-    code: int # 0: success, 1: failed
+    rid: str         # request id
+    dst_addr: str    # the address of the decode node which needs the kv cache  
+    code: int        # 0: success, 1: failed
 
 
 @dataclass
