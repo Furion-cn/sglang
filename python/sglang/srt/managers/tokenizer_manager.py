@@ -261,7 +261,8 @@ class TokenizerManager:
         self.start_profile_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
-        self.health_check_communitcator = _Communicator(self.send_to_scheduler, 1)
+        self.health_check_communitcator = _Communicator(
+            self.send_to_scheduler, 1)
         self.get_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
@@ -410,7 +411,8 @@ class TokenizerManager:
             top_logprobs_num = obj.top_logprobs_num
             token_ids_logprob = obj.token_ids_logprob
             session_params = (
-                SessionParams(**obj.session_params) if obj.session_params else None
+                SessionParams(
+                    **obj.session_params) if obj.session_params else None
             )
 
         input_token_num = len(input_ids) if input_ids is not None else 0
@@ -476,7 +478,8 @@ class TokenizerManager:
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
         created_time: Optional[float] = None,
     ):
-        state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
+        state = ReqState([], False, asyncio.Event(),
+                         obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state
         self.send_to_scheduler.send_pyobj(tokenized_obj)
 
@@ -575,7 +578,8 @@ class TokenizerManager:
                 tmp_obj = copy.copy(objs[i])
                 tokenized_obj = copy.copy(tokenized_objs[i])
                 tokenized_obj.rid = tmp_obj.regenerate_rid()
-                tokenized_obj.sampling_params = copy.copy(tokenized_obj.sampling_params)
+                tokenized_obj.sampling_params = copy.copy(
+                    tokenized_obj.sampling_params)
                 tokenized_obj.sampling_params.max_new_tokens = 0
                 tokenized_obj.stream = False
                 self._send_one_request(tmp_obj, tokenized_obj, created_time)
@@ -587,8 +591,10 @@ class TokenizerManager:
                     tmp_obj = copy.copy(objs[i])
                     tokenized_obj = copy.copy(tokenized_objs[i])
                     tokenized_obj.rid = tmp_obj.regenerate_rid()
-                    self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, request))
+                    self._send_one_request(
+                        tmp_obj, tokenized_obj, created_time)
+                    generators.append(
+                        self._wait_one_response(tmp_obj, request))
                     rids.append(tmp_obj.rid)
 
         # Wait for all requests
@@ -598,7 +604,8 @@ class TokenizerManager:
             yield outputs
         else:
             rid_to_index = {rid: i for i, rid in enumerate(rids)}
-            task_map = {asyncio.create_task(gen.__anext__()): gen for gen in generators}
+            task_map = {asyncio.create_task(
+                gen.__anext__()): gen for gen in generators}
             while task_map:
                 done, _ = await asyncio.wait(
                     task_map.keys(), return_when=asyncio.FIRST_COMPLETED
@@ -874,7 +881,8 @@ class TokenizerManager:
         # the main thread due to the CPython limitation.
         if threading.current_thread() is threading.main_thread():
             signal_handler = SignalHandler(self)
-            loop.add_signal_handler(signal.SIGTERM, signal_handler.signal_handler)
+            loop.add_signal_handler(
+                signal.SIGTERM, signal_handler.signal_handler)
         else:
             logger.warning(
                 "Signal handler is not added because the tokenizer manager is "
@@ -958,7 +966,7 @@ class TokenizerManager:
             elif isinstance(recv_obj, BatchTokenIDOut):
                 if self.server_args.stream_output and state.obj.stream:
                     output_token_ids = recv_obj.output_ids[i][
-                        state.last_output_offset :
+                        state.last_output_offset:
                     ]
                     state.last_output_offset = len(recv_obj.output_ids[i])
                 else:
@@ -982,7 +990,8 @@ class TokenizerManager:
                 if self.server_args.speculative_algorithm:
                     meta_info["spec_verify_ct"] = recv_obj.spec_verify_ct[i]
                 state.finished_time = time.time()
-                meta_info["e2e_latency"] = state.finished_time - state.created_time
+                meta_info["e2e_latency"] = state.finished_time - \
+                    state.created_time
 
             state.out_list.append(out_dict)
             state.event.set()
@@ -1118,7 +1127,8 @@ class TokenizerManager:
                 self.dump_requests_folder,
                 datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".pkl",
             )
-            logger.info(f"Dump {len(self.dump_request_list)} requests to {filename}")
+            logger.info(
+                f"Dump {len(self.dump_request_list)} requests to {filename}")
 
             to_dump = self.dump_request_list
             self.dump_request_list = []
