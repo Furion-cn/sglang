@@ -284,6 +284,5 @@ class KVTransferAgent:
                 raise ValueError(f"Unknown message type: {type(recv_obj)}")
 
     def free_kv_buffer(self, req_id: str):
-        """释放指定请求的 KV 缓存内存"""
         if self.host_memory_manager is not None:
             self.host_memory_manager.free(req_id)
