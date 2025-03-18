@@ -56,6 +56,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
 )
+from sglang.srt.managers.pd_disaggregation_controller import PDDisaggregationController
 from sglang.srt.managers.scheduler import run_scheduler_process
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
@@ -567,13 +568,17 @@ def _launch_subprocesses(
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
+
+    # Launch PD disaggregation controller
+    if server_args.kv_transfer_config is not None:
+        pd_disaggregation_controller = PDDisaggregationController(server_args, port_args, tokenizer_manager.send_to_scheduler)
+        t = threading.Thread(target=pd_disaggregation_controller.event_loop)
+        t.start()
+
     if server_args.chat_template:
         load_chat_template_for_openai_api(
             tokenizer_manager, server_args.chat_template, server_args.model_path
         )
-
-    if server_args.completion_template:
-        load_completion_template_for_openai_api(server_args.completion_template)
 
     # Wait for the model to finish loading
     scheduler_infos = []
@@ -593,7 +598,6 @@ def _launch_subprocesses(
                 "Initialization failed. Please see the error messages above."
             )
         scheduler_infos.append(data)
-
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
