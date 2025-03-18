@@ -56,6 +56,7 @@ from sglang.srt.managers.io_struct import (
     ProfileReq,
     ProfileReqOutput,
     ProfileReqType,
+    PrefilledReqInput,
     ReleaseMemoryOccupationReqInput,
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
@@ -78,6 +79,7 @@ from sglang.srt.managers.schedule_batch import (
     ImageInputs,
     Req,
     ScheduleBatch,
+    PDStep,
     global_server_args_dict,
 )
 from sglang.srt.managers.schedule_policy import (
@@ -88,6 +90,8 @@ from sglang.srt.managers.schedule_policy import (
 from sglang.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
+from sglang.srt.managers.kv_transfer_agent import KVTransferAgent
+from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_PORT
 from sglang.srt.managers.session_controller import Session
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
@@ -95,6 +99,7 @@ from sglang.srt.managers.utils import validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
+from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -114,7 +119,6 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
-
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -349,6 +353,19 @@ class Scheduler(SchedulerOutputProcessorMixin):
         t.start()
         self.parent_process = psutil.Process().parent()
 
+        if server_args.kv_transfer_config:
+            # Init kv transfer agent
+            self.kv_transfer_agent = KVTransferAgent(
+                server_args,
+                self.req_to_token_pool,
+                self.token_to_kv_pool_allocator,
+                self.model_config.num_hidden_layers,
+                self.tp_rank,
+                self.attn_tp_cpu_group,
+            )
+            t = threading.Thread(target=self.kv_transfer_agent.event_loop, daemon=True)
+            t.start()
+
         # Init memory saver
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=server_args.enable_memory_saver
@@ -368,6 +385,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             [
                 (TokenizedGenerateReqInput, self.handle_generate_request),
                 (TokenizedEmbeddingReqInput, self.handle_embedding_request),
+                (PrefilledReqInput, self.handle_generate_request),
                 (FlushCacheReq, self.flush_cache_wrapped),
                 (AbortReq, self.abort_request),
                 (OpenSessionReqInput, self.open_session),
@@ -576,14 +594,14 @@ class Scheduler(SchedulerOutputProcessorMixin):
                     req
                     for req in recv_reqs
                     if isinstance(
-                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
+                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput)
                     )
                 ]
                 control_reqs = [
                     req
                     for req in recv_reqs
                     if not isinstance(
-                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
+                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput)
                     )
                 ]
             else:
@@ -616,6 +634,8 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 self.return_health_check_ct += 1
                 continue
 
+            print(f"process_input_requests recv_req: {recv_req}")
+
             output = self._request_dispatcher(recv_req)
             if output is not None:
                 if isinstance(output, RpcReqOutput):
@@ -626,7 +646,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
 
     def handle_generate_request(
         self,
-        recv_req: TokenizedGenerateReqInput,
+        recv_req: Union[TokenizedGenerateReqInput, PrefilledReqInput],
     ):
         # Create a new request
         if (
@@ -669,6 +689,16 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 eos_token_ids=self.model_config.hf_eos_token_id,
             )
             req.tokenizer = self.tokenizer
+
+            if self.server_args.kv_transfer_config is not None:
+                req.pd_step = PDStep.PREFILL
+
+            if isinstance(recv_req, PrefilledReqInput):
+                req.kv_transfer_src_addr = recv_req.kv_transfer_src_addr
+                req.kv_transfer_src_rank = recv_req.kv_transfer_src_rank
+                req.kv_cache_length = recv_req.kv_cache_length
+                req.output_ids = recv_req.output_ids
+                req.pd_step = PDStep.DECODE
 
             if (
                 recv_req.session_params is not None
@@ -873,6 +903,47 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.cache_hit_rate = cache_hit_rate
             self.metrics_collector.log_stats(self.stats)
+    
+    def log_recover_stats(
+        self,
+        adder: PrefillAdder,
+        can_run_list: List[Req],
+        running_bs: int,
+    ):
+        gap_latency = time.time() - self.last_prefill_stats_tic
+        self.last_prefill_stats_tic = time.time()
+        self.last_input_throughput = self.num_prefill_tokens / gap_latency
+        self.num_prefill_tokens = 0
+
+        num_used = self.max_total_num_tokens - (
+            self.token_to_kv_pool_allocator.available_size()
+            + self.tree_cache.evictable_size()
+        )
+        self._largest_prefill_len = max(
+            self._largest_prefill_len, adder.log_input_tokens
+        )
+
+        f = (
+            f"Recover batch. "
+            f"#new-seq: {len(can_run_list)}, "
+            f"#new-token: {adder.log_input_tokens}, "
+            f"#cached-token: {adder.log_hit_tokens}, "
+            f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
+            f"#running-req: {running_bs}, "
+            f"#queue-req: {len(self.waiting_queue)}, "
+        )
+        logger.info(f)
+
+        if self.enable_metrics:
+            cache_hit_rate = adder.log_hit_tokens / (
+                adder.log_input_tokens + adder.log_hit_tokens
+            )
+            self.stats.num_running_reqs = running_bs
+            self.stats.num_used_tokens = num_used
+            self.stats.token_usage = round(num_used / self.max_total_num_tokens, 2)
+            self.stats.num_queue_reqs = len(self.waiting_queue)
+            self.stats.cache_hit_rate = cache_hit_rate
+            self.metrics_collector.log_stats(self.stats)
 
     def log_decode_stats(self):
         gap_latency = time.time() - self.last_decode_stats_tic
@@ -979,6 +1050,29 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.metrics_collector.log_stats(self.stats)
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
+        if self.server_args.kv_transfer_config is not None:
+            if self.last_batch:
+                self.running_batch = self.last_batch
+            
+            if self.server_args.kv_transfer_config.role == "decode":
+                ret = self.recover_new_prefilled_batch()
+                if not self.running_batch.is_empty():
+                    if ret:
+                        ret.merge_batch(self.running_batch)
+                    else:
+                        ret = self.running_batch
+                if ret:
+                    ret = self.update_running_batch(ret)
+                if ret and ret.is_empty():
+                    ret = None
+            else:
+                ret = self.get_new_batch_prefill()
+            
+            if self.server_args.enable_dp_attention:
+                ret, _ = self.prepare_dp_attn_batch(ret)
+
+            return ret
+        
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1010,17 +1104,137 @@ class Scheduler(SchedulerOutputProcessorMixin):
             ret = new_batch
         else:
             # Run decode
-            if not self.running_batch.is_empty():
+            if self.running_batch is None:
+                ret = None
+            else:
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
-            else:
-                ret = None
 
         # Handle DP attention
         if self.server_args.enable_dp_attention:
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
+    
+    def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
+        if (
+            self.running_batch.batch_is_full or len(self.waiting_queue) == 0
+        ) and self.chunked_req is None:
+            return None
+        
+        running_bs = len(self.running_batch.reqs) if self.running_batch else 0
+        if running_bs >= self.max_running_requests:
+            self.running_batch.batch_is_full = True
+            return None
+         # Get priority queue
+        prefix_computed = self.policy.calc_priority(self.waiting_queue)
+
+        adder = PrefillAdder(
+            self.tree_cache,
+            self.token_to_kv_pool_allocator,
+            self.running_batch,
+            self.new_token_ratio,
+            self.max_prefill_tokens,
+            None,
+            0,
+        )
+
+        if self.lora_paths:
+            lora_set = (
+                set([req.lora_path for req in self.running_batch.reqs])
+                if self.running_batch is not None
+                else set([])
+            )
+
+        origin_output_ids = []
+        # Get requests from the waiting queue to a new batch
+        for req in self.waiting_queue:
+            if (
+                self.lora_paths
+                and len(
+                    lora_set
+                    | set([req.lora_path for req in adder.can_run_list])
+                    | set([req.lora_path])
+                )
+                > self.max_loras_per_batch
+            ):
+                self.running_batch.batch_is_full = True
+                break
+
+            if running_bs + len(adder.can_run_list) >= self.max_running_requests:
+                self.running_batch.batch_is_full = True
+                break
+
+            output_ids = req.output_ids
+            req.output_ids = [] # clear output_ids
+            req.init_next_round_input(
+                None if prefix_computed else self.tree_cache,
+                self.enable_hierarchical_cache,
+            )
+
+            res = adder.add_one_req(
+                req, False, self.enable_hierarchical_cache
+            )
+            if res != AddReqResult.CONTINUE:
+                if res == AddReqResult.NO_TOKEN:
+                    if self.enable_hierarchical_cache:
+                        # Set batch_is_full after making sure there are requests that can be served
+                        self.batch_is_full = len(adder.can_run_list) > 0 or (
+                            self.running_batch is not None
+                            and not self.running_batch.is_empty()
+                        )
+                    else:
+                        self.running_batch.batch_is_full = True
+                break
+            origin_output_ids.append(output_ids)
+        # Update waiting queue
+        can_run_list: List[Req] = adder.can_run_list
+        if len(can_run_list) == 0:
+            return None
+        self.waiting_queue = [
+            x for x in self.waiting_queue if x not in set(can_run_list)
+        ]
+
+        if self.enable_hierarchical_cache:
+            self.tree_cache.read_to_load_cache()
+
+        # Print stats
+        if self.attn_tp_rank == 0:
+            self.log_recover_stats(adder, can_run_list, running_bs)
+
+        # Create a new batch
+        new_batch = ScheduleBatch.init_new(
+            can_run_list,
+            self.req_to_token_pool,
+            self.token_to_kv_pool_allocator,
+            self.tree_cache,
+            self.model_config,
+            self.enable_overlap,
+            self.spec_algorithm,
+            self.server_args.enable_custom_logit_processor,
+        )
+        new_batch.recover_for_decode(origin_output_ids)
+        # Recover kv cache from kv_transfer_agent
+        pt = 0
+        for i in range(new_batch.batch_size()):
+            req = new_batch.reqs[i]
+            if req.kv_cache_restored:
+                pt += new_batch.extend_lens[i]
+                continue
+            flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
+            kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
+            for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
+                print(f"{self.tp_rank} recover_new_prefilled_batch layer_kv_buffer: {layer_kv_buffer.shape} {layer_kv_buffer.device}")
+                kv_cache_pool.set_kv_buffer(
+                    RadixAttention(layer_id=layer_id, num_heads=0, head_dim=0, scaling=0.0, num_kv_heads=0),
+                    new_batch.out_cache_loc[pt : pt + new_batch.extend_lens[i]],
+                    layer_kv_buffer[len(req.prefix_indices):],
+                    None
+                )
+            req.kv_cache_restored = True
+            pt += new_batch.extend_lens[i]
+        return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
         # Check if the grammar is ready in the grammar queue

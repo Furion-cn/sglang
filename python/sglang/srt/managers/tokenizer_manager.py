@@ -145,9 +145,12 @@ class TokenizerManager:
         self.recv_from_detokenizer = get_zmq_socket(
             context, zmq.PULL, port_args.tokenizer_ipc_name, True
         )
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
-        )
+        if server_args.kv_transfer_config is None or server_args.kv_transfer_config.role == "prefill":
+            self.send_to_scheduler = get_zmq_socket(
+                context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+            )
+        else:
+            self.send_to_scheduler = None
 
         # Read model args
         self.model_path = server_args.model_path

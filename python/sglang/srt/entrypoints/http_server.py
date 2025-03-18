@@ -17,33 +17,33 @@ The entry point of inference server. (SRT = SGLang Runtime)
 This file implements HTTP APIs for the inference engine via fastapi.
 """
 
-import asyncio
-import dataclasses
-import json
-import logging
-import multiprocessing as multiprocessing
-import os
-import threading
-import time
-from http import HTTPStatus
-from typing import AsyncIterator, Callable, Dict, Optional
-
-# Fix a bug of Python threading
-setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
-
-from contextlib import asynccontextmanager
-
-import numpy as np
-import orjson
-import requests
-import uvicorn
-import uvloop
-from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, Response, StreamingResponse
-
-from sglang.srt.entrypoints.engine import _launch_subprocesses
-from sglang.srt.function_call_parser import FunctionCallParser
+from sglang.version import __version__
+from sglang.utils import get_exception_traceback
+from sglang.srt.warmup import execute_warmups
+from sglang.srt.utils import (
+    add_api_key_middleware,
+    add_prometheus_middleware,
+    delete_directory,
+    kill_process_tree,
+    set_uvicorn_logging_configs,
+)
+from sglang.srt.server_args import ServerArgs
+from sglang.srt.reasoning_parser import ReasoningParser
+from sglang.srt.openai_api.protocol import ModelCard, ModelList
+from sglang.srt.openai_api.adapter import (
+    v1_batches,
+    v1_cancel_batch,
+    v1_chat_completions,
+    v1_completions,
+    v1_delete_file,
+    v1_embeddings,
+    v1_files_create,
+    v1_retrieve_batch,
+    v1_retrieve_file,
+    v1_retrieve_file_content,
+)
+from sglang.srt.metrics.func_timer import enable_func_timer
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     ConfigureLoggingReq,
@@ -62,33 +62,31 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     VertexGenerateReqInput,
 )
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.metrics.func_timer import enable_func_timer
-from sglang.srt.openai_api.adapter import (
-    v1_batches,
-    v1_cancel_batch,
-    v1_chat_completions,
-    v1_completions,
-    v1_delete_file,
-    v1_embeddings,
-    v1_files_create,
-    v1_retrieve_batch,
-    v1_retrieve_file,
-    v1_retrieve_file_content,
-)
-from sglang.srt.openai_api.protocol import ModelCard, ModelList
-from sglang.srt.reasoning_parser import ReasoningParser
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import (
-    add_api_key_middleware,
-    add_prometheus_middleware,
-    delete_directory,
-    kill_process_tree,
-    set_uvicorn_logging_configs,
-)
-from sglang.srt.warmup import execute_warmups
-from sglang.utils import get_exception_traceback
-from sglang.version import __version__
+from sglang.srt.function_call_parser import FunctionCallParser
+from sglang.srt.entrypoints.engine import _launch_subprocesses
+from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, Form, Request, UploadFile
+import uvloop
+import uvicorn
+import requests
+import orjson
+import numpy as np
+from contextlib import asynccontextmanager
+import asyncio
+import dataclasses
+import json
+import logging
+import multiprocessing as multiprocessing
+import os
+import threading
+import time
+from http import HTTPStatus
+from typing import AsyncIterator, Callable, Dict, Optional
+
+# Fix a bug of Python threading
+setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
+
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -183,7 +181,8 @@ async def health_generate(request: Request) -> Response:
     task.cancel()
     tic_time = time.strftime("%H:%M:%S", time.localtime(tic))
     last_receive_time = time.strftime(
-        "%H:%M:%S", time.localtime(_global_state.tokenizer_manager.last_receive_tstamp)
+        "%H:%M:%S", time.localtime(
+            _global_state.tokenizer_manager.last_receive_tstamp)
     )
     logger.error(
         f"Health check failed. Server couldn't get a response from detokenizer for last "
@@ -470,7 +469,8 @@ async def parse_function_call_request(obj: ParseFunctionCallReq, request: Reques
     A native API endpoint to parse function calls from a text.
     """
     # 1) Initialize the parser based on the request body
-    parser = FunctionCallParser(tools=obj.tools, tool_call_parser=obj.tool_call_parser)
+    parser = FunctionCallParser(
+        tools=obj.tools, tool_call_parser=obj.tool_call_parser)
 
     # 2) Call the non-stream parsing method (non-stream)
     normal_text, calls = parser.parse_non_stream(obj.text)
@@ -531,7 +531,8 @@ def available_models():
     served_model_names = [_global_state.tokenizer_manager.served_model_name]
     model_cards = []
     for served_model_name in served_model_names:
-        model_cards.append(ModelCard(id=served_model_name, root=served_model_name))
+        model_cards.append(
+            ModelCard(id=served_model_name, root=served_model_name))
     return ModelList(data=model_cards)
 
 
@@ -576,7 +577,7 @@ async def retrieve_file_content(file_id: str):
     return await v1_retrieve_file_content(file_id)
 
 
-## SageMaker API
+# SageMaker API
 @app.get("/ping")
 async def sagemaker_health() -> Response:
     """Check the health of the http server."""
@@ -588,7 +589,7 @@ async def sagemaker_chat_completions(raw_request: Request):
     return await v1_chat_completions(_global_state.tokenizer_manager, raw_request)
 
 
-## Vertex AI API
+# Vertex AI API
 @app.post(os.environ.get("AIP_PREDICT_ROUTE", "/vertex_generate"))
 async def vertex_generate(vertex_req: VertexGenerateReqInput, raw_request: Request):
     if not vertex_req.instances:
@@ -640,7 +641,8 @@ def launch_server(
     1. The HTTP server, Engine, and TokenizerManager both run in the main process.
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
-    tokenizer_manager, scheduler_info = _launch_subprocesses(server_args=server_args)
+    tokenizer_manager, scheduler_info = _launch_subprocesses(
+        server_args=server_args)
     set_global_state(
         _GlobalState(
             tokenizer_manager=tokenizer_manager,
@@ -693,71 +695,75 @@ def _wait_and_warmup(
     image_token_text: str,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
-    headers = {}
-    url = server_args.url()
-    if server_args.api_key:
-        headers["Authorization"] = f"Bearer {server_args.api_key}"
+    if server_args.kv_transfer_config is None or server_args.kv_transfer_config.role == "prefill":
+        headers = {}
+        url = server_args.url()
+        if server_args.api_key:
+            headers["Authorization"] = f"Bearer {server_args.api_key}"
 
-    # Wait until the server is launched
-    success = False
-    for _ in range(120):
-        time.sleep(1)
+        # Wait until the server is launched
+        success = False
+        for _ in range(120):
+            time.sleep(1)
+            try:
+                res = requests.get(url + "/get_model_info",
+                                    timeout=5, headers=headers)
+                assert res.status_code == 200, f"{res=}, {res.text=}"
+                success = True
+                break
+            except (AssertionError, requests.exceptions.RequestException):
+                last_traceback = get_exception_traceback()
+                pass
+
+        if not success:
+            if pipe_finish_writer is not None:
+                pipe_finish_writer.send(last_traceback)
+            logger.error(
+                f"Initialization failed. warmup error: {last_traceback}")
+            kill_process_tree(os.getpid())
+            return
+
+        model_info = res.json()
+
+        # Send a warmup request
+        request_name = "/generate" if model_info["is_generation"] else "/encode"
+        max_new_tokens = 8 if model_info["is_generation"] else 1
+        json_data = {
+            "sampling_params": {
+                "temperature": 0,
+                "max_new_tokens": max_new_tokens,
+            },
+        }
+        if server_args.skip_tokenizer_init:
+            json_data["input_ids"] = [10, 11, 12]
+        else:
+            json_data["text"] = "The capital city of France is"
+
+        # Debug dumping
+        if server_args.debug_tensor_dump_input_file:
+            json_data.pop("text", None)
+            json_data["input_ids"] = np.load(
+                server_args.debug_tensor_dump_input_file
+            ).tolist()
+            json_data["sampling_params"]["max_new_tokens"] = 0
+
         try:
-            res = requests.get(url + "/get_model_info", timeout=5, headers=headers)
-            assert res.status_code == 200, f"{res=}, {res.text=}"
-            success = True
-            break
-        except (AssertionError, requests.exceptions.RequestException):
+            for i in range(server_args.dp_size):
+                res = requests.post(
+                    url + request_name,
+                    json=json_data,
+                    headers=headers,
+                    timeout=600,
+                )
+                assert res.status_code == 200, f"{res}"
+        except Exception:
             last_traceback = get_exception_traceback()
-            pass
-
-    if not success:
-        if pipe_finish_writer is not None:
-            pipe_finish_writer.send(last_traceback)
-        logger.error(f"Initialization failed. warmup error: {last_traceback}")
-        kill_process_tree(os.getpid())
-        return
-
-    model_info = res.json()
-
-    # Send a warmup request
-    request_name = "/generate" if model_info["is_generation"] else "/encode"
-    max_new_tokens = 8 if model_info["is_generation"] else 1
-    json_data = {
-        "sampling_params": {
-            "temperature": 0,
-            "max_new_tokens": max_new_tokens,
-        },
-    }
-    if server_args.skip_tokenizer_init:
-        json_data["input_ids"] = [10, 11, 12]
-    else:
-        json_data["text"] = "The capital city of France is"
-
-    # Debug dumping
-    if server_args.debug_tensor_dump_input_file:
-        json_data.pop("text", None)
-        json_data["input_ids"] = np.load(
-            server_args.debug_tensor_dump_input_file
-        ).tolist()
-        json_data["sampling_params"]["max_new_tokens"] = 0
-
-    try:
-        for i in range(server_args.dp_size):
-            res = requests.post(
-                url + request_name,
-                json=json_data,
-                headers=headers,
-                timeout=600,
-            )
-            assert res.status_code == 200, f"{res}"
-    except Exception:
-        last_traceback = get_exception_traceback()
-        if pipe_finish_writer is not None:
-            pipe_finish_writer.send(last_traceback)
-        logger.error(f"Initialization failed. warmup error: {last_traceback}")
-        kill_process_tree(os.getpid())
-        return
+            if pipe_finish_writer is not None:
+                pipe_finish_writer.send(last_traceback)
+            logger.error(
+                f"Initialization failed. warmup error: {last_traceback}")
+            kill_process_tree(os.getpid())
+            return
 
     # Debug print
     # logger.info(f"{res.json()=}")

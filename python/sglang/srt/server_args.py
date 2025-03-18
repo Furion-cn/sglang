@@ -19,6 +19,7 @@ import logging
 import random
 import tempfile
 from typing import List, Optional
+from pydantic import BaseModel
 
 from sglang.srt.hf_transformers_utils import check_gguf_file
 from sglang.srt.reasoning_parser import ReasoningParser
@@ -38,6 +39,19 @@ from sglang.srt.utils import (
 
 logger = logging.getLogger(__name__)
 
+class KVTransferConfig(BaseModel):
+    role: str = "prefill" # "prefill" or "decode"
+    
+    decode_dist_init_host: str = None
+    prefill_dist_init_host: str = None
+
+    transfer_engine_metadata_server: str = None
+    transfer_engine_rdma_device: str = "mlx5_0"
+
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "KVTransferConfig":
+        """Parse the CLI value for the kv cache transfer config."""
+        return KVTransferConfig.model_validate_json(cli_value)
 
 @dataclasses.dataclass
 class ServerArgs:
@@ -179,6 +193,9 @@ class ServerArgs:
     flashinfer_mla_disable_ragged: bool = False
     warmups: Optional[str] = None
 
+    # KV cache transfer
+    kv_transfer_config: Optional[KVTransferConfig] = None
+
     # Debug tensor dumps
     debug_tensor_dump_output_folder: Optional[str] = None
     debug_tensor_dump_input_file: Optional[str] = None
@@ -311,6 +328,14 @@ class ServerArgs:
         # AMD-specific Triton attention KV splits default number
         if is_hip():
             self.triton_attention_num_kv_splits = 16
+
+        # kv transfer config
+        if self.kv_transfer_config is not None:
+            if self.kv_transfer_config.role == "prefill":
+                assert self.kv_transfer_config.decode_dist_init_host is not None, 'Please provide "decode_dist_init_host" in kv transfer config'
+            else:
+                assert self.kv_transfer_config.prefill_dist_init_host is not None, 'Please provide "prefill_dist_init_host" in kv transfer config'
+            assert self.kv_transfer_config.transfer_engine_metadata_server is not None, 'Please provide "transfer_engine_metadata_server" in kv transfer config'
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -1024,6 +1049,13 @@ class ServerArgs:
             help="Specify custom warmup functions (csv) to run before server starts eg. --warmups=warmup_name1,warmup_name2 "
             "will run the functions `warmup_name1` and `warmup_name2` specified in warmup.py before the server starts listening for requests",
         )
+
+        # KV cache transfer
+        parser.add_argument('--kv-transfer-config',
+                            type=KVTransferConfig.from_cli,
+                            default=None,
+                            help='The configurations for distributed KV cache '
+                            'transfer. Should be a JSON string.')
 
         # Debug tensor dumps
         parser.add_argument(

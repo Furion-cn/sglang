@@ -634,6 +634,7 @@ def decode_attention_fwd(
     sm_scale,
     logit_cap=0.0,
 ):
+    # print(f"decode_attention_fwd q: {q.shape}, k_buffer: {k_buffer.shape}, v_buffer: {v_buffer.shape}, o: {o.shape}, kv_indptr: {kv_indptr.shape}, kv_indices: {kv_indices.shape}, attn_logits: {attn_logits.shape}, num_kv_splits: {num_kv_splits}, sm_scale: {sm_scale}, logit_cap: {logit_cap}")
     assert num_kv_splits == attn_logits.shape[2]
     assert q.shape[0] <= kv_indptr.shape[0] - 1
     assert q.shape[0] <= attn_logits.shape[0]
