@@ -104,6 +104,7 @@ class ModelRunner:
         token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
     ):
         # Parse args
+        self.cell_size = 0
         self.model_config = model_config
         self.mem_fraction_static = mem_fraction_static
         self.device = server_args.device
@@ -644,11 +645,15 @@ class ModelRunner:
                 * 2
                 * torch._utils._element_size(self.kv_cache_dtype)
             )
+        self.cell_size = cell_size
         rest_memory = available_gpu_memory - total_gpu_memory * (
             1 - self.mem_fraction_static
         )
         max_num_token = int(rest_memory * (1 << 30) // cell_size)
         return max_num_token
+
+    def get_cell_size(self):
+        return self.cell_size
 
     def init_memory_pool(
         self,
