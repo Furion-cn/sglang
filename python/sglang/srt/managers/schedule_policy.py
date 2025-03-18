@@ -357,7 +357,6 @@ class PrefillAdder:
         req.extend_input_len = min(req.extend_input_len, self.rem_chunk_tokens)
         req.fill_ids = req.fill_ids[: len(req.prefix_indices) + req.extend_input_len]
         
-        # 尝试分配内存，直接调用 allocate 函数
         if self.host_memory_manager is not None:
             if not self.host_memory_manager.allocate(req.rid, req.extend_input_len):
                 return req if truncated else None
@@ -525,9 +524,7 @@ class PrefillAdder:
                 req.extend_input_len = trunc_len
                 req.fill_ids = req.fill_ids[: len(req.prefix_indices) + trunc_len]
     
-                # 尝试分配内存
                 if self.host_memory_manager is not None:
-                    # 分块请求只分配当前块需要的token数量
                     if not self.host_memory_manager.allocate(req.rid, trunc_len):
                         return AddReqResult.NO_TOKEN
     
