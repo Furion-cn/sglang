@@ -33,6 +33,7 @@ import setproctitle
 import torch
 import zmq
 from torch.distributed import barrier
+import nvtx
 
 from sglang.global_config import global_config
 from sglang.srt.configs.model_config import ModelConfig
@@ -531,7 +532,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
-
+    
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -541,6 +542,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
 
             if batch:
                 result = self.run_batch(batch)
+                
                 self.result_queue.append((batch.copy(), result))
 
                 if self.last_batch is None:
@@ -1221,7 +1223,13 @@ class Scheduler(SchedulerOutputProcessorMixin):
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
+            
+            nvtx.push_range("get_kv_buffer" + req.rid, color="red")
+            
             flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            
+            nvtx.pop_range()
+            
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):

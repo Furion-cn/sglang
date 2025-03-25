@@ -6,6 +6,8 @@ import logging
 import socket
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
+import nvtx
+import os
 
 from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck
 from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_PORT
@@ -131,7 +133,13 @@ class KVTransferAgent:
         )
 
         tp_size_per_node = server_args.tp_size // server_args.nnodes
-        self.addr = f"{socket.gethostname()}:{KV_TRANSFER_AGENT_PORT+self.tp_rank % tp_size_per_node}"
+        if self.role == "prefill":
+            addr = os.getenv('VC_MASTER_HOSTS')
+        else:
+            hostname = os.getenv('HOSTNAME')
+            job_id = os.getenv('JOB_ID')
+            addr = f'{hostname}.{job_id}'
+        self.addr = f"{addr}:{KV_TRANSFER_AGENT_PORT+self.tp_rank % tp_size_per_node}"
 
         if server_args.nnodes == 1 and server_args.dist_init_addr is None:
             dist_init_host = "127.0.0.1"
@@ -193,7 +201,9 @@ class KVTransferAgent:
             # free buffer
             self._free_transfer_kv_buffer(dst_ptr, req.kv_cache_length)
             # load to device
+            nvtx.push_range("load kv_cache" + req.rid, color="blue")
             loaded_tensor = safetensors_load(kv_cache)["tensor"]
+            nvtx.pop_range()
         else:
             loaded_tensor = None
         if self.attn_tp_size > 1:
