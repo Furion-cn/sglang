@@ -532,16 +532,35 @@ class Scheduler(SchedulerOutputProcessorMixin):
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
-    
+        enable_profiler = False
+        has_request = False
+        if self.server_args.kv_transfer_config.role == "decode":
+            print(f"************************** start profiler ***********************")
+            torch.cuda.cudart().cudaProfilerStart()
+            torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
+            torch.cuda.nvtx.range_push("event loop begin")
+            enable_profiler = True
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            
+            if not batch and len(self.waiting_queue) == 0 and has_request and enable_profiler:
+                print(f"************************** finish profiler ***********************")
+                torch.cuda.cudart().cudaProfilerStop()
 
             if batch:
+                if len(batch.reqs) > 1:
+                    has_request = True
+                
+                if enable_profiler:
+                    torch.cuda.nvtx.range_push("run_batch" + str(len(batch.reqs)))
                 result = self.run_batch(batch)
+                
+                if enable_profiler:
+                    torch.cuda.nvtx.range_pop()
                 
                 self.result_queue.append((batch.copy(), result))
 
@@ -1224,16 +1243,16 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 pt += new_batch.extend_lens[i]
                 continue
             
-            nvtx.push_range("get_kv_buffer" + req.rid, color="red")
+            torch.cuda.nvtx.range_push('get kv_cache' + req.rid)
             
             flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
             
-            nvtx.pop_range()
+            torch.cuda.nvtx.range_pop()
             
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
-                print(f"{self.tp_rank} recover_new_prefilled_batch layer_kv_buffer: {layer_kv_buffer.shape} {layer_kv_buffer.device}")
+                #print(f"{self.tp_rank} recover_new_prefilled_batch layer_kv_buffer: {layer_kv_buffer.shape} {layer_kv_buffer.device}")
                 kv_cache_pool.set_kv_buffer(
                     RadixAttention(layer_id=layer_id, num_heads=0, head_dim=0, scaling=0.0, num_kv_heads=0),
                     new_batch.out_cache_loc[pt : pt + new_batch.extend_lens[i]],
