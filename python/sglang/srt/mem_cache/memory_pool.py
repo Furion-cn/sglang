@@ -834,7 +834,7 @@ class MLATokenToKVPoolHost(HostKVCache):
 
 class MemoryLimitMethod(Enum):
     """Memory Limit method."""
-    RADIO_OF_MEMORY = auto()
+    RATIO_OF_MEMORY = auto()
     BYTES_OF_MEMORY = auto()
 
     @classmethod
@@ -851,8 +851,8 @@ class HostMemoryManager():
 
     def __init__(
         self,
-        limit_method: MemoryLimitMethod,
-        limit_value: float,  # 如果是 radio，则为 0-1 之间的值；如果是 bytes，则为字节数
+        limit_method: str,
+        limit_value: float,  # 如果是 ratio，则为 0-1 之间的值；如果是 bytes，则为字节数
         reserve_memory_bytes: int = 10 * 1024 * 1024 * 1024,  # 默认保留 10GB 内存
         enable_manager: bool = True,  # 是否启用内存管理
         memory_monitor_interval: int = 10,  # 监控内存的间隔，默认 10 秒
@@ -864,12 +864,12 @@ class HostMemoryManager():
         self.pre_allocate = pre_allocate
 
         if self.enable_manager:
-            if not isinstance(limit_method, MemoryLimitMethod):
-                raise TypeError(f"limit_method must be an instance of MemoryLimitMethod, got {type(limit_method)}")
-            if limit_method == MemoryLimitMethod.RADIO_OF_MEMORY:
+            self.limit_method = MemoryLimitMethod.from_str(limit_method)
+
+            if limit_method == MemoryLimitMethod.RATIO_OF_MEMORY:
                 if not 0 < limit_value <= 1:
                     raise ValueError(
-                        f"When using RADIO_OF_MEMORY, limit_value must be between 0 and 1, got {limit_value}")
+                        f"When using RATIO_OF_MEMORY, limit_value must be between 0 and 1, got {limit_value}")
             elif limit_method == MemoryLimitMethod.BYTES_OF_MEMORY:
                 if limit_value <= 0:
                     raise ValueError(f"When using BYTES_OF_MEMORY, limit_value must be positive, got {limit_value}")
@@ -901,7 +901,7 @@ class HostMemoryManager():
         total_memory = mem_info.total
         available_memory = mem_info.available
 
-        if self.limit_method == MemoryLimitMethod.RADIO_OF_MEMORY:
+        if self.limit_method == MemoryLimitMethod.RATIO_OF_MEMORY:
             # 使用总内存的比例，但不超过当前可用内存。
             # 同时保留一部分内存保证稳定性
             calculated_memory = int(total_memory * self.limit_value)

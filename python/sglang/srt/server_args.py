@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 class KVTransferConfig(BaseModel):
     role: str = "prefill" # "prefill" or "decode"
-    
+
     decode_dist_init_host: str = None
     prefill_dist_init_host: str = None
 
@@ -88,6 +88,14 @@ class ServerArgs:
     schedule_conservativeness: float = 1.0
     cpu_offload_gb: int = 0
     page_size: int = 1
+
+    # Host memory manager
+    limit_method: str = "ratio_of_memory"
+    limit_value: float = 0.75
+    reserve_memory_bytes: int = 10 * 1024 * 1024 * 1024
+    enable_manager: bool = True
+    memory_monitor_interval: int = 10
+    pre_allocate: bool = True
 
     # Other runtime options
     tp_size: int = 1

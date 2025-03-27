@@ -1146,6 +1146,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.tree_cache,
             self.token_to_kv_pool_allocator,
             self.running_batch,
+            self.host_memory_manager,
             self.new_token_ratio,
             self.max_prefill_tokens,
             None,
