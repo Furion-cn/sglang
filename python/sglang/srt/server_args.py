@@ -1084,12 +1084,6 @@ class ServerArgs:
             default=ServerArgs.debug_tensor_dump_inject,
             help="Inject the outputs from jax as the input of every layer.",
         )
-        parser.add_argument(
-            "--page-size",
-            type=int,
-            default=ServerArgs.page_size,
-            help="The number of tokens in a page.",
-        )
 
         # Host memory manager
         parser.add_argument(
