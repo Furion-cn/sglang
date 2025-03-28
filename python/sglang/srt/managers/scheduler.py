@@ -650,6 +650,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             print(f"process_input_requests recv_req: {recv_req}")
 
             output = self._request_dispatcher(recv_req)
+
             if output is not None:
                 if isinstance(output, RpcReqOutput):
                     if self.recv_from_rpc is not None:

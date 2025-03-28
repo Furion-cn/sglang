@@ -860,7 +860,7 @@ class HostMemoryManager():
         cell_size: int = 0,  # 每个 token 占用的大小，默认 0
     ):
         self.enable_manager = enable_manager
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.pre_allocate = pre_allocate
 
         if self.enable_manager:
@@ -916,34 +916,25 @@ class HostMemoryManager():
                      f"limit={self.available_memory_bytes}")
 
     def can_allocate(self, tokens_num: int) -> bool:
-        """check if we can allocate the memory
-
-        Args:
-            tokens_num: input tokens num
-
-        Returns:
-            bool: True if we can allocate the memory, False otherwise
-        """
+        """check if we can allocate the memory"""
         if not self.enable_manager:
             return True
 
-        with self._lock:
-            current_free_memory = psutil.virtual_memory().available
+        # 移除 with self._lock 语句
+        current_free_memory = psutil.virtual_memory().available
+        remaining_limit = self.available_memory_bytes - self.total_allocated_memory
+        tokens_size = tokens_num * self.cell_size
 
-            remaining_limit = self.available_memory_bytes - self.total_allocated_memory
+        can_alloc = (tokens_size <= remaining_limit) and (
+            tokens_size <= current_free_memory - self.reserve_memory_bytes)
 
-            tokens_size = tokens_num * self.cell_size
+        if not can_alloc:
+            logger.warning(f"can not allocate {tokens_size} bytes memory..."
+                           f"remaining limit: {remaining_limit}, "
+                           f"current free memory: {current_free_memory}, "
+                           f"total allocated memory: {self.total_allocated_memory}")
 
-            can_alloc = (tokens_size <= remaining_limit) and (
-                tokens_size <= current_free_memory - self.reserve_memory_bytes)
-
-            if not can_alloc:
-                logger.warning(f"can not allocate {tokens_size} bytes memory。"
-                               f"remaining limit: {remaining_limit}, "
-                               f"current free memory: {current_free_memory}, "
-                               f"total allocated memory: {self.total_allocated_memory}")
-
-            return can_alloc
+        return can_alloc
 
     def allocate(self, rid: str, tokens_num: int) -> bool:
         """try to allocate the memory for a request
