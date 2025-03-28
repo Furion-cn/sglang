@@ -61,6 +61,7 @@ class TpModelWorkerClient:
     ):
         # Load the model
         self.worker = TpModelWorker(server_args, gpu_id, tp_rank, dp_rank, nccl_port)
+        self.cell_size = self.worker.get_cell_size()
         self.max_running_requests = self.worker.max_running_requests
         self.device = self.worker.device
         self.gpu_id = gpu_id
@@ -84,6 +85,9 @@ class TpModelWorkerClient:
         self.scheduler_stream = torch.get_device_module(self.device).current_stream()
         if self.device == "cpu":
             self.scheduler_stream.synchronize = lambda: None  # No-op for CPU
+
+    def get_cell_size(self):
+        return self.cell_size
 
     def get_worker_info(self):
         return self.worker.get_worker_info()

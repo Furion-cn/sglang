@@ -17,6 +17,7 @@ from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import save as safetensors_save
 from sglang.srt.utils import get_zmq_socket
+from sglang.srt.mem_cache.memory_pool import HostMemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,14 @@ KV_TRANSFER_AGENT_PORT = 18000
 
 class KVTransferAgent:
     def __init__(self,
-                 server_args: ServerArgs,
-                 req_to_token_pool: ReqToTokenPool = None,
-                 token_to_kv_pool_allocator: TokenToKVPoolAllocator = None,
-                 layer_num: int = 0,
-                 tp_rank: int = 0,
-                 attn_tp_cpu_group: torch.distributed.ProcessGroup = None,
-                 device: str = "cpu"):
+             server_args: ServerArgs,
+             host_memory_manager: HostMemoryManager,
+             req_to_token_pool: ReqToTokenPool = None,
+             token_to_kv_pool_allocator: TokenToKVPoolAllocator = None,
+             layer_num: int = 0,
+             tp_rank: int = 0,
+             attn_tp_cpu_group: torch.distributed.ProcessGroup = None,
+             device: str = "cpu"):
         self.kv_buffer = {}
         self.layer_num = layer_num
         self.tp_rank = tp_rank
@@ -154,6 +156,7 @@ class KVTransferAgent:
         self.device = device
         self.engine = TransferEngine(
             self.addr, server_args.kv_transfer_config.transfer_engine_metadata_server, server_args.kv_transfer_config.transfer_engine_rdma_device)
+        self.host_memory_manager = host_memory_manager
 
     def set_kv_buffer(self, req: Req) -> int:
         if self.attn_tp_rank != 0:
@@ -167,8 +170,25 @@ class KVTransferAgent:
              for i in range(self.layer_num)]
         )
         kv_cache = safetensors_save({"tensor": flatten.to(self.device)})
-        self.kv_buffer[req.rid] = kv_cache
+        self.host_memory_manager.store_data(req.rid, kv_cache, 0)
         return len(kv_cache)
+
+    # when prefill node receive kv transfer request
+    def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
+        kv_cache = self.host_memory_manager.retrieve_data(req.rid)
+        if kv_cache is None:
+            logger.error(f"Failed to retrieve KV cache for request {req.rid} from host memory")
+            self.send_to_pd_disagg_controller.send_pyobj(KVTransferAck(req.rid, req.dst_addr, 1))
+            return
+
+        kv_cache_length = len(kv_cache)
+        src_ptr = self._allocate_transfer_kv_buffer(kv_cache_length)
+        self._write_bytes_to_buffer(src_ptr, kv_cache, kv_cache_length)
+        op_write = 1
+        self.engine.transfer_sync(req.dst_addr, src_ptr, req.dst_ptr, kv_cache_length, op_write)
+        self.send_to_pd_disagg_controller.send_pyobj(KVTransferAck(req.rid, req.dst_addr, 0))
+        self._free_transfer_kv_buffer(src_ptr, kv_cache_length)
+        self.host_memory_manager.free(req.rid)
 
     def get_kv_buffer(self, req: Req) -> torch.Tensor:
         if self.attn_tp_rank == 0:
@@ -240,6 +260,7 @@ class KVTransferAgent:
         self._free_transfer_kv_buffer(src_ptr, kv_cache_length)
         del self.kv_buffer[req.rid]
 
+
     def _allocate_transfer_kv_buffer(self, length: int) -> int:
         return self.engine.allocate_managed_buffer(length)
 
@@ -261,3 +282,7 @@ class KVTransferAgent:
                 self._handle_kv_transfer_fetch(recv_obj)
             else:
                 raise ValueError(f"Unknown message type: {type(recv_obj)}")
+
+    def free_kv_buffer(self, req_id: str):
+        if self.host_memory_manager is not None:
+            self.host_memory_manager.free(req_id)

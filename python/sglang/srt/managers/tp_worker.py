@@ -52,6 +52,7 @@ class TpModelWorker:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
+        cell_size: int = 0,
     ):
         # Parse args
         self.tp_rank = tp_rank
@@ -83,6 +84,7 @@ class TpModelWorker:
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
+        self.cell_size = self.model_runner.get_cell_size()
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None
         else:
@@ -131,6 +133,9 @@ class TpModelWorker:
             self.model_runner.tp_group.cpu_group,
         )[0]
         set_random_seed(self.random_seed)
+    
+    def get_cell_size(self):
+        return self.cell_size
 
     def get_worker_info(self):
         return (

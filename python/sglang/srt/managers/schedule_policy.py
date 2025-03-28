@@ -30,6 +30,7 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.memory_pool import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.radix_cache import RadixCache, TreeNode
+from sglang.srt.mem_cache.memory_pool import HostMemoryManager
 
 # Clip the estimation of max_new_tokens for the request whose max_new_tokens is very large.
 # This can prevent the server from being too conservative.
@@ -275,6 +276,7 @@ class PrefillAdder:
         tree_cache: BasePrefixCache,
         token_to_kv_pool_allocator: TokenToKVPoolAllocator,
         running_batch: ScheduleBatch,
+        host_memory_manager: HostMemoryManager,
         new_token_ratio: float,
         rem_input_tokens: int,
         rem_chunk_tokens: Optional[int],
@@ -283,6 +285,7 @@ class PrefillAdder:
         self.tree_cache = tree_cache
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.running_batch = running_batch
+        self.host_memory_manager = host_memory_manager
         self.new_token_ratio = new_token_ratio
         self.rem_input_tokens = rem_input_tokens - mixed_with_decode_tokens
         self.rem_chunk_tokens = rem_chunk_tokens
@@ -353,6 +356,11 @@ class PrefillAdder:
         truncated = req.extend_input_len > self.rem_chunk_tokens
         req.extend_input_len = min(req.extend_input_len, self.rem_chunk_tokens)
         req.fill_ids = req.fill_ids[: len(req.prefix_indices) + req.extend_input_len]
+
+        if self.host_memory_manager is not None:
+            if not self.host_memory_manager.allocate(req.rid, req.extend_input_len):
+                return req if truncated else None
+
         self.can_run_list.append(req)
         self._prefill_one_req(
             0,
@@ -424,7 +432,13 @@ class PrefillAdder:
             self.rem_chunk_tokens is None  # chunked prefill is disabled
             or req.extend_input_len <= self.rem_chunk_tokens  # it is the last chunk
         ):
-            # Non-chunked prefill
+            if self.host_memory_manager is not None:
+                total_tokens = req.extend_input_len + min(
+                    req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS_ESTIMATION
+                )
+                if not self.host_memory_manager.allocate(req.rid, total_tokens):
+                    return AddReqResult.NO_TOKEN
+
             self.can_run_list.append(req)
             self._prefill_one_req(
                 0,
@@ -440,6 +454,11 @@ class PrefillAdder:
 
             req.extend_input_len = trunc_len
             req.fill_ids = req.fill_ids[:trunc_len]
+
+            if self.host_memory_manager is not None:
+                if not self.host_memory_manager.allocate(req.rid, trunc_len):
+                    return AddReqResult.NO_TOKEN
+
             self.can_run_list.append(req)
             self.new_chunked_req = req
             self._prefill_one_req(0, trunc_len, 0)
@@ -481,7 +500,10 @@ class PrefillAdder:
                 prefix_len = len(req.prefix_indices)
 
             if self.rem_chunk_tokens is None or input_tokens <= self.rem_chunk_tokens:
-                # Non-chunked prefill
+                if self.host_memory_manager is not None:
+                    if not self.host_memory_manager.allocate(req.rid, total_tokens):
+                        return AddReqResult.NO_TOKEN
+
                 self.can_run_list.append(req)
                 self.tree_cache.inc_lock_ref(req.last_node)
                 self._prefill_one_req(
@@ -501,6 +523,10 @@ class PrefillAdder:
 
                 req.extend_input_len = trunc_len
                 req.fill_ids = req.fill_ids[: len(req.prefix_indices) + trunc_len]
+
+                if self.host_memory_manager is not None:
+                    if not self.host_memory_manager.allocate(req.rid, trunc_len):
+                        return AddReqResult.NO_TOKEN
 
                 self.can_run_list.append(req)
                 self.new_chunked_req = req

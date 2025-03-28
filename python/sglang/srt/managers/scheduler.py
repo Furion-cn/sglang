@@ -95,6 +95,7 @@ from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_P
 from sglang.srt.managers.session_controller import Session
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
+from sglang.srt.mem_cache.memory_pool import HostMemoryManager
 from sglang.srt.managers.utils import validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
@@ -180,7 +181,6 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 self.dp_size,
             )
         )
-
         # Init inter-process communication
         context = zmq.Context(2)
         if self.attn_tp_rank == 0:
@@ -235,6 +235,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             dp_rank=dp_rank,
             nccl_port=port_args.nccl_port,
         )
+        self.cell_size = self.tp_worker.get_cell_size()
 
         # Launch a draft worker for speculative decoding
         if self.spec_algorithm.is_eagle():
@@ -250,6 +251,17 @@ class Scheduler(SchedulerOutputProcessorMixin):
             )
         else:
             self.draft_worker = None
+
+        # Launch host memory manager
+        self.host_memory_manager = HostMemoryManager(
+            server_args.limit_method,
+            server_args.limit_value,
+            server_args.reserve_memory_bytes,
+            server_args.enable_manager,
+            server_args.memory_monitor_interval,
+            server_args.pre_allocate,
+            self.cell_size,
+        )
 
         # Get token and memory info from the model worker
         (
@@ -357,6 +369,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             # Init kv transfer agent
             self.kv_transfer_agent = KVTransferAgent(
                 server_args,
+                self.host_memory_manager,
                 self.req_to_token_pool,
                 self.token_to_kv_pool_allocator,
                 self.model_config.num_hidden_layers,
@@ -637,6 +650,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             print(f"process_input_requests recv_req: {recv_req}")
 
             output = self._request_dispatcher(recv_req)
+
             if output is not None:
                 if isinstance(output, RpcReqOutput):
                     if self.recv_from_rpc is not None:
@@ -903,7 +917,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.cache_hit_rate = cache_hit_rate
             self.metrics_collector.log_stats(self.stats)
-    
+
     def log_recover_stats(
         self,
         adder: PrefillAdder,
@@ -1053,7 +1067,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
                 self.running_batch = self.last_batch
-            
+
             if self.server_args.kv_transfer_config.role == "decode":
                 ret = self.recover_new_prefilled_batch()
                 if not self.running_batch.is_empty():
@@ -1067,12 +1081,12 @@ class Scheduler(SchedulerOutputProcessorMixin):
                     ret = None
             else:
                 ret = self.get_new_batch_prefill()
-            
+
             if self.server_args.enable_dp_attention:
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
-        
+
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1115,13 +1129,13 @@ class Scheduler(SchedulerOutputProcessorMixin):
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
-    
+
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
             return None
-        
+
         running_bs = len(self.running_batch.reqs) if self.running_batch else 0
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
@@ -1133,6 +1147,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.tree_cache,
             self.token_to_kv_pool_allocator,
             self.running_batch,
+            self.host_memory_manager,
             self.new_token_ratio,
             self.max_prefill_tokens,
             None,
@@ -1265,6 +1280,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.tree_cache,
             self.token_to_kv_pool_allocator,
             self.running_batch,
+            self.host_memory_manager,
             self.new_token_ratio,
             self.max_prefill_tokens,
             self.chunked_prefill_size,

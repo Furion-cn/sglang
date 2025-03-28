@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 class KVTransferConfig(BaseModel):
     role: str = "prefill" # "prefill" or "decode"
-    
+
     decode_dist_init_host: str = None
     prefill_dist_init_host: str = None
 
@@ -88,6 +88,14 @@ class ServerArgs:
     schedule_conservativeness: float = 1.0
     cpu_offload_gb: int = 0
     page_size: int = 1
+
+    # Host memory manager
+    limit_method: str = "ratio_of_memory"
+    limit_value: float = 0.75
+    reserve_memory_bytes: int = 10 * 1024 * 1024 * 1024
+    enable_manager: bool = True
+    memory_monitor_interval: int = 10
+    pre_allocate: bool = True
 
     # Other runtime options
     tp_size: int = 1
@@ -1075,6 +1083,45 @@ class ServerArgs:
             type=str,
             default=ServerArgs.debug_tensor_dump_inject,
             help="Inject the outputs from jax as the input of every layer.",
+        )
+
+        # Host memory manager
+        parser.add_argument(
+            "--limit-method",
+            type=str,
+            default=ServerArgs.limit_method,
+            choices=["ratio_of_memory", "absolute"],
+            help="The method to limit host memory usage. 'ratio_of_memory' uses a fraction of total memory, 'absolute' uses a fixed size.",
+        )
+        parser.add_argument(
+            "--limit-value",
+            type=float,
+            default=ServerArgs.limit_value,
+            help="The value for the limit method. For 'ratio_of_memory', this is a fraction (0-1). For 'absolute', this is the size in bytes.",
+        )
+        parser.add_argument(
+            "--reserve-memory-bytes",
+            type=int,
+            default=ServerArgs.reserve_memory_bytes,
+            help="The amount of memory in bytes to reserve for the system.",
+        )
+        parser.add_argument(
+            "--enable-manager",
+            action="store_true",
+            default=ServerArgs.enable_manager,
+            help="Whether to enable the host memory manager.",
+        )
+        parser.add_argument(
+            "--memory-monitor-interval",
+            type=int,
+            default=ServerArgs.memory_monitor_interval,
+            help="The interval in seconds for monitoring memory usage.",
+        )
+        parser.add_argument(
+            "--pre-allocate",
+            action="store_true",
+            default=ServerArgs.pre_allocate,
+            help="Whether to pre-allocate memory for the host memory manager.",
         )
 
     @classmethod
