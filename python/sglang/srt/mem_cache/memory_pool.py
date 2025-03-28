@@ -983,7 +983,7 @@ class HostMemoryManager():
             self.allocated_memory[rid] = tokens_size
             self.total_allocated_memory += tokens_size
 
-            logger.debug(f"for {rid} allocated {tokens_size} bytes memory, "
+            logger.info(f"for {rid} allocated {tokens_size} bytes memory, "
                          f"total allocated memory: {self.total_allocated_memory}")
 
             return True
@@ -1016,7 +1016,7 @@ class HostMemoryManager():
             if rid in self._data_offsets:
                 del self._data_offsets[rid]
 
-            logger.debug(f"free {rid}'s {freed_bytes} bytes memory, "
+            logger.info(f"free {rid}'s {freed_bytes} bytes memory, "
                          f"total allocated memory: {self.total_allocated_memory}")
 
             return freed_bytes
@@ -1067,7 +1067,7 @@ class HostMemoryManager():
                 memory_block[offset:offset + data_size] = np.frombuffer(data, dtype=np.uint8)
                 # 记录数据的偏移量和大小
                 self._data_offsets[rid] = (offset, data_size)
-                logger.debug(f"success {data_size} bytes data store to {rid} memory block at offset {offset}")
+                logger.info(f"success {data_size} bytes data store to {rid} memory block at offset {offset}")
                 return True
             except Exception as e:
                 logger.error(f"store data got error: {e}")
@@ -1117,7 +1117,7 @@ class HostMemoryManager():
             # 从内存块中检索数据
             try:
                 data = bytes(memory_block[offset:offset + size])
-                logger.debug(f"successfully retrieved {size} bytes data from {rid} memory block at offset {offset}")
+                logger.info(f"successfully retrieved {size} bytes data from {rid} memory block at offset {offset}")
                 return data
             except Exception as e:
                 logger.error(f"error retrieving data: {e}")
