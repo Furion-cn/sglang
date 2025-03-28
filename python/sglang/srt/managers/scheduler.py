@@ -254,7 +254,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
 
         # Launch host memory manager
         self.host_memory_manager = HostMemoryManager(
-            server_args.limit_mode,
+            server_args.limit_method,
             server_args.limit_value,
             server_args.reserve_memory_bytes,
             server_args.enable_manager,
