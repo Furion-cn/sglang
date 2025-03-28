@@ -913,7 +913,7 @@ class HostMemoryManager():
 
         self.available_memory_bytes = max(0, self.available_memory_bytes)
 
-        logger.info(f"Memory limit calculated: total={total_memory}, available={available_memory}, "
+        logger.info(f"Memory limit calculated: total={total_memory}, available={available_memory}, reserve={self.reserve_memory_bytes},"
                      f"limit={self.available_memory_bytes}")
 
     def can_allocate(self, tokens_num: int) -> bool:
@@ -1155,7 +1155,7 @@ class HostMemoryManager():
 
         monitor_thread = threading.Thread(target=_monitor_task, daemon=True)
         monitor_thread.start()
-        logger.info(f"memory monitor started, refresh interval: {interval_seconds}秒")
+        logger.info(f"Memory monitor started, refresh interval: {interval_seconds}s")
 
         self._monitor_thread = monitor_thread
 
