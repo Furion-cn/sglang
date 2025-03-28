@@ -1279,7 +1279,7 @@ class Scheduler(
                 ret = self.running_batch if not self.running_batch.is_empty() else None
 
         # Handle DP attention
-        if self.server_args.enable_dp_attention:
+        if self.server_args.enable_dp_attention or self.server_args.enable_sp_layernorm:
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
