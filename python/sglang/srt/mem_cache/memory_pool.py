@@ -878,7 +878,6 @@ class HostMemoryManager():
             if reserve_memory_bytes < 0:
                 raise ValueError(f"reserve_memory_bytes must be positive, got {reserve_memory_bytes}")
 
-            self.limit_method = limit_method
             self.limit_value = limit_value
             self.reserve_memory_bytes = reserve_memory_bytes
             self.cell_size = cell_size
