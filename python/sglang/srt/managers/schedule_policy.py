@@ -356,11 +356,11 @@ class PrefillAdder:
         truncated = req.extend_input_len > self.rem_chunk_tokens
         req.extend_input_len = min(req.extend_input_len, self.rem_chunk_tokens)
         req.fill_ids = req.fill_ids[: len(req.prefix_indices) + req.extend_input_len]
-        
+
         if self.host_memory_manager is not None:
             if not self.host_memory_manager.allocate(req.rid, req.extend_input_len):
                 return req if truncated else None
-        
+
         self.can_run_list.append(req)
         self._prefill_one_req(
             0,
@@ -438,7 +438,7 @@ class PrefillAdder:
                 )
                 if not self.host_memory_manager.allocate(req.rid, total_tokens):
                     return AddReqResult.NO_TOKEN
-            
+
             self.can_run_list.append(req)
             self._prefill_one_req(
                 0,
@@ -454,11 +454,11 @@ class PrefillAdder:
 
             req.extend_input_len = trunc_len
             req.fill_ids = req.fill_ids[:trunc_len]
-            
+
             if self.host_memory_manager is not None:
                 if not self.host_memory_manager.allocate(req.rid, trunc_len):
                     return AddReqResult.NO_TOKEN
-            
+
             self.can_run_list.append(req)
             self.new_chunked_req = req
             self._prefill_one_req(0, trunc_len, 0)
@@ -501,9 +501,9 @@ class PrefillAdder:
 
             if self.rem_chunk_tokens is None or input_tokens <= self.rem_chunk_tokens:
                 if self.host_memory_manager is not None:
-                    if not self.host_memory_manager.allocate(req.rid, total_tokens_needed):
+                    if not self.host_memory_manager.allocate(req.rid, total_tokens):
                         return AddReqResult.NO_TOKEN
-                    
+
                 self.can_run_list.append(req)
                 self.tree_cache.inc_lock_ref(req.last_node)
                 self._prefill_one_req(
@@ -523,11 +523,11 @@ class PrefillAdder:
 
                 req.extend_input_len = trunc_len
                 req.fill_ids = req.fill_ids[: len(req.prefix_indices) + trunc_len]
-    
+
                 if self.host_memory_manager is not None:
                     if not self.host_memory_manager.allocate(req.rid, trunc_len):
                         return AddReqResult.NO_TOKEN
-    
+
                 self.can_run_list.append(req)
                 self.new_chunked_req = req
                 self.tree_cache.inc_lock_ref(req.last_node)
