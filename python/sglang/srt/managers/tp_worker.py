@@ -133,6 +133,9 @@ class TpModelWorker:
             self.model_runner.tp_group.cpu_group,
         )[0]
         set_random_seed(self.random_seed)
+    
+    def get_cell_size(self):
+        return self.cell_size
 
     def get_worker_info(self):
         return (
