@@ -1084,6 +1084,51 @@ class ServerArgs:
             default=ServerArgs.debug_tensor_dump_inject,
             help="Inject the outputs from jax as the input of every layer.",
         )
+        parser.add_argument(
+            "--page-size",
+            type=int,
+            default=ServerArgs.page_size,
+            help="The number of tokens in a page.",
+        )
+
+        # Host memory manager
+        parser.add_argument(
+            "--limit-method",
+            type=str,
+            default=ServerArgs.limit_method,
+            choices=["ratio_of_memory", "absolute"],
+            help="The method to limit host memory usage. 'ratio_of_memory' uses a fraction of total memory, 'absolute' uses a fixed size.",
+        )
+        parser.add_argument(
+            "--limit-value",
+            type=float,
+            default=ServerArgs.limit_value,
+            help="The value for the limit method. For 'ratio_of_memory', this is a fraction (0-1). For 'absolute', this is the size in bytes.",
+        )
+        parser.add_argument(
+            "--reserve-memory-bytes",
+            type=int,
+            default=ServerArgs.reserve_memory_bytes,
+            help="The amount of memory in bytes to reserve for the system.",
+        )
+        parser.add_argument(
+            "--enable-manager",
+            action="store_true",
+            default=ServerArgs.enable_manager,
+            help="Whether to enable the host memory manager.",
+        )
+        parser.add_argument(
+            "--memory-monitor-interval",
+            type=int,
+            default=ServerArgs.memory_monitor_interval,
+            help="The interval in seconds for monitoring memory usage.",
+        )
+        parser.add_argument(
+            "--pre-allocate",
+            action="store_true",
+            default=ServerArgs.pre_allocate,
+            help="Whether to pre-allocate memory for the host memory manager.",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
