@@ -913,7 +913,7 @@ class HostMemoryManager():
 
         self.available_memory_bytes = max(0, self.available_memory_bytes)
 
-        logger.debug(f"Memory limit calculated: total={total_memory}, available={available_memory}, "
+        logger.info(f"Memory limit calculated: total={total_memory}, available={available_memory}, "
                      f"limit={self.available_memory_bytes}")
 
     def can_allocate(self, tokens_num: int) -> bool:
