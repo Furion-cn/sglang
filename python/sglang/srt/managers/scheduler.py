@@ -1166,10 +1166,23 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 if self.running_batch is not None
                 else set([])
             )
+        
+        padding_len = 0
+        for i in range(10):
+            running_batch_len = len(self.running_batch.reqs)
+            waiting_queue_len = len(self.waiting_queue)
+            padding_len = (waiting_queue_len + running_batch_len) // 8 * 8 - running_batch_len
+            if padding_len > 0:
+                break
+            time.sleep(0.001)
 
         origin_output_ids = []
         # Get requests from the waiting queue to a new batch
+        add_req_count = 0
         for req in self.waiting_queue:
+            if padding_len > 0 and add_req_count >= padding_len:
+                break
+
             if (
                 self.lora_paths
                 and len(
@@ -1207,6 +1220,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
                     else:
                         self.running_batch.batch_is_full = True
                 break
+            add_req_count += 1
             origin_output_ids.append(output_ids)
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
