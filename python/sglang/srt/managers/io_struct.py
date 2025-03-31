@@ -700,6 +700,7 @@ class PrefilledReqInput(TokenizedGenerateReqInput):
 @dataclass
 class KVTransferFetch:
     rid: Optional[str] = None         # request id
+    fetch_ct: Optional[int] = None
     # the address of the prefill node which has the kv cache
     src_addr: Optional[str] = None
     # the rank of the prefill node which has the kv cache
