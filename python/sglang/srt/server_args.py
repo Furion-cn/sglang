@@ -20,7 +20,7 @@ import logging
 import os
 import random
 import tempfile
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel
 
 from sglang.srt.hf_transformers_utils import check_gguf_file
@@ -175,7 +175,7 @@ class ServerArgs:
     enable_dp_attention: bool = False
     enable_ep_moe: bool = False
     enable_deepep_moe: bool = False
-    deepep_mode: Optional[str] = "auto"
+    deepep_mode: Optional[Literal["auto", "normal", "low_latency"]] = "auto"
     enable_torch_compile: bool = False
     torch_compile_max_bs: int = 32
     cuda_graph_max_bs: Optional[int] = None
