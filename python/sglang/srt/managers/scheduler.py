@@ -1251,7 +1251,8 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 verified_id[i] = flattened_verified_id_buffer
                 logger.info(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
                       f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
-                      f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} ")
+                      f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
+                      f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
             else:
                 flattened_kv_buffer = flattened_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
