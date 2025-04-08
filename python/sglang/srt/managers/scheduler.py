@@ -120,7 +120,7 @@ from sglang.srt.utils import (
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
-from python.sglang.srt.speculative.eagle_utils import EagleDraftInput
+from sglang.srt.speculative.eagle_utils import EagleDraftInput
 
 logger = logging.getLogger(__name__)
 
