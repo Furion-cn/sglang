@@ -242,7 +242,6 @@ class EAGLEWorker(TpModelWorker):
             )
             return logits_output, next_token_ids, model_worker_batch.bid, 0, False
         else:
-            # todo logits_output是原来模型的输出
             logits_output, next_token_ids, bid = self.forward_target_extend(batch)
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 self.forward_draft_extend(
@@ -267,34 +266,27 @@ class EAGLEWorker(TpModelWorker):
         # We need the full hidden states to prefill the KV cache of the draft model.
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.capture_hidden_mode = CaptureHiddenMode.FULL
-        # todo 这里面执行的时候，需要将hidden state存下来
         logits_output, next_token_ids = self.target_worker.forward_batch_generation(
             model_worker_batch
         )
         return logits_output, next_token_ids, model_worker_batch.bid
 
     def draft(self, batch: ScheduleBatch):
-        # 该方法是speculative decoding中的draft model前向计算的核心实现
-        # 主要完成draft model的token预测，为后续verify阶段提供候选token
-
-        # 获取batch中的序列数量和speculative信息
+        # Parse args
         num_seqs = batch.batch_size()
         spec_info = batch.spec_info
 
-        # 处理token生成的惩罚项
-        # 这是speculative decoding的一个简化版本的惩罚机制
+        # Accumulate penalty
         if batch.sampling_info.penalizer_orchestrator.is_required:
+            # This is a relaxed version of penalties for speculative decoding.
             batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
                 spec_info.verified_id.to(torch.int64)
             )
 
-        # 为每个序列分配KV cache空间
-        # 需要为每个序列分配 topk * speculative_num_steps 大小的空间
-        # 因为每一步都会生成topk个候选token
+        # Allocate cache locations
         out_cache_loc = batch.alloc_token_slots(
             num_seqs * self.topk * self.speculative_num_steps
         )
-        # 将cache位置分配给每个请求
         assign_draft_cache_locs[(num_seqs,)](
             batch.req_pool_indices,
             batch.req_to_token_pool.req_to_token,
@@ -306,38 +298,30 @@ class EAGLEWorker(TpModelWorker):
         )
         batch.out_cache_loc = out_cache_loc
         batch.seq_lens_sum = torch.sum(batch.seq_lens).item()
-        # 计算每个序列的position，需要对每个序列重复topk次
         spec_info.positions = batch.seq_lens.repeat_interleave(self.topk, dim=0)
 
-        # 准备forward batch用于模型推理
+        # Get forward batch
         spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         model_worker_batch = batch.get_model_worker_batch()
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-
-        # 检查是否可以使用cuda graph加速
-        # cuda graph可以缓存计算图提高推理速度
         can_cuda_graph = self.cuda_graph_runner and self.cuda_graph_runner.can_run(
             forward_batch
         )
         if can_cuda_graph:
-            # 使用缓存的cuda graph进行推理
             score_list, token_list, parents_list = self.cuda_graph_runner.replay(
                 forward_batch
             )
         else:
-            # 如果不能使用cuda graph，则进行常规推理
-            # 初始化attention后端
+            # Initialize attention backend
             self.draft_attn_backend.init_forward_metadata(forward_batch)
             forward_batch = ForwardBatch.init_new(
                 model_worker_batch, self.draft_model_runner
             )
-            # 执行多步预测
+            # Run forward steps
             score_list, token_list, parents_list = self.draft_forward(forward_batch)
 
-        # 创建verify阶段需要的输入数据
-        # 包含预测的token、分数和父节点信息
         ret = EagleVerifyInput.create(
             spec_info.verified_id,
             score_list,
@@ -414,7 +398,6 @@ class EAGLEWorker(TpModelWorker):
             model_worker_batch, skip_sample=True
         )
         self._detect_nan_if_needed(logits_output)
-
         spec_info.hidden_states = logits_output.hidden_states
         res: EagleVerifyOutput = spec_info.verify(
             batch, logits_output, self.token_to_kv_pool_allocator
@@ -571,8 +554,6 @@ class EAGLEWorker(TpModelWorker):
     ):
         probs = torch.softmax(logits_output.next_token_logits, dim=-1)
         draft_input.topk_p, draft_input.topk_index = fast_topk(probs, self.topk, dim=-1)
-
-        # fixme 这里将draft模型的hiddenstate赋值给了draftbatch
         draft_input.hidden_states = logits_output.hidden_states
 
     def _detect_nan_if_needed(self, logits_output: LogitsProcessorOutput):

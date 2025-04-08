@@ -842,8 +842,7 @@ class ScheduleBatch:
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = []
         pre_lens = []
-        # todo 需要将draft model forward需要的specinfo恢复出来
-        spec_info = []
+
         # Allocate memory
         req_pool_indices = self.alloc_req_slots(bs)
         out_cache_loc = self.alloc_token_slots(extend_num_tokens)
