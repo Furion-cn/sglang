@@ -297,6 +297,13 @@ class Req:
         self.kv_cache_length = kv_cache_length
         self.kv_cache_restored = False
 
+        # speculative decoding
+        self.top_k : torch.Tensor = None
+        self.top_k_index : torch.Tensor = None
+        self.hidden_states_spec : torch.Tensor = None
+        self.verified_id : torch.Tensor = None
+        self.speculative_algorithm = None
+
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):
             sampling_params = copy.copy(sampling_params)
@@ -845,6 +852,7 @@ class ScheduleBatch:
         extend_input_logprob_token_ids = []
 
         pt = 0
+        logger.info(f"recover for decode origin_output_ids {len(origin_output_ids)} reqs {len(reqs)}")
         for i, req in enumerate(reqs):
             req.req_pool_idx = req_pool_indices[i]
             req.output_ids = origin_output_ids[i]

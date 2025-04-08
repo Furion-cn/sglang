@@ -1084,7 +1084,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        
+
         hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
 
         if self.dp_size != 1:
