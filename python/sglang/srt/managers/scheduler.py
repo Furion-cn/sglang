@@ -138,6 +138,9 @@ from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 expert_distribution_recorder = ExpertDistributionRecorder()
 
+
+from sglang.srt.speculative.eagle_utils import EagleDraftInput
+
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -794,6 +797,8 @@ class Scheduler(
                 self.return_health_check_ct += 1
                 continue
 
+            print(f"process_input_requests recv_req: {recv_req}")
+
             output = self._request_dispatcher(recv_req)
             if output is not None:
                 if isinstance(output, RpcReqOutput):
@@ -1071,7 +1076,7 @@ class Scheduler(
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.cache_hit_rate = cache_hit_rate
             self.metrics_collector.log_stats(self.stats)
-    
+
     def log_recover_stats(
         self,
         adder: PrefillAdder,
@@ -1221,7 +1226,7 @@ class Scheduler(
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
                 self.running_batch = self.last_batch
-            
+
             if self.server_args.kv_transfer_config.role == "decode":
                 ret = self.recover_new_prefilled_batch()
                 if not self.running_batch.is_empty():
@@ -1235,12 +1240,12 @@ class Scheduler(
                     ret = None
             else:
                 ret = self.get_new_batch_prefill()
-            
+
             if self.server_args.enable_dp_attention:
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
-        
+
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1283,13 +1288,13 @@ class Scheduler(
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
-    
+
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
             return None
-        
+
         running_bs = len(self.running_batch.reqs) if self.running_batch else 0
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
@@ -1384,12 +1389,42 @@ class Scheduler(
         # Recover kv cache from kv_transfer_agent
         '''
         pt = 0
+        top_k = None
+        top_k_index = None
+        hidden_states = None
+        verified_id = None
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
-            flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            flattened_buffer = self.kv_transfer_agent.get_kv_buffer(req)
+            if new_batch.spec_algorithm is not None:
+                assert isinstance(flattened_buffer,dict)
+                flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
+                flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
+                flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
+                flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
+                if top_k is None or top_k_index is None or hidden_states is None:
+                    top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
+                    top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
+                    hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),))
+                req.top_k = flattened_topk_buffer
+                req.top_k_index = flattened_topk_index_buffer
+                req.hidden_states = flattened_hidden_states_buffer
+                req.verified_id = flattened_verified_id_buffer
+                top_k[i] = flattened_topk_buffer
+                top_k_index[i] = flattened_topk_index_buffer
+                hidden_states[i] = flattened_hidden_states_buffer
+                verified_id[i] = flattened_verified_id_buffer
+                logger.debug(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
+                      f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
+                      f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
+                      f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
+            else:
+                flattened_kv_buffer = flattened_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
@@ -1415,7 +1450,7 @@ class Scheduler(
             try_to_fetch_kv_cache_req_list.append(req)
             pt_map[req.rid] = (pt, pt + new_batch.extend_lens[i])
             pt += new_batch.extend_lens[i]
-        
+
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
         for rid, tensor in kv_bytes_map.items():
             flattened_kv_buffer = tensor.to(self.device)
@@ -1565,7 +1600,7 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
-    
+
         return new_batch
 
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:

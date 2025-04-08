@@ -173,11 +173,24 @@ class KVTransferAgent:
             [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
              for i in range(self.layer_num)]
         )
-        kv_cache = safetensors_save({"tensor": flatten.to(self.device)})
-        self.kv_buffer[req.rid] = kv_cache
-        return len(kv_cache)
-            
-    def get_kv_buffer(self, req: Req) -> torch.Tensor:
+        if req.speculative_algorithm is not None:
+            kv_cache_and_spec_info = safetensors_save({"kv_cache": flatten.to(self.device),
+                                         "top_k": req.top_k.to(self.device) if req.top_k is not None else None,
+                                         "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
+                                         "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None,
+                                         "verified_id":req.verified_id.to(self.device) if req.verified_id is not None else None},)
+            logger.debug(f" kv_transfer_agent send top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
+                        f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
+                        f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
+                        f"verified_id {req.verified_id.shape if req.verified_id is not None else None}")
+            self.kv_buffer[req.rid] = kv_cache_and_spec_info
+            return len(kv_cache_and_spec_info)
+        else:
+            kv_cache = safetensors_save({"kv_cache": flatten.to(self.device)})
+            self.kv_buffer[req.rid] = kv_cache
+            return len(kv_cache)
+
+    def get_kv_buffer(self, req: Req) -> Union[torch.Tensor, dict]:
         if self.attn_tp_rank == 0:
             dst_ptr = self._allocate_transfer_kv_buffer(req.kv_cache_length)
             # fetch kv buffer util transfer done
@@ -200,14 +213,24 @@ class KVTransferAgent:
             # free buffer
             self._free_transfer_kv_buffer(dst_ptr, req.kv_cache_length)
             # load to device
-            loaded_tensor = safetensors_load(kv_cache)["tensor"]
+            loaded_data = safetensors_load(kv_cache)
+            if len(loaded_data) > 1:  # Has speculative info
+                loaded_tensor = {
+                    "kv_cache": loaded_data["kv_cache"],
+                    "top_k": loaded_data["top_k"],
+                    "top_k_index": loaded_data["top_k_index"],
+                    "hidden_states": loaded_data["hidden_states"],
+                    "verified_id": loaded_data["verified_id"]
+                }
+            else:
+                loaded_tensor = loaded_data["kv_cache"]
         else:
             loaded_tensor = None
         if self.attn_tp_size > 1:
             loaded_tensor = broadcast_pyobj(
                 loaded_tensor, self.attn_tp_rank, self.attn_tp_cpu_group)
         return loaded_tensor
-    
+
     def get_batch_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         same_src_req_list = {}
         res = {}
@@ -220,7 +243,7 @@ class KVTransferAgent:
             for rid, tensor in rid_tensor_map.items():
                 res[rid] = tensor
         return res
-    
+
     def get_batch_kv_buffer_from_same_src(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         if len(req_list) == 0:
             return {}
@@ -251,7 +274,7 @@ class KVTransferAgent:
             dst_ptr, batch_kv_cache_length)
         # free buffer
         self._free_transfer_kv_buffer(dst_ptr, batch_kv_cache_length)
-        
+
         # load to device
         pt = 0
         res = {}
@@ -272,6 +295,7 @@ class KVTransferAgent:
             mm_inputs=None,
             input_text=req.origin_input_text,
             input_ids=req.origin_input_ids,
+            image_inputs=req.image_inputs,
             sampling_params=req.sampling_params,
             return_logprob=req.return_logprob,
             logprob_start_len=req.logprob_start_len,
@@ -300,15 +324,15 @@ class KVTransferAgent:
         # free buffer
         self._free_transfer_kv_buffer(src_ptr, kv_cache_length)
         del self.kv_buffer[req.rid]
-        
+
     def _handle_kv_transfer_batch_fetch(self, req: KVTransferFetchBatch):
         if req.fetch_batch_req_hash not in self.handle_kv_cache_fetch_ct:
             # calculate the total length of the kv cache
             batch_kv_cache_length = sum([len(self.kv_buffer[rid]) for rid in req.rids])
-            
+
             # allocate buffer
             src_ptr = self._allocate_transfer_kv_buffer(batch_kv_cache_length)
-            
+
             # write to buffer
             write_to_buffer_ptr = src_ptr
             for rid in req.rids:
@@ -322,11 +346,11 @@ class KVTransferAgent:
         op_write = 1
         self.engine.transfer_sync(
             req.dst_addr, self.handle_kv_cache_buffer_ptr[req.fetch_batch_req_hash], req.dst_ptr, self.handle_kv_cache_buffer_length[req.fetch_batch_req_hash], op_write)
-        
+
         # send ack to remote addr
         self.send_to_pd_disagg_controller.send_pyobj(
             KVTransferAck(None, req.dst_addr, req.dst_rank, 0))
-        
+
         # free buffer
         self.handle_kv_cache_fetch_ct[req.fetch_batch_req_hash] += 1
         if self.handle_kv_cache_fetch_ct[req.fetch_batch_req_hash] == req.fetch_ct:
