@@ -297,6 +297,12 @@ class Req:
         self.kv_cache_length = kv_cache_length
         self.kv_cache_restored = False
 
+        # speculative decoding
+        self.top_k : torch.Tensor = None
+        self.top_k_index : torch.Tensor = None
+        self.hidden_states_spec : torch.Tensor = None
+        self.speculative_algorithm = None
+
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):
             sampling_params = copy.copy(sampling_params)
@@ -836,7 +842,8 @@ class ScheduleBatch:
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = []
         pre_lens = []
-
+        # todo 需要将draft model forward需要的specinfo恢复出来
+        spec_info = []
         # Allocate memory
         req_pool_indices = self.alloc_req_slots(bs)
         out_cache_loc = self.alloc_token_slots(extend_num_tokens)

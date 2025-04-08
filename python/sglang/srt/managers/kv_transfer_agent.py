@@ -114,13 +114,13 @@ class KVTransferAgent:
                  attn_tp_cpu_group: torch.distributed.ProcessGroup = None,
                  device: str = "cpu"):
         self.kv_buffer = {}
+        self.spec_info_buffer = {}
         self.layer_num = layer_num
         self.tp_rank = tp_rank
         self.attn_tp_cpu_group = attn_tp_cpu_group
         self.role = server_args.kv_transfer_config.role
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
-
         self.attn_tp_rank, self.attn_tp_size, _ = (
             compute_dp_attention_world_info(
                 server_args.enable_dp_attention,
@@ -166,11 +166,19 @@ class KVTransferAgent:
             [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
              for i in range(self.layer_num)]
         )
-        kv_cache = safetensors_save({"tensor": flatten.to(self.device)})
-        self.kv_buffer[req.rid] = kv_cache
-        return len(kv_cache)
+        if req.speculative_algorithm is not None:
+            kv_cache_and_spec_info = safetensors_save({"kv_cache": flatten.to(self.device),
+                                         "top_k": req.top_k.to(self.device),
+                                         "top_k_index":req.top_k_index.to(self.device),
+                                         "hidden_state":req.hidden_states_spec.to(self.device)})
+            self.kv_buffer[req.rid] = kv_cache_and_spec_info
+            return len(kv_cache_and_spec_info)
+        else:
+            kv_cache = safetensors_save({"kv_cache": flatten.to(self.device)})
+            self.kv_buffer[req.rid] = kv_cache
+            return len(kv_cache)
 
-    def get_kv_buffer(self, req: Req) -> torch.Tensor:
+    def get_kv_buffer(self, req: Req) -> Union[torch.Tensor, dict]:
         if self.attn_tp_rank == 0:
             dst_ptr = self._allocate_transfer_kv_buffer(req.kv_cache_length)
             # fetch kv buffer util transfer done
@@ -193,7 +201,16 @@ class KVTransferAgent:
             # free buffer
             self._free_transfer_kv_buffer(dst_ptr, req.kv_cache_length)
             # load to device
-            loaded_tensor = safetensors_load(kv_cache)["tensor"]
+            loaded_data = safetensors_load(kv_cache)
+            if len(loaded_data) > 1:  # Has speculative info
+                loaded_tensor = {
+                    "kv_cache": loaded_data["kv_cache"],
+                    "top_k": loaded_data["top_k"],
+                    "top_k_index": loaded_data["top_k_index"],
+                    "hidden_state": loaded_data["hidden_state"]
+                }
+            else:
+                loaded_tensor = loaded_data["kv_cache"]
         else:
             loaded_tensor = None
         if self.attn_tp_size > 1:

@@ -903,7 +903,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.cache_hit_rate = cache_hit_rate
             self.metrics_collector.log_stats(self.stats)
-    
+
     def log_recover_stats(
         self,
         adder: PrefillAdder,
@@ -1053,7 +1053,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
                 self.running_batch = self.last_batch
-            
+
             if self.server_args.kv_transfer_config.role == "decode":
                 ret = self.recover_new_prefilled_batch()
                 if not self.running_batch.is_empty():
@@ -1067,12 +1067,12 @@ class Scheduler(SchedulerOutputProcessorMixin):
                     ret = None
             else:
                 ret = self.get_new_batch_prefill()
-            
+
             if self.server_args.enable_dp_attention:
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
-        
+
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1115,13 +1115,13 @@ class Scheduler(SchedulerOutputProcessorMixin):
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
-    
+
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
             return None
-        
+
         running_bs = len(self.running_batch.reqs) if self.running_batch else 0
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
@@ -1221,7 +1221,18 @@ class Scheduler(SchedulerOutputProcessorMixin):
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
-            flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            flattened_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            if new_batch.spec_algorithm is not None:
+                assert isinstance(flattened_buffer,dict)
+                flattened_kv_buffer = flattened_buffer["kv_cache"]
+                req.top_k = flattened_buffer["top_k"]
+                req.top_k_index = flattened_buffer["top_k_index"]
+                req.hidden_states = flattened_buffer["hidden_states"]
+                print(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
+                      f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
+                      f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} ")
+            else:
+                flattened_kv_buffer = flattened_buffer
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
@@ -1234,6 +1245,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 )
             req.kv_cache_restored = True
             pt += new_batch.extend_lens[i]
+        
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
