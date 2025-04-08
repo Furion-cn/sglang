@@ -1260,8 +1260,8 @@ class Scheduler(SchedulerOutputProcessorMixin):
             pt += new_batch.extend_lens[i]
         draft_input = EagleDraftInput()
         draft_input.hidden_states = hidden_states
-        draft_input.top_k = top_k
-        draft_input.top_k_index = top_k_index
+        draft_input.topk_p = top_k
+        draft_input.topk_index = top_k_index
         new_batch.spec_info = draft_input
         return new_batch
 

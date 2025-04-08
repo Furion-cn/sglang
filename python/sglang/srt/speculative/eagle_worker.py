@@ -511,8 +511,8 @@ class EAGLEWorker(TpModelWorker):
         # restore spec info for pd disaggregation
         for i,req in enumerate(batch.reqs) :
             req.speculative_algorithm = batch.spec_algorithm
-            req.top_k = batch.spec_info.top_k[i]
-            req.tok_k_index = batch.spec_info.tok_k_index[i]
+            req.top_k = batch.spec_info.topk_p[i]
+            req.tok_k_index = batch.spec_info.topk_index[i]
             req.hidden_states = batch.spec_info.hidden_states[i]
 
     def forward_draft_extend_after_decode(self, batch: ScheduleBatch):
