@@ -512,8 +512,11 @@ class EAGLEWorker(TpModelWorker):
         for i,req in enumerate(batch.reqs) :
             req.speculative_algorithm = batch.spec_algorithm
             req.top_k = batch.spec_info.topk_p[i]
-            req.tok_k_index = batch.spec_info.topk_index[i]
-            req.hidden_states = batch.spec_info.hidden_states[i]
+            req.top_k_index = batch.spec_info.topk_index[i]
+            req.hidden_states_spec = batch.spec_info.hidden_states[i]
+            logger.info(f" top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
+                        f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
+                        f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None}")
 
     def forward_draft_extend_after_decode(self, batch: ScheduleBatch):
         # Backup fileds that will be modified in-place

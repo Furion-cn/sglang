@@ -168,9 +168,12 @@ class KVTransferAgent:
         )
         if req.speculative_algorithm is not None:
             kv_cache_and_spec_info = safetensors_save({"kv_cache": flatten.to(self.device),
-                                         "top_k": req.top_k.to(self.device),
-                                         "top_k_index":req.top_k_index.to(self.device),
-                                         "hidden_state":req.hidden_states_spec.to(self.device)})
+                                         "top_k": req.top_k.to(self.device) if req.top_k is not None else None,
+                                         "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
+                                         "hidden_state":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None})
+            logger.info(f" top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
+                               f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
+                               f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None}")
             self.kv_buffer[req.rid] = kv_cache_and_spec_info
             return len(kv_cache_and_spec_info)
         else:

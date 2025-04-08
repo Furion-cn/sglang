@@ -1234,7 +1234,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 if top_k is None or top_k_index is None or hidden_states is None:
                     top_k = torch.zeros(new_batch.batch_size(), flattened_buffer["top_k"].shape)
                     top_k_index = torch.zeros(new_batch.batch_size(), flattened_buffer["top_k_index"].shape)
-                    hidden_states = torch.zeros(new_batch.batch_size(), flattened_buffer["hidden_states"].shape)
+                    hidden_states = torch.zeros(new_batch.batch_size(), flattened_buffer["hidden_state"].shape)
                 req.top_k = flattened_buffer["top_k"]
                 req.top_k_index = flattened_buffer["top_k_index"]
                 req.hidden_states = flattened_buffer["hidden_states"]
