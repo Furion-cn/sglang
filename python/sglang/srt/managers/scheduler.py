@@ -1270,6 +1270,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         draft_input.hidden_states = hidden_states
         draft_input.topk_p = top_k
         draft_input.topk_index = top_k_index
+        draft_input.verified_id = verified_id
         new_batch.spec_info = draft_input
         return new_batch
 
