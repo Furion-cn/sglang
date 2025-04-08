@@ -119,6 +119,9 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+
+from python.sglang.srt.speculative.eagle_utils import EagleDraftInput
+
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -1216,6 +1219,9 @@ class Scheduler(SchedulerOutputProcessorMixin):
         new_batch.recover_for_decode(origin_output_ids)
         # Recover kv cache from kv_transfer_agent
         pt = 0
+        top_k = None
+        top_k_index = None
+        hidden_states = None
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             if req.kv_cache_restored:
@@ -1225,9 +1231,16 @@ class Scheduler(SchedulerOutputProcessorMixin):
             if new_batch.spec_algorithm is not None:
                 assert isinstance(flattened_buffer,dict)
                 flattened_kv_buffer = flattened_buffer["kv_cache"]
+                if top_k is None or top_k_index is None or hidden_states is None:
+                    top_k = torch.zeros(new_batch.batch_size(), flattened_buffer["top_k"].shape)
+                    top_k_index = torch.zeros(new_batch.batch_size(), flattened_buffer["top_k_index"].shape)
+                    hidden_states = torch.zeros(new_batch.batch_size(), flattened_buffer["hidden_states"].shape)
                 req.top_k = flattened_buffer["top_k"]
                 req.top_k_index = flattened_buffer["top_k_index"]
                 req.hidden_states = flattened_buffer["hidden_states"]
+                top_k[i] = flattened_buffer["top_k"]
+                top_k_index[i] = flattened_buffer["top_k_index"]
+                hidden_states[i] = flattened_buffer["hidden_states"]
                 print(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
                       f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
                       f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} ")
@@ -1245,7 +1258,11 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 )
             req.kv_cache_restored = True
             pt += new_batch.extend_lens[i]
-        
+        draft_input = EagleDraftInput()
+        draft_input.hidden_states = hidden_states
+        draft_input.top_k = top_k
+        draft_input.top_k_index = top_k_index
+        new_batch.spec_info = draft_input
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
