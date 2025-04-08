@@ -172,7 +172,7 @@ class KVTransferAgent:
                                          "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
                                          "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None,
                                          "verified_id":req.verified_id.to(self.device) if req.verified_id is not None else None},)
-            logger.info(f" top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
+            logger.info(f" kv_transfer_agent send top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
                         f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
                         f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
                         f"verified_id {req.verified_id.shape if req.verified_id is not None else None}")
