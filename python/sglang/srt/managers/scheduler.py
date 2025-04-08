@@ -1227,25 +1227,28 @@ class Scheduler(SchedulerOutputProcessorMixin):
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
-            flattened_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            flattened_buffer = self.kv_transfer_agent.get_kv_buffer(req)
             if new_batch.spec_algorithm is not None:
                 assert isinstance(flattened_buffer,dict)
-                flattened_kv_buffer = flattened_buffer["kv_cache"]
+                flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
+                flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
+                flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
+                flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
                 if top_k is None or top_k_index is None or hidden_states is None:
-                    top_k = torch.zeros(new_batch.batch_size(), flattened_buffer["top_k"].shape)
-                    top_k_index = torch.zeros(new_batch.batch_size(), flattened_buffer["top_k_index"].shape)
-                    hidden_states = torch.zeros(new_batch.batch_size(), flattened_buffer["hidden_state"].shape)
-                req.top_k = flattened_buffer["top_k"]
-                req.top_k_index = flattened_buffer["top_k_index"]
-                req.hidden_states = flattened_buffer["hidden_states"]
-                top_k[i] = flattened_buffer["top_k"]
-                top_k_index[i] = flattened_buffer["top_k_index"]
-                hidden_states[i] = flattened_buffer["hidden_states"]
-                print(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
+                    top_k = torch.zeros(new_batch.batch_size(), flattened_topk_buffer.shape)
+                    top_k_index = torch.zeros(new_batch.batch_size(), flattened_topk_index_buffer.shape)
+                    hidden_states = torch.zeros(new_batch.batch_size(), flattened_hidden_states_buffer.shape)
+                req.top_k = flattened_topk_buffer
+                req.top_k_index = flattened_topk_index_buffer
+                req.hidden_states = flattened_hidden_states_buffer
+                top_k[i] = flattened_topk_buffer
+                top_k_index[i] = flattened_topk_index_buffer
+                hidden_states[i] = flattened_hidden_states_buffer
+                logger.info(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
                       f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
                       f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} ")
             else:
-                flattened_kv_buffer = flattened_buffer
+                flattened_kv_buffer = flattened_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
