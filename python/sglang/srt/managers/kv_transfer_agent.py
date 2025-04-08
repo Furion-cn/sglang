@@ -170,10 +170,12 @@ class KVTransferAgent:
             kv_cache_and_spec_info = safetensors_save({"kv_cache": flatten.to(self.device),
                                          "top_k": req.top_k.to(self.device) if req.top_k is not None else None,
                                          "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
-                                         "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None})
+                                         "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None,
+                                         "verified_id":req.verified_id.to(self.device) if req.verified_id is not None else None},)
             logger.info(f" top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
-                               f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
-                               f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None}")
+                        f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
+                        f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
+                        f"verified_id {req.verified_id.shape if req.verified_id is not None else None}")
             self.kv_buffer[req.rid] = kv_cache_and_spec_info
             return len(kv_cache_and_spec_info)
         else:
@@ -210,7 +212,8 @@ class KVTransferAgent:
                     "kv_cache": loaded_data["kv_cache"],
                     "top_k": loaded_data["top_k"],
                     "top_k_index": loaded_data["top_k_index"],
-                    "hidden_states": loaded_data["hidden_states"]
+                    "hidden_states": loaded_data["hidden_states"],
+                    "verified_id": loaded_data["verified_id"]
                 }
             else:
                 loaded_tensor = loaded_data["kv_cache"]

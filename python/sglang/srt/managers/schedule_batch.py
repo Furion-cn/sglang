@@ -301,6 +301,7 @@ class Req:
         self.top_k : torch.Tensor = None
         self.top_k_index : torch.Tensor = None
         self.hidden_states_spec : torch.Tensor = None
+        self.verified_id : torch.Tensor = None
         self.speculative_algorithm = None
 
         # Sampling info

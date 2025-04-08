@@ -1222,6 +1222,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         top_k = None
         top_k_index = None
         hidden_states = None
+        verified_id = None
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             if req.kv_cache_restored:
@@ -1234,16 +1235,20 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
                 flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
                 flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
                 if top_k is None or top_k_index is None or hidden_states is None:
-                    top_k = torch.zeros(new_batch.batch_size(), flattened_topk_buffer.shape)
-                    top_k_index = torch.zeros(new_batch.batch_size(), flattened_topk_index_buffer.shape)
-                    hidden_states = torch.zeros(new_batch.batch_size(), flattened_hidden_states_buffer.shape)
+                    top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
+                    top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
+                    hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),) + tuple(flattened_verified_id_buffer.shape))
                 req.top_k = flattened_topk_buffer
                 req.top_k_index = flattened_topk_index_buffer
                 req.hidden_states = flattened_hidden_states_buffer
+                req.verified_id = flattened_verified_id_buffer
                 top_k[i] = flattened_topk_buffer
                 top_k_index[i] = flattened_topk_index_buffer
                 hidden_states[i] = flattened_hidden_states_buffer
+                verified_id[i] = flattened_verified_id_buffer
                 logger.info(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
                       f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
                       f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} ")
