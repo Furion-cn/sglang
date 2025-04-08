@@ -1235,7 +1235,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
                 flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
                 flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
-                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"]
                 if top_k is None or top_k_index is None or hidden_states is None:
                     top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
                     top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
