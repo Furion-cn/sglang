@@ -585,7 +585,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         # For tensor parallel attention
         if self.q_lora_rank is not None:
-            # self.q_a_proj=[h,1536]
+            # self.q_a_proj=[1536,h]
             self.q_a_proj = ReplicatedLinear(
                 self.hidden_size,
                 self.q_lora_rank,
@@ -595,7 +595,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
             # self.q_a_layernorm=input.shape
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            # self.q_b_proj=[1536,128/attn_tp_size*(128+64)], colParallel
+            # self.q_b_proj=[128/attn_tp_size*(128+64),1536], colParallel
             self.q_b_proj = ColumnParallelLinear(
                 q_lora_rank,
                 self.num_heads * self.qk_head_dim,
@@ -615,7 +615,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 tp_rank=attn_tp_rank,
                 tp_size=attn_tp_size,
             )
-        # self.kv_b_proj=[512,128/attn_tp_size*(128+128)], colParallel
+        # self.kv_b_proj=[128/attn_tp_size*(128+128),512], colParallel
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -626,7 +626,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             tp_size=attn_tp_size,
         )
         # O projection.
-        # self.o_proj=[128/attn_tp_size*128,7168], rowParallel
+        # self.o_proj=[7168,128/attn_tp_size*128], rowParallel
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
@@ -638,7 +638,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             tp_size=attn_tp_size,
         )
 
-        # self.kv_a_proj_with_mqa=[7168,512+64]
+        # self.kv_a_proj_with_mqa=[512+64,7168]
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
@@ -680,12 +680,12 @@ class DeepseekV2AttentionMLA(nn.Module):
         )
 
         self.attn_mha = RadixAttention(
-            self.num_local_heads,
-            self.qk_nope_head_dim + self.qk_rope_head_dim,
+            self.num_local_heads, #128/attn_tp_size
+            self.qk_nope_head_dim + self.qk_rope_head_dim, # 128+64
             self.scaling,
-            num_kv_heads=self.num_local_heads,
+            num_kv_heads=self.num_local_heads, # 128/attn_tp_size
             layer_id=layer_id,
-            v_head_dim=self.v_head_dim,
+            v_head_dim=self.v_head_dim, # 128
             prefix=add_prefix("attn_mha", prefix),
         )
 
@@ -756,56 +756,63 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         """
-        # input: hidden_states=[b,s,h]
-        # self.q_a_proj=[h,1536]
+        # input: hidden_states=[bs,h], note: 这里的 bs 其实是对 [b,s] 做了 concat，这块的逻辑在 ScheduleBatch 中完成，可以立即为 bs=batch_size*sequence
+        # self.q_a_proj=[1536,h]
         # self.q_a_layernorm=input.shape
-        # self.q_b_proj=[1536,128/attn_tp_size*(128+64)], colParallel
-        # self.kv_b_proj=[512,128/attn_tp_size*(128+128)], colParallel
-        # self.o_proj=[128/attn_tp_size*128,7168], rowParallel
-        # self.kv_a_proj_with_mqa=[7168,512+64]
+        # self.q_b_proj=[128/attn_tp_size*(128+64),1536], colParallel
+        # self.kv_b_proj=[128/attn_tp_size*(128+128),512], colParallel
+        # self.o_proj=[7168,128/attn_tp_size*128], rowParallel
+        # self.kv_a_proj_with_mqa=[512+64,7168]
         # self.kv_a_layernorm=input.shape
+        # note: 如果使用 fp8 计算，底层应该是 input*weights
         """
         if self.q_lora_rank is not None:
-            q = self.q_a_proj(hidden_states)[0] # [b,s,1536]=[h,1536]*[b,s,h]
-            q = self.q_a_layernorm(q) # [b,s,1536]
-            # self.q_b_proj(q): [b,s,128/attn_tp_size*(128+64)]=[1536,128/attn_tp_size*(128+64)]*[b,s,1536]
-            # [0]: [s,128/attn_tp_size*(128+64)]
-            # view: [s,128/attn_tp_size,128+64]
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim) # q=[s,128/attn_tp_size,128+64]
+            q = self.q_a_proj(hidden_states)[0] # [bs,1536]=[bs,h]*[1536,h], 这里底层计算的时候可能有些变化，但是 shape 应该没问题
+            q = self.q_a_layernorm(q) # [bs,1536]
+            # self.q_b_proj(q): [bs,128/attn_tp_size*(128+64)]=[bs,1536]*[128/attn_tp_size*(128+64),1536]
+            # [0]: [bs,128/attn_tp_size*(128+64)], 输出 output, output_bias，这里取的是 output
+            # view: [bs,128/attn_tp_size,128+64]
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim) # q=[bs,128/attn_tp_size,128+64]
         else:
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
-        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) # q_pe=[s,128/attn_tp_size,64]
-        # self.kv_a_proj_with_mqa(hidden_states): [b,s,512+64]=[h,512+64]*[b,s,h]
-        # [0]: [s,512+64]
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0] # latent_cache=[s,512+64]
-        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1) # kv_a=[s,512]
-        latent_cache = latent_cache.unsqueeze(1) # latent_cache=[s,1,512+64]
-        kv_a = self.kv_a_layernorm(kv_a.contiguous()) # kv_a=[s,512]
-        # self.kv_b_proj(kv_a): [s,128/attn_tp_size*(128+128)]=[512,128/attn_tp_size*(128+128)]*[s,512]
-        # [0]: [128/attn_tp_size*(128+128)]
-        kv = self.kv_b_proj(kv_a)[0] # kv=[128/attn_tp_size*(128+128)]
-        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim) # kv=[128/attn_tp_size,128+128]
-        k_nope = kv[..., : self.qk_nope_head_dim] # k_nope=[128/attn_tp_size,128]
-        v = kv[..., self.qk_nope_head_dim :] # v=[128/attn_tp_size,128]
-        k_pe = latent_cache[:, :, self.kv_lora_rank :] # k_pe=[s,1,64]
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe) # q_pe=[s,128/attn_tp_size,64], k_pe=[s,1,64]
-        q[..., self.qk_nope_head_dim :] = q_pe
-        k = torch.empty_like(q)
-        k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
+        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) # q_pe=[bs,128/attn_tp_size,64]
+        # self.kv_a_proj_with_mqa(hidden_states): [bs,512+64]=[bs,h]*[512+64,h]
+        # [0]: [bs,512+64], 输出 output, output_bias，这里取的是 output
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0] # latent_cache=[bs,512+64]
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1) # kv_a=[bs,512]
+        latent_cache = latent_cache.unsqueeze(1) # latent_cache=[bs,1,512+64]
+        kv_a = self.kv_a_layernorm(kv_a.contiguous()) # kv_a=[bs,512]
+        # self.kv_b_proj(kv_a): [bs,128/attn_tp_size*(128+128)]=[bs,512]*[512,128/attn_tp_size*(128+128)]
+        # [0]: [bs,128/attn_tp_size*(128+128)], 输出 output, output_bias，这里取的是 output
+        kv = self.kv_b_proj(kv_a)[0] # kv=[bs,128/attn_tp_size*(128+128)]
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim) # kv=[bs,128/attn_tp_size,128+128]
+        k_nope = kv[..., : self.qk_nope_head_dim] # k_nope=[bs,128/attn_tp_size,128]
+        v = kv[..., self.qk_nope_head_dim :] # v=[bs,128/attn_tp_size,128]
+        k_pe = latent_cache[:, :, self.kv_lora_rank :] # k_pe=[bs,1,64]
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe) # q_pe=[bs,128/attn_tp_size,64], k_pe=[bs,1,64]
+        q[..., self.qk_nope_head_dim :] = q_pe # q=[bs,128/attn_tp_size,128+64], 64 replaced
+        k = torch.empty_like(q) # k=[bs,128/attn_tp_size,128+64]
+        k[..., : self.qk_nope_head_dim] = k_nope # k=[bs,128/attn_tp_size,128+64], replace 128
+        k[..., self.qk_nope_head_dim :] = k_pe # k=[bs,128/attn_tp_size,128+64], replace 64
 
-        latent_cache[:, :, : self.kv_lora_rank] = kv_a.unsqueeze(1)
-        latent_cache[:, :, self.kv_lora_rank :] = k_pe
+        # kv_a.unsqueeze(1)=[bs,1,512]
+        # latent_cache=[bs,1,512+64]
+        latent_cache[:, :, : self.kv_lora_rank] = kv_a.unsqueeze(1)  # replace
+        latent_cache[:, :, self.kv_lora_rank :] = k_pe # replace
 
         # Save latent cache
         forward_batch.token_to_kv_pool.set_kv_buffer(
             self.attn_mha, forward_batch.out_cache_loc, latent_cache, None
         )
+        # q=[bs,128/attn_tp_size,128+64]
+        # k=[bs,128/attn_tp_szie,128+64]
+        # v=[bs,128/attn_tp_size,128]
+        # attn_output=[bs,128/attn_tp_size*128], guess
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
-        attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
-        output, _ = self.o_proj(attn_output)
+        attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim) # attn_output=[bs,128/attn_tp_size*128]
+        output, _ = self.o_proj(attn_output) # [bs,7168]=[bs,128/attn_tp*128]*[7168,128/attn_tp_size*128]
         return output
 
     def forward_absorb(
