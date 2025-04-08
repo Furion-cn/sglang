@@ -510,12 +510,12 @@ class EAGLEWorker(TpModelWorker):
         self.capture_for_decode(logits_output, forward_batch.spec_info)
         # restore spec info for pd disaggregation
         logger.info(f"\n\nspec info  batch.spec_info.verified_id.shape {batch.spec_info.verified_id.shape} forward_batch.spec_info.verified_id.shape {forward_batch.spec_info.verified_id.shape} \n\n")
-        for i,req in enumerate(batch.reqs) :
+        for i,req in enumerate(batch.reqs):
             req.speculative_algorithm = batch.spec_algorithm
             req.top_k = batch.spec_info.topk_p[i]
             req.top_k_index = batch.spec_info.topk_index[i]
             req.hidden_states_spec = batch.spec_info.hidden_states[i]
-            req.verified_id = batch.spec_info.verified_id[i]
+            req.verified_id = batch.spec_info.verified_id[i:i+1]
             logger.info(f"\n\nforward_draft_extend top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
                         f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
                         f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
