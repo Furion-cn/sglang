@@ -1108,19 +1108,23 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def forward(
         self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        mb0_positions: torch.Tensor,
+        mb1_positions: torch.Tensor,
+        mb0_hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
-        residual: Optional[torch.Tensor],
+        mb0_residual: Optional[torch.Tensor],
+        mb1_hidden_states: torch.Tensor,
+        mb1_residual: Optional[torch.Tensor],
+        tmb_info: TwoMicroBatch,
     ) -> torch.Tensor:
         if global_server_args_dict["enable_deepep_moe"] and self.is_sparse:
             return self.forward_deepep(
-                positions, hidden_states, forward_batch, residual
+                mb0_positions, mb0_hidden_states, forward_batch, mb0_residual,mb1_positions,mb1_hidden_states,mb1_residual,tmb_info
             )
         else:
             return self.forward_normal(
-                positions, hidden_states, forward_batch, residual
-            )
+                mb0_positions, mb0_hidden_states, forward_batch, mb0_residual
+            ),None,None,None# mb1_hidden_states, mb1_residual, LastLayerTMBInfo
 
     def forward_normal(
         self,
@@ -1191,74 +1195,104 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def forward_deepep(
         self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        mb0_positions: torch.Tensor,
+        mb0_hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
-        residual: Optional[torch.Tensor],
+        mb0_residual: Optional[torch.Tensor],
+        mb1_positions: torch.Tensor,
+        mb1_hidden_states: torch.Tensor,
+        mb1_residual: Optional[torch.Tensor],
+        tmb_info:TwoMicroBatch,
     ) -> torch.Tensor:
 
-        if hidden_states.shape[0] == 0:
-            residual = hidden_states
+        if mb0_hidden_states.shape[0] == 0:
+            mb0_residual = mb0_hidden_states
         else:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
+            if mb0_residual is None:
+                mb0_residual = mb0_hidden_states
+                mb0_hidden_states = self.input_layernorm(mb0_hidden_states)
             else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+                mb0_hidden_states, mb0_residual = self.input_layernorm(mb0_hidden_states, mb0_residual)
 
         if self.attn_tp_size != 1 and self.input_is_scattered:
-            hidden_states, local_hidden_states = (
+            mb0_hidden_states, local_hidden_states = (
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-                hidden_states,
+                mb0_hidden_states,
             )
             tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                list(mb0_hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
             )
 
         # Self Attention
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
+        mb0_hidden_states = self.self_attn(
+            positions=mb0_positions,
+            hidden_states=mb0_hidden_states,
             forward_batch=forward_batch,
         )
 
         if self.attn_tp_size != 1:
             if self.input_is_scattered:
-                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                hidden_states = tensor_list[self.attn_tp_rank]
-                tp_reduce_scatter(hidden_states, tensor_list)
-                if hidden_states.shape[0] != 0:
-                    hidden_states, residual = self.post_attention_layernorm(
-                        hidden_states, residual
+                tensor_list = list(mb0_hidden_states.tensor_split(self.attn_tp_size))
+                mb0_hidden_states = tensor_list[self.attn_tp_rank]
+                tp_reduce_scatter(mb0_hidden_states, tensor_list)
+                if mb0_hidden_states.shape[0] != 0:
+                    mb0_hidden_states, mb0_residual = self.post_attention_layernorm(
+                        mb0_hidden_states, mb0_residual
                     )
             else:
                 if self.attn_tp_rank == 0:
-                    hidden_states += residual
-                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                hidden_states = tensor_list[self.attn_tp_rank]
-                tp_reduce_scatter(hidden_states, tensor_list)
-                residual = hidden_states
-                if hidden_states.shape[0] != 0:
-                    hidden_states = self.post_attention_layernorm(hidden_states)
+                    mb0_hidden_states += mb0_residual
+                tensor_list = list(mb0_hidden_states.tensor_split(self.attn_tp_size))
+                mb0_hidden_states = tensor_list[self.attn_tp_rank]
+                tp_reduce_scatter(mb0_hidden_states, tensor_list)
+                mb0_residual = mb0_hidden_states
+                if mb0_hidden_states.shape[0] != 0:
+                    mb0_hidden_states = self.post_attention_layernorm(mb0_hidden_states)
         else:
-            if hidden_states.shape[0] != 0:
-                hidden_states, residual = self.post_attention_layernorm(
-                    hidden_states, residual
+            if mb0_hidden_states.shape[0] != 0:
+                mb0_hidden_states, mb0_residual = self.post_attention_layernorm(
+                    mb0_hidden_states, mb0_residual
                 )
-        hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
+        mb0_hidden_states = self.mlp(mb0_hidden_states, forward_batch.forward_mode)
 
         if self.is_last_layer and self.attn_tp_size != 1:
-            hidden_states += residual
-            residual = None
-            hidden_states, local_hidden_states = (
+            mb0_hidden_states += mb0_residual
+            mb0_residual = None
+            mb0_hidden_states, local_hidden_states = (
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-                hidden_states,
+                mb0_hidden_states,
             )
             tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                list(mb0_hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
             )
 
-        return hidden_states, residual
+        # return mb0_hidden_states, mb0_residual # old
+        return mb0_hidden_states, mb0_residual,mb1_hidden_states,mb1_residual,LastLayerTMBInfo()
+
+
+class LastLayerTMBInfo:
+    deep_ep_dispatcher: DeepEPDispatcher
+    prefill_combine_args: list
+    shared_expert: DeepseekV2MLP
+    @classmethod
+    def init_new(
+        self,
+        deep_ep_dispatcher:DeepEPDispatcher=None,
+        prefill_combine_args:list=None,
+        shared_expert:DeepseekV2MLP=None,
+    ):
+        self.deep_ep_dispatcher=deep_ep_dispatcher
+        self.prefill_combine_args=prefill_combine_args
+        self.shared_expert=shared_expert
+class TwoMicroBatch:
+    cur_layer_id:int
+    forward_mode:ForwardMode
+    last_layer_tmb_info:LastLayerTMBInfo
+    @classmethod
+    def init_new(self,forward_mode:ForwardMode):
+        self.cur_layer_id=None
+        self.forward_mode=forward_mode
+        self.last_layer_tmb_info=None
 
 
 class DeepseekV2Model(nn.Module):
@@ -1294,32 +1328,54 @@ class DeepseekV2Model(nn.Module):
 
         self.dp_size = get_attention_dp_size()
 
+        self.two_micro_batch=TwoMicroBatch(forward_mode=ForwardMode.EXTEND)
+        self.first_moe_layer_id=config.first_k_dense_replace
+
+    def generate_two_micro_batches(
+        self,
+        positions:torch.Tensor,
+        hidden_states:torch.Tensor,
+        residual:torch.Tensor,
+    )->(torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor):
+        return None,None,None,None,None,None
+
+
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor,
+        mb0_positions: torch.Tensor,
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
 
         if input_embeds is None:
-            hidden_states = self.embed_tokens(input_ids)
+            mb0_hidden_states = self.embed_tokens(input_ids)
         else:
-            hidden_states = input_embeds
+            mb0_hidden_states = input_embeds
 
         residual = None
         for i in range(len(self.layers)):
             expert_distribution_recorder.set_current_layer(i)
             layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions, hidden_states, forward_batch, residual
+            if layer.layer_id==self.first_moe_layer_id:
+                # divide hidden_states and residual because the following layers will be calculated in two micro batch
+                mb0_positions,mb0_hidden_states,mb0_residual,mb1_positions,mb1_hidden_states,mb1_residual=\
+                    self.generate_two_micro_batches(mb0_positions,mb0_hidden_states,mb0_residual)
+
+            mb0_hidden_states, mb0_residual,mb0_hidden_states, mb0_residual,tmb_info= layer(
+                mb0_positions, mb0_hidden_states, forward_batch, mb0_residual,mb1_positions,mb1_hidden_states,mb1_residual,tmb_info
             )
         if not forward_batch.forward_mode.is_idle():
-            if residual is None:
-                hidden_states = self.norm(hidden_states)
+            if mb0_residual is None:
+                mb0_hidden_states = self.norm(mb0_hidden_states)
             else:
-                hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+                mb0_hidden_states, _ = self.norm(mb0_hidden_states, mb0_residual)
+            if mb1_residual is None:
+                mb1_hidden_states = self.norm(mb1_hidden_states)
+            else:
+                mb1_hidden_states, _ = self.norm(mb1_hidden_states, mb1_residual)
+
+        return self.merge_two_micro_batches(mb0_hidden_states,mb1_hidden_states)
 
 
 class DeepseekV2ForCausalLM(nn.Module):
