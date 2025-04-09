@@ -41,10 +41,13 @@ class GenerateReqInput:
     # The token ids for text; one can specify either text or input_ids
     input_ids: Optional[Union[List[List[int]], List[int]]] = None
     # The embeddings for input_ids; one can specify either text or input_ids or input_embeds.
-    input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+    input_embeds: Optional[Union[List[List[List[float]]],
+                                 List[List[float]]]] = None
     # The image input. It can be a file name, a url, or base64 encoded string.
     # See also python/sglang/srt/utils.py:load_image.
     image_data: Optional[Union[List[str], str]] = None
+    # The audio input. Like image data, tt can be a file name, a url, or base64 encoded string.
+    audio_data: Optional[Union[List[str], str]] = None
     # The sampling_params. See descriptions below.
     sampling_params: Optional[Union[List[Dict], Dict]] = None
     # The request id.
@@ -103,6 +106,8 @@ class GenerateReqInput:
                 self.batch_size = len(self.text)
             self.input_embeds = None
         elif self.input_ids is not None:
+            if len(self.input_ids) == 0:
+                raise ValueError("input_ids cannot be empty.")
             if isinstance(self.input_ids[0], int):
                 self.is_single = True
                 self.batch_size = 1
@@ -165,6 +170,13 @@ class GenerateReqInput:
             elif isinstance(self.image_data, list):
                 pass
 
+            if self.audio_data is None:
+                self.audio_data = [None] * num
+            elif not isinstance(self.audio_data, list):
+                self.audio_data = [self.audio_data] * num
+            elif isinstance(self.audio_data, list):
+                pass
+
             if self.sampling_params is None:
                 self.sampling_params = [{}] * num
             elif not isinstance(self.sampling_params, list):
@@ -199,7 +211,8 @@ class GenerateReqInput:
             if not self.token_ids_logprob:  # covers both None and []
                 self.token_ids_logprob = [None] * num
             elif not isinstance(self.token_ids_logprob, list):
-                self.token_ids_logprob = [[self.token_ids_logprob] for _ in range(num)]
+                self.token_ids_logprob = [
+                    [self.token_ids_logprob] for _ in range(num)]
             elif not isinstance(self.token_ids_logprob[0], list):
                 self.token_ids_logprob = [
                     copy.deepcopy(self.token_ids_logprob) for _ in range(num)
@@ -210,7 +223,8 @@ class GenerateReqInput:
             if self.custom_logit_processor is None:
                 self.custom_logit_processor = [None] * num
             elif not isinstance(self.custom_logit_processor, list):
-                self.custom_logit_processor = [self.custom_logit_processor] * num
+                self.custom_logit_processor = [
+                    self.custom_logit_processor] * num
             else:
                 assert self.parallel_sample_num == 1
 
@@ -229,6 +243,7 @@ class GenerateReqInput:
             text=self.text[i] if self.text is not None else None,
             input_ids=self.input_ids[i] if self.input_ids is not None else None,
             image_data=self.image_data[i],
+            audio_data=self.audio_data[i],
             sampling_params=self.sampling_params[i],
             rid=self.rid[i],
             return_logprob=self.return_logprob[i],
@@ -257,8 +272,8 @@ class TokenizedGenerateReqInput:
     input_text: str
     # The input token ids
     input_ids: List[int]
-    # The image inputs
-    image_inputs: dict
+    # The multimodal inputs
+    mm_inputs: dict
     # The sampling parameters
     sampling_params: SamplingParams
     # Whether to return the logprobs
@@ -275,7 +290,8 @@ class TokenizedGenerateReqInput:
     # LoRA related
     lora_path: Optional[str] = None  # None means just use the base model
     # The input embeds
-    input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+    input_embeds: Optional[Union[List[List[List[float]]],
+                                 List[List[float]]]] = None
 
     # Session info for continual prompting
     session_params: Optional[SessionParams] = None
@@ -302,7 +318,8 @@ class EmbeddingReqInput:
     # Dummy sampling params for compatibility
     sampling_params: Union[List[Dict], Dict] = None
     # Dummy input embeds for compatibility
-    input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+    input_embeds: Optional[Union[List[List[List[float]]],
+                                 List[List[float]]]] = None
     # Whether to log metrics for this request (e.g. health_generate calls do not log metrics)
     log_metrics: bool = True
     # The modalities of the image data [image, multi-images, video]
@@ -317,7 +334,8 @@ class EmbeddingReqInput:
 
         # text and input_ids cannot be provided at the same time
         if self.text is not None and self.input_ids is not None:
-            raise ValueError("text and input_ids cannot be provided at the same time")
+            raise ValueError(
+                "text and input_ids cannot be provided at the same time")
 
         # Derive the batch size
         self.batch_size = 0
@@ -538,7 +556,8 @@ class UpdateWeightsFromDistributedReqOutput:
 
 @dataclass
 class UpdateWeightsFromTensorReqInput:
-    serialized_named_tensors: bytes  # indeed Dict[str, torch.Tensor]
+    # List containing one serialized Dict[str, torch.Tensor] per TP worker
+    serialized_named_tensors: List[bytes]
     load_format: Optional[str]
     flush_cache: bool
 
@@ -645,6 +664,17 @@ class ProfileReqType(Enum):
     STOP_PROFILE = 2
 
 
+class ExpertDistributionReq(Enum):
+    START_RECORD = 1
+    STOP_RECORD = 2
+    DUMP_RECORD = 3
+
+
+@dataclass
+class ExpertDistributionReqOutput:
+    pass
+
+
 @dataclass
 class ProfileReq:
     type: ProfileReqType
@@ -657,6 +687,55 @@ class ProfileReq:
 class ProfileReqOutput:
     success: bool
     message: str
+
+
+@dataclass
+class PrefilledReqInput(TokenizedGenerateReqInput):
+    kv_transfer_src_addr: Optional[str] = None
+    kv_transfer_src_rank: Optional[int] = None
+    kv_cache_length: Optional[int] = None
+    output_ids: Optional[List[int]] = None
+
+
+@dataclass
+class KVTransferFetch:
+    rid: Optional[str] = None         # request id
+    # the address of the prefill node which has the kv cache
+    src_addr: Optional[str] = None
+    # the rank of the prefill node which has the kv cache
+    src_rank: Optional[int] = None
+    # the address of the decode node which needs the kv cache
+    dst_addr: Optional[str] = None
+    # the rank of the decode node which needs the kv cache
+    dst_rank: Optional[int] = None
+    # the pointer to the buffer of the decode node which needs the kv cache
+    dst_ptr: Optional[int] = None
+
+@dataclass
+class KVTransferFetchBatch():
+    fetch_batch_req_hash: Optional[str] = None
+    rids: Optional[List[str]] = None         # request ids
+    fetch_ct: Optional[int] = None
+    # the address of the prefill node which has the kv cache
+    src_addr: Optional[str] = None
+    # the rank of the prefill node which has the kv cache
+    src_rank: Optional[int] = None
+    # the address of the decode node which needs the kv cache
+    dst_addr: Optional[str] = None
+    # the rank of the decode node which needs the kv cache
+    dst_rank: Optional[int] = None
+    # the pointer to the buffer of the decode node which needs the kv cache
+    dst_ptr: Optional[int] = None
+
+@dataclass
+class KVTransferAck:
+    rid: Optional[str] = None         # request id
+    # the address of the decode node which needs the kv cache
+    dst_addr: Optional[str] = None
+    # the rank of the decode node which needs the kv cache
+    dst_rank: Optional[int] = None
+    # code: 0: success, 1: failed
+    code: Optional[int] = None
 
 
 @dataclass
@@ -709,7 +788,8 @@ class ParseFunctionCallReq:
         default_factory=list
     )  # A list of available function tools (name, parameters, etc.).
     tool_call_parser: Optional[str] = (
-        None  # Specify the parser type, e.g. 'llama3', 'qwen25', or 'mistral'. If not specified, tries all.
+        # Specify the parser type, e.g. 'llama3', 'qwen25', or 'mistral'. If not specified, tries all.
+        None
     )
 
 
@@ -723,3 +803,15 @@ class SeparateReasoningReqInput:
 class VertexGenerateReqInput:
     instances: List[dict]
     parameters: Optional[dict] = None
+
+
+@dataclass
+class RpcReqInput:
+    method: str
+    parameters: Optional[Dict] = None
+
+
+@dataclass
+class RpcReqOutput:
+    success: bool
+    message: str

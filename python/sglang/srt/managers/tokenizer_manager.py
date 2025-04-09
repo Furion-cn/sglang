@@ -16,7 +16,6 @@
 import asyncio
 import copy
 import dataclasses
-import json
 import logging
 import os
 import pickle
@@ -49,11 +48,9 @@ from fastapi import BackgroundTasks
 
 from sglang.srt.aio_rwlock import RWLock
 from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.disaggregation.conn import KVBootstrapServer
+from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
-from sglang.srt.managers.image_processor import (
-    get_dummy_image_processor,
-    get_image_processor,
-)
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchEmbeddingOut,
@@ -63,6 +60,8 @@ from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     ConfigureLoggingReq,
     EmbeddingReqInput,
+    ExpertDistributionReq,
+    ExpertDistributionReqOutput,
     FlushCacheReq,
     GenerateReqInput,
     GetInternalStateReq,
@@ -91,6 +90,11 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqInput,
     UpdateWeightsFromTensorReqOutput,
 )
+from sglang.srt.managers.multimodal_processor import (
+    get_dummy_processor,
+    get_mm_processor,
+    import_processors,
+)
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -99,6 +103,7 @@ from sglang.srt.utils import (
     get_zmq_socket,
     kill_process_tree,
 )
+from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_PORT
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -141,13 +146,18 @@ class TokenizerManager:
         self.log_requests_level = server_args.log_requests_level
 
         # Init inter-process communication
-        context = zmq.asyncio.Context(2)
+        context = zmq.asyncio.Context(3)
         self.recv_from_detokenizer = get_zmq_socket(
             context, zmq.PULL, port_args.tokenizer_ipc_name, True
         )
         self.send_to_scheduler = get_zmq_socket(
             context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
         )
+        if server_args.kv_transfer_config is not None and server_args.disaggregation_mode == DisaggregationMode.PREFILL:
+            self.send_to_pd_disagg_controller = get_zmq_socket(
+                context, zmq.PUSH, f"tcp://{server_args.kv_transfer_config.decode_dist_init_host}:{PD_DISAGGREGATION_PORT}", False)
+        else:
+            self.send_to_pd_disagg_controller = None
 
         # Read model args
         self.model_path = server_args.model_path
@@ -168,27 +178,33 @@ class TokenizerManager:
         self.context_len = self.model_config.context_len
         self.image_token_id = self.model_config.image_token_id
 
-        # Create image processor placeholder
-        self.image_processor = get_dummy_image_processor()
+        if self.model_config.is_multimodal:
+            import_processors()
+            _processor = get_processor(
+                server_args.tokenizer_path,
+                tokenizer_mode=server_args.tokenizer_mode,
+                trust_remote_code=server_args.trust_remote_code,
+                revision=server_args.revision,
+            )
 
-        # Create tokenizer
-        if server_args.skip_tokenizer_init:
-            self.tokenizer = self.processor = None
-        else:
-            if self.model_config.is_multimodal:
-                self.processor = get_processor(
-                    server_args.tokenizer_path,
-                    tokenizer_mode=server_args.tokenizer_mode,
-                    trust_remote_code=server_args.trust_remote_code,
-                    revision=server_args.revision,
-                )
+            # We want to parallelize the image pre-processing so we create an executor for it
+            # We create mm_processor for any skip_tokenizer_init to make sure we still encode
+            # images even with skip_tokenizer_init=False.
+            self.mm_processor = get_mm_processor(
+                self.model_config.hf_config, server_args, _processor
+            )
+
+            if server_args.skip_tokenizer_init:
+                self.tokenizer = self.processor = None
+            else:
+                self.processor = _processor
                 self.tokenizer = self.processor.tokenizer
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        else:
+            self.mm_processor = get_dummy_processor()
 
-                # We want to parallelize the image pre-processing so we create an executor for it
-                self.image_processor = get_image_processor(
-                    self.model_config.hf_config, server_args, self.processor
-                )
+            if server_args.skip_tokenizer_init:
+                self.tokenizer = self.processor = None
             else:
                 self.tokenizer = get_tokenizer(
                     server_args.tokenizer_path,
@@ -251,8 +267,12 @@ class TokenizerManager:
         self.start_profile_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
-        self.health_check_communitcator = _Communicator(self.send_to_scheduler, 1)
+        self.health_check_communitcator = _Communicator(
+            self.send_to_scheduler, 1)
         self.get_internal_state_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.expert_distribution_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
 
@@ -304,9 +324,23 @@ class TokenizerManager:
                     GetInternalStateReqOutput,
                     self.get_internal_state_communicator.handle_recv,
                 ),
+                (
+                    ExpertDistributionReqOutput,
+                    self.expert_distribution_communicator.handle_recv,
+                ),
                 (HealthCheckOutput, lambda x: None),
             ]
         )
+
+        self.disaggregation_mode = DisaggregationMode(
+            self.server_args.disaggregation_mode
+        )
+        # for disaggregtion, start kv boostrap server on prefill
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            # only start bootstrap server on prefill tm
+            self.bootstrap_server = KVBootstrapServer(
+                self.server_args.disaggregation_bootstrap_port
+            )
 
     async def generate_request(
         self,
@@ -372,7 +406,7 @@ class TokenizerManager:
                 )
             input_ids = self.tokenizer.encode(input_text)
 
-        image_inputs: Dict = await self.image_processor.process_images_async(
+        image_inputs: Dict = await self.mm_processor.process_mm_data_async(
             obj.image_data, input_text or input_ids, obj, self.max_req_input_len
         )
         if image_inputs and "input_ids" in image_inputs:
@@ -383,7 +417,8 @@ class TokenizerManager:
             top_logprobs_num = obj.top_logprobs_num
             token_ids_logprob = obj.token_ids_logprob
             session_params = (
-                SessionParams(**obj.session_params) if obj.session_params else None
+                SessionParams(
+                    **obj.session_params) if obj.session_params else None
             )
 
         input_token_num = len(input_ids) if input_ids is not None else 0
@@ -449,7 +484,8 @@ class TokenizerManager:
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
         created_time: Optional[float] = None,
     ):
-        state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
+        state = ReqState([], False, asyncio.Event(),
+                         obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state
         self.send_to_scheduler.send_pyobj(tokenized_obj)
 
@@ -548,7 +584,8 @@ class TokenizerManager:
                 tmp_obj = copy.copy(objs[i])
                 tokenized_obj = copy.copy(tokenized_objs[i])
                 tokenized_obj.rid = tmp_obj.regenerate_rid()
-                tokenized_obj.sampling_params = copy.copy(tokenized_obj.sampling_params)
+                tokenized_obj.sampling_params = copy.copy(
+                    tokenized_obj.sampling_params)
                 tokenized_obj.sampling_params.max_new_tokens = 0
                 tokenized_obj.stream = False
                 self._send_one_request(tmp_obj, tokenized_obj, created_time)
@@ -560,8 +597,10 @@ class TokenizerManager:
                     tmp_obj = copy.copy(objs[i])
                     tokenized_obj = copy.copy(tokenized_objs[i])
                     tokenized_obj.rid = tmp_obj.regenerate_rid()
-                    self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, request))
+                    self._send_one_request(
+                        tmp_obj, tokenized_obj, created_time)
+                    generators.append(
+                        self._wait_one_response(tmp_obj, request))
                     rids.append(tmp_obj.rid)
 
         # Wait for all requests
@@ -571,7 +610,8 @@ class TokenizerManager:
             yield outputs
         else:
             rid_to_index = {rid: i for i, rid in enumerate(rids)}
-            task_map = {asyncio.create_task(gen.__anext__()): gen for gen in generators}
+            task_map = {asyncio.create_task(
+                gen.__anext__()): gen for gen in generators}
             while task_map:
                 done, _ = await asyncio.wait(
                     task_map.keys(), return_when=asyncio.FIRST_COMPLETED
@@ -619,6 +659,15 @@ class TokenizerManager:
     def stop_profile(self):
         req = ProfileReq(type=ProfileReqType.STOP_PROFILE)
         self.send_to_scheduler.send_pyobj(req)
+
+    async def start_expert_distribution_record(self):
+        await self.expert_distribution_communicator(ExpertDistributionReq.START_RECORD)
+
+    async def stop_expert_distribution_record(self):
+        await self.expert_distribution_communicator(ExpertDistributionReq.STOP_RECORD)
+
+    async def dump_expert_distribution_record(self):
+        await self.expert_distribution_communicator(ExpertDistributionReq.DUMP_RECORD)
 
     async def update_weights_from_disk(
         self,
@@ -816,9 +865,13 @@ class TokenizerManager:
             await asyncio.sleep(1)
             if obj.is_single:
                 self.abort_request(obj.rid)
+                if self.send_to_pd_disagg_controller is not None:
+                    self.send_to_pd_disagg_controller.send_pyobj(AbortReq(obj.rid))
             else:
                 for rid in obj.rid:
                     self.abort_request(rid)
+                    if self.send_to_pd_disagg_controller is not None:
+                        self.send_to_pd_disagg_controller.send_pyobj(AbortReq(rid))
 
         background_tasks = BackgroundTasks()
         background_tasks.add_task(abort_request)
@@ -838,7 +891,8 @@ class TokenizerManager:
         # the main thread due to the CPython limitation.
         if threading.current_thread() is threading.main_thread():
             signal_handler = SignalHandler(self)
-            loop.add_signal_handler(signal.SIGTERM, signal_handler.signal_handler)
+            loop.add_signal_handler(
+                signal.SIGTERM, signal_handler.signal_handler)
         else:
             logger.warning(
                 "Signal handler is not added because the tokenizer manager is "
@@ -922,7 +976,7 @@ class TokenizerManager:
             elif isinstance(recv_obj, BatchTokenIDOut):
                 if self.server_args.stream_output and state.obj.stream:
                     output_token_ids = recv_obj.output_ids[i][
-                        state.last_output_offset :
+                        state.last_output_offset:
                     ]
                     state.last_output_offset = len(recv_obj.output_ids[i])
                 else:
@@ -946,7 +1000,8 @@ class TokenizerManager:
                 if self.server_args.speculative_algorithm:
                     meta_info["spec_verify_ct"] = recv_obj.spec_verify_ct[i]
                 state.finished_time = time.time()
-                meta_info["e2e_latency"] = state.finished_time - state.created_time
+                meta_info["e2e_latency"] = state.finished_time - \
+                    state.created_time
 
             state.out_list.append(out_dict)
             state.event.set()
@@ -1082,7 +1137,8 @@ class TokenizerManager:
                 self.dump_requests_folder,
                 datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".pkl",
             )
-            logger.info(f"Dump {len(self.dump_request_list)} requests to {filename}")
+            logger.info(
+                f"Dump {len(self.dump_request_list)} requests to {filename}")
 
             to_dump = self.dump_request_list
             self.dump_request_list = []

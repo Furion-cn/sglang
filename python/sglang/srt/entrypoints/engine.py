@@ -17,6 +17,45 @@ The entry point of inference server. (SRT = SGLang Runtime)
 This file implements python APIs for the inference engine.
 """
 
+from sglang.version import __version__
+from sglang.srt.utils import (
+    MultiprocessingSerializer,
+    assert_pkg_version,
+    configure_logger,
+    get_zmq_socket,
+    kill_process_tree,
+    launch_dummy_health_check_server,
+    maybe_set_triton_cache_manager,
+    prepare_model_and_tokenizer,
+    set_prometheus_multiproc_dir,
+    set_ulimit,
+)
+from sglang.srt.managers.pd_disaggregation_controller import PDDisaggregationController
+from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
+from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.managers.scheduler import run_scheduler_process
+from sglang.srt.managers.io_struct import (
+    EmbeddingReqInput,
+    GenerateReqInput,
+    GetWeightsByNameReqInput,
+    InitWeightsUpdateGroupReqInput,
+    ReleaseMemoryOccupationReqInput,
+    ResumeMemoryOccupationReqInput,
+    RpcReqInput,
+    RpcReqOutput,
+    UpdateWeightFromDiskReqInput,
+    UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromTensorReqInput,
+)
+from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
+from sglang.srt.managers.data_parallel_controller import (
+    run_data_parallel_controller_process,
+)
+from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
+import uvloop
+import torch
 import asyncio
 import atexit
 import dataclasses
@@ -27,44 +66,12 @@ import signal
 import threading
 from typing import AsyncIterator, Dict, Iterator, List, Optional, Tuple, Union
 
+import zmq
+import zmq.asyncio
+
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 
-import torch
-import uvloop
-
-from sglang.srt.managers.data_parallel_controller import (
-    run_data_parallel_controller_process,
-)
-from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
-from sglang.srt.managers.io_struct import (
-    EmbeddingReqInput,
-    GenerateReqInput,
-    GetWeightsByNameReqInput,
-    InitWeightsUpdateGroupReqInput,
-    ReleaseMemoryOccupationReqInput,
-    ResumeMemoryOccupationReqInput,
-    UpdateWeightFromDiskReqInput,
-    UpdateWeightsFromDistributedReqInput,
-    UpdateWeightsFromTensorReqInput,
-)
-from sglang.srt.managers.scheduler import run_scheduler_process
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
-from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
-from sglang.srt.utils import (
-    MultiprocessingSerializer,
-    assert_pkg_version,
-    configure_logger,
-    kill_process_tree,
-    launch_dummy_health_check_server,
-    maybe_set_triton_cache_manager,
-    prepare_model_and_tokenizer,
-    set_prometheus_multiproc_dir,
-    set_ulimit,
-)
-from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -102,14 +109,24 @@ class Engine:
         # Shutdown the subprocesses automatically when the program exits
         atexit.register(self.shutdown)
 
+        # Allocate ports for inter-process communications
+        port_args = PortArgs.init_new(server_args)
+        logger.info(f"{server_args=}")
+
         # Launch subprocesses
         tokenizer_manager, scheduler_info = _launch_subprocesses(
-            server_args=server_args
+            server_args=server_args,
+            port_args=port_args,
         )
 
         self.server_args = server_args
         self.tokenizer_manager = tokenizer_manager
         self.scheduler_info = scheduler_info
+
+        context = zmq.Context(2)
+        self.send_to_rpc = get_zmq_socket(
+            context, zmq.DEALER, port_args.rpc_ipc_name, True
+        )
 
     def generate(
         self,
@@ -232,6 +249,13 @@ class Engine:
         """Shutdown the engine"""
         kill_process_tree(os.getpid(), include_parent=False)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.shutdown()
+        return False
+
     def start_profile(self):
         loop = asyncio.get_event_loop()
         loop.run_until_complete(self.tokenizer_manager.start_profile())
@@ -296,7 +320,10 @@ class Engine:
         """Update weights from distributed source. If there are going to be more updates, set `flush_cache` to be true
         to avoid duplicated operations such as clearing cache."""
         obj = UpdateWeightsFromTensorReqInput(
-            serialized_named_tensors=MultiprocessingSerializer.serialize(named_tensors),
+            serialized_named_tensors=[
+                MultiprocessingSerializer.serialize(named_tensors)
+                for _ in range(self.server_args.tp_size)
+            ],
             load_format=load_format,
             flush_cache=flush_cache,
         )
@@ -350,6 +377,23 @@ class Engine:
             self.tokenizer_manager.resume_memory_occupation(obj, None)
         )
 
+    """
+    Execute an RPC call on all scheduler processes.
+    """
+
+    def collective_rpc(self, method: str, **kwargs):
+        obj = RpcReqInput(method=method, parameters=kwargs)
+        self.send_to_rpc.send_pyobj(obj)
+        recv_req = self.send_to_rpc.recv_pyobj(zmq.BLOCKY)
+        assert isinstance(recv_req, RpcReqOutput)
+        assert recv_req.success, recv_req.message
+
+    def save_remote_model(self, **kwargs):
+        self.collective_rpc("save_remote_model", **kwargs)
+
+    def save_sharded_model(self, **kwargs):
+        self.collective_rpc("save_sharded_model", **kwargs)
+
 
 def _set_envs_and_config(server_args: ServerArgs):
     # Set global environments
@@ -376,7 +420,7 @@ def _set_envs_and_config(server_args: ServerArgs):
     if server_args.attention_backend == "flashinfer":
         assert_pkg_version(
             "flashinfer_python",
-            "0.2.2.post1",
+            "0.2.3",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
@@ -408,7 +452,9 @@ def _set_envs_and_config(server_args: ServerArgs):
     mp.set_start_method("spawn", force=True)
 
 
-def _launch_subprocesses(server_args: ServerArgs) -> Tuple[TokenizerManager, Dict]:
+def _launch_subprocesses(
+    server_args: ServerArgs, port_args: Optional[PortArgs] = None
+) -> Tuple[TokenizerManager, Dict]:
     """
     Launch the TokenizerManager in the main process, the Scheduler in a subprocess, and the DetokenizerManager in another subprocess.
     """
@@ -418,8 +464,9 @@ def _launch_subprocesses(server_args: ServerArgs) -> Tuple[TokenizerManager, Dic
     _set_envs_and_config(server_args)
 
     # Allocate ports for inter-process communications
-    port_args = PortArgs.init_new(server_args)
-    logger.info(f"{server_args=}")
+    if port_args is None:
+        port_args = PortArgs.init_new(server_args)
+        logger.info(f"{server_args=}")
 
     # If using model from www.modelscope.cn, first download the model.
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
@@ -497,6 +544,13 @@ def _launch_subprocesses(server_args: ServerArgs) -> Tuple[TokenizerManager, Dic
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
+
+    # Launch PD disaggregation controller
+    if server_args.kv_transfer_config is not None:
+        pd_disaggregation_controller = PDDisaggregationController(server_args, port_args, tokenizer_manager.send_to_scheduler)
+        t = threading.Thread(target=pd_disaggregation_controller.event_loop)
+        t.start()
+
     if server_args.chat_template:
         load_chat_template_for_openai_api(
             tokenizer_manager, server_args.chat_template, server_args.model_path
@@ -520,7 +574,6 @@ def _launch_subprocesses(server_args: ServerArgs) -> Tuple[TokenizerManager, Dic
                 "Initialization failed. Please see the error messages above."
             )
         scheduler_infos.append(data)
-
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
