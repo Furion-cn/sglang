@@ -29,8 +29,7 @@ def build_tree_kernel_efficient_preprocess(
     top_scores_index = top_scores.indices
     top_scores_index = torch.sort(top_scores_index).values
     draft_tokens = torch.gather(ss_token_list, index=top_scores_index, dim=1)
-    verified_id = verified_id.to(draft_tokens.device)
-    logging.info(f"build_tree_kernel_efficient_preprocess draft tokens: {draft_tokens.shape} {draft_tokens.device} verified_id: {verified_id.shape} {verified_id.device}")
+    logging.debug(f"build_tree_kernel_efficient_preprocess draft tokens: {draft_tokens.shape} {draft_tokens.device} verified_id: {verified_id.shape} {verified_id.device}")
     draft_tokens = torch.cat((verified_id.unsqueeze(1), draft_tokens), dim=1).flatten()
 
     if len(parents_list) > 1:

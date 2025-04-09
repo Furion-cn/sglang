@@ -1249,7 +1249,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 top_k_index[i] = flattened_topk_index_buffer
                 hidden_states[i] = flattened_hidden_states_buffer
                 verified_id[i] = flattened_verified_id_buffer
-                logger.info(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
+                logger.debug(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
                       f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
                       f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
                       f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
@@ -1272,7 +1272,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         draft_input.topk_p = top_k.to(self.device)
         draft_input.topk_index = top_k_index.to(self.device)
         draft_input.verified_id = verified_id.to(self.device)
-        logging.info(f"\n\ndraft_input spec info top k {draft_input.topk_p.shape} {draft_input.topk_p.device} \n"
+        logging.debug(f"\n\ndraft_input spec info top k {draft_input.topk_p.shape} {draft_input.topk_p.device} \n"
                      f"  topk_index spec info topk_index {draft_input.topk_index.shape} {draft_input.topk_index.device}\n"
                      f" hidden_states: {draft_input.hidden_states.shape} {draft_input.hidden_states.device} \n"
                      f" verified_id: {draft_input.verified_id.shape} {draft_input.verified_id.device}")
