@@ -1268,10 +1268,10 @@ class Scheduler(SchedulerOutputProcessorMixin):
             req.kv_cache_restored = True
             pt += new_batch.extend_lens[i]
         draft_input = EagleDraftInput()
-        draft_input.hidden_states = hidden_states
-        draft_input.topk_p = top_k
-        draft_input.topk_index = top_k_index
-        draft_input.verified_id = verified_id
+        draft_input.hidden_states = hidden_states.to(self.device)
+        draft_input.topk_p = top_k.to(self.device)
+        draft_input.topk_index = top_k_index.to(self.device)
+        draft_input.verified_id = verified_id.to(self.device)
         logging.info(f"\n\ndraft_input spec info top k {draft_input.topk_p.shape} {draft_input.topk_p.device} \n"
                      f"  topk_index spec info topk_index {draft_input.topk_index.shape} {draft_input.topk_index.device}\n"
                      f" hidden_states: {draft_input.hidden_states.shape} {draft_input.hidden_states.device} \n"
