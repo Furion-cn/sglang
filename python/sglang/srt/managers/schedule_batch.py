@@ -852,6 +852,7 @@ class ScheduleBatch:
         extend_input_logprob_token_ids = []
 
         pt = 0
+        logger.info(f"recover for decode origin_output_ids {len(origin_output_ids)} reqs {len(reqs)}")
         for i, req in enumerate(reqs):
             req.req_pool_idx = req_pool_indices[i]
             req.output_ids = origin_output_ids[i]
