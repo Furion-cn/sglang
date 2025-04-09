@@ -821,6 +821,17 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        """
+        # input: hidden_states=[bs,h], note: 这里的 bs 其实是对 [b,s] 做了 concat，这块的逻辑在 ScheduleBatch 中完成，可以立即为 bs=batch_size*sequence
+        # self.q_a_proj=[1536,h]
+        # self.q_a_layernorm=input.shape
+        # self.q_b_proj=[128/attn_tp_size*(128+64),1536], colParallel
+        # self.kv_b_proj=[128/attn_tp_size*(128+128),512], colParallel
+        # self.o_proj=[7168,128/attn_tp_size*128], rowParallel
+        # self.kv_a_proj_with_mqa=[512+64,7168]
+        # self.kv_a_layernorm=input.shape
+        # note: 如果使用 fp8 计算，底层应该是 input*weights
+        """
         q_len = hidden_states.shape[0]
         q_input = hidden_states.new_empty(
             q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
