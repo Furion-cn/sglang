@@ -1235,12 +1235,12 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
                 flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
                 flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
-                flattened_verified_id_buffer = flattened_buffer["verified_id"]
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
                 if top_k is None or top_k_index is None or hidden_states is None:
                     top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
                     top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
                     hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
-                    verified_id = torch.zeros((new_batch.batch_size(),) + tuple(flattened_verified_id_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),))
                 req.top_k = flattened_topk_buffer
                 req.top_k_index = flattened_topk_index_buffer
                 req.hidden_states = flattened_hidden_states_buffer
@@ -1272,6 +1272,10 @@ class Scheduler(SchedulerOutputProcessorMixin):
         draft_input.topk_p = top_k
         draft_input.topk_index = top_k_index
         draft_input.verified_id = verified_id
+        logging.info(f"\n\ndraft_input spec info top k {draft_input.topk_p.shape} {draft_input.topk_p.device} \n"
+                     f"  topk_index spec info topk_index {draft_input.topk_index.shape} {draft_input.topk_index.device}\n"
+                     f" hidden_states: {draft_input.hidden_states.shape} {draft_input.hidden_states.device} \n"
+                     f" verified_id: {draft_input.verified_id.shape} {draft_input.verified_id.device}")
         new_batch.spec_info = draft_input
         return new_batch
 
