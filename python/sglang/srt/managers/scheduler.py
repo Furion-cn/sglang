@@ -119,6 +119,9 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+
+from sglang.srt.speculative.eagle_utils import EagleDraftInput
+
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -903,7 +906,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.cache_hit_rate = cache_hit_rate
             self.metrics_collector.log_stats(self.stats)
-    
+
     def log_recover_stats(
         self,
         adder: PrefillAdder,
@@ -1053,7 +1056,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
                 self.running_batch = self.last_batch
-            
+
             if self.server_args.kv_transfer_config.role == "decode":
                 ret = self.recover_new_prefilled_batch()
                 if not self.running_batch.is_empty():
@@ -1067,12 +1070,12 @@ class Scheduler(SchedulerOutputProcessorMixin):
                     ret = None
             else:
                 ret = self.get_new_batch_prefill()
-            
+
             if self.server_args.enable_dp_attention:
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
-        
+
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1115,13 +1118,13 @@ class Scheduler(SchedulerOutputProcessorMixin):
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
-    
+
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
             return None
-        
+
         running_bs = len(self.running_batch.reqs) if self.running_batch else 0
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
@@ -1216,12 +1219,42 @@ class Scheduler(SchedulerOutputProcessorMixin):
         new_batch.recover_for_decode(origin_output_ids)
         # Recover kv cache from kv_transfer_agent
         pt = 0
+        top_k = None
+        top_k_index = None
+        hidden_states = None
+        verified_id = None
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
-            flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            flattened_buffer = self.kv_transfer_agent.get_kv_buffer(req)
+            if new_batch.spec_algorithm is not None:
+                assert isinstance(flattened_buffer,dict)
+                flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
+                flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
+                flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
+                flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
+                if top_k is None or top_k_index is None or hidden_states is None:
+                    top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
+                    top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
+                    hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),))
+                req.top_k = flattened_topk_buffer
+                req.top_k_index = flattened_topk_index_buffer
+                req.hidden_states = flattened_hidden_states_buffer
+                req.verified_id = flattened_verified_id_buffer
+                top_k[i] = flattened_topk_buffer
+                top_k_index[i] = flattened_topk_index_buffer
+                hidden_states[i] = flattened_hidden_states_buffer
+                verified_id[i] = flattened_verified_id_buffer
+                logger.debug(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
+                      f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
+                      f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
+                      f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
+            else:
+                flattened_kv_buffer = flattened_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
@@ -1234,6 +1267,16 @@ class Scheduler(SchedulerOutputProcessorMixin):
                 )
             req.kv_cache_restored = True
             pt += new_batch.extend_lens[i]
+        draft_input = EagleDraftInput()
+        draft_input.hidden_states = hidden_states.to(self.device)
+        draft_input.topk_p = top_k.to(self.device)
+        draft_input.topk_index = top_k_index.to(self.device)
+        draft_input.verified_id = verified_id.to(self.device)
+        logging.debug(f"\n\ndraft_input spec info top k {draft_input.topk_p.shape} {draft_input.topk_p.device} \n"
+                     f"  topk_index spec info topk_index {draft_input.topk_index.shape} {draft_input.topk_index.device}\n"
+                     f" hidden_states: {draft_input.hidden_states.shape} {draft_input.hidden_states.device} \n"
+                     f" verified_id: {draft_input.verified_id.shape} {draft_input.verified_id.device}")
+        new_batch.spec_info = draft_input
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
