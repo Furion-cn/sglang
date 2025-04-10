@@ -537,9 +537,9 @@ class EAGLEWorker(TpModelWorker):
             req.top_k_index = batch.spec_info.topk_index[i]
             req.hidden_states_spec = batch.spec_info.hidden_states[i]
             req.verified_id = batch.spec_info.verified_id[i:i+1]
-            logger.debug(f"\n\nforward_draft_extend top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
+            logger.debug(f"\n\nforward_draft_extend top_k {req.top_k.shape if req.top_k is not None else 0}   \n"
                         f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
-                        f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
+                        f"hidden_states {req.hidden_states_spec.dtype if req.hidden_states_spec.dtype is not None else None} \n"
                         f"verified_id {req.verified_id.shape if req.verified_id is not None else None} \n\n")
 
     def forward_draft_extend_after_decode(self, batch: ScheduleBatch):

@@ -13,6 +13,7 @@
 # ==============================================================================
 
 """Inference-only DeepSeek NextN Speculative Decoding."""
+import logging
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -100,7 +101,7 @@ class DeepseekModelNextN(nn.Module):
             torch.cat(
                 (
                     self.enorm(hidden_states),
-                    self.hnorm(forward_batch.spec_info.hidden_states),
+                    self.hnorm(forward_batch.spec_info.hidden_states.to(dtype=hidden_states.dtype)),
                 ),
                 dim=-1,
             )
