@@ -29,6 +29,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING, List, Optional, Union
@@ -291,8 +292,10 @@ class ForwardBatch:
             ret.spec_info is not None
             and getattr(ret.spec_info, "positions", None) is not None
         ):
+            logging.info(f"Override the positions with spec_info ret.positions={ret.positions.shape} ret.spec_info.positions={ret.spec_info.positions}")
             ret.positions = ret.spec_info.positions
-
+        else :
+            logging.info(f"No Override the positions with spec_info ret.positions={ret.positions.shape} ret.spec_info.positions={ret.spec_info.positions}")
         # Init position information
         if ret.forward_mode.is_decode():
             if ret.positions is None:

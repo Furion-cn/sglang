@@ -83,6 +83,7 @@ class EagleDraftInput:
         seq_lens_cpu = batch.seq_lens.tolist()
 
         self.positions = torch.empty_like(self.verified_id, dtype=torch.long)
+        logger.info(f"prepare_extend_after_decode positions: {self.positions.shape}")
         new_verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
         self.accept_length.add_(1)
 

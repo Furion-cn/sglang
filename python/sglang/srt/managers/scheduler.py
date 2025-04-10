@@ -1495,10 +1495,10 @@ class Scheduler(
                 )
             new_batch.reqs[rid_req_map[rid]].kv_cache_restored = True
         spec_info = EagleDraftInput()
-        spec_info.topk_p = top_k.to(self.device)
-        spec_info.topk_index = top_k_index.to(self.device)
-        spec_info.hidden_states = hidden_states.to(self.device)
-        spec_info.verified_id = verified_id.to(self.device)
+        spec_info.topk_p = top_k.to(self.device) if top_k is not None else None
+        spec_info.topk_index = top_k_index.to(self.device) if top_k_index is not None else None
+        spec_info.hidden_states = hidden_states.to(self.device) if hidden_states is not None else None
+        spec_info.verified_id = verified_id.to(self.device) if verified_id is not None else None
         new_batch.spec_info = spec_info
         return new_batch
 
