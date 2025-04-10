@@ -797,8 +797,6 @@ class Scheduler(
                 self.return_health_check_ct += 1
                 continue
 
-            print(f"process_input_requests recv_req: {recv_req}")
-
             output = self._request_dispatcher(recv_req)
             if output is not None:
                 if isinstance(output, RpcReqOutput):
@@ -1457,7 +1455,7 @@ class Scheduler(
         hidden_states = None
         verified_id = None
         for rid, tensor in kv_bytes_map.items():
-            flattened_buffer = tensor.to(self.device)
+            flattened_buffer = tensor
             if new_batch.spec_algorithm is not None:
                 assert isinstance(flattened_buffer, dict)
                 flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
@@ -1479,10 +1477,10 @@ class Scheduler(
                 hidden_states[rid_req_map[rid]] = flattened_hidden_states_buffer
                 verified_id[rid_req_map[rid]] = flattened_verified_id_buffer
                 logger.debug(
-                    f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n" +
-                    f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
-                    f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
-                    f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
+                    f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {new_batch.reqs[rid_req_map[rid]].top_k.shape} {new_batch.reqs[rid_req_map[rid]].top_k.device},\n" +
+                    f"  top_k_index: {new_batch.reqs[rid_req_map[rid]].top_k_index.shape} {new_batch.reqs[rid_req_map[rid]].top_k_index.device},\n " +
+                    f"  hidden_states: {new_batch.reqs[rid_req_map[rid]].hidden_states_spec.shape} {new_batch.reqs[rid_req_map[rid]].hidden_states_spec.device} \n"
+                    f" verified_id: {new_batch.reqs[rid_req_map[rid]].verified_id.shape} {new_batch.reqs[rid_req_map[rid]].verified_id.device}")
             else:
                 flattened_kv_buffer = flattened_buffer.to(self.device)
             flattened_kv_buffer = flattened_kv_buffer.to(self.device)
@@ -1501,6 +1499,7 @@ class Scheduler(
         spec_info.topk_index = top_k_index.to(self.device)
         spec_info.hidden_states = hidden_states.to(self.device)
         spec_info.verified_id = verified_id.to(self.device)
+        new_batch.spec_info = spec_info
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
