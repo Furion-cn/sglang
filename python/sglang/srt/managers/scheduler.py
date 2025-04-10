@@ -1443,7 +1443,7 @@ class Scheduler(
         try_to_fetch_kv_cache_req_list = []
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
-            rid_req_map[req.rid] = new_batch.reqs[i]
+            rid_req_map[req.rid] = i
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
@@ -1452,18 +1452,55 @@ class Scheduler(
             pt += new_batch.extend_lens[i]
 
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
+        top_k = None
+        top_k_index = None
+        hidden_states = None
+        verified_id = None
         for rid, tensor in kv_bytes_map.items():
-            flattened_kv_buffer = tensor.to(self.device)
+            flattened_buffer = tensor.to(self.device)
+            if new_batch.spec_algorithm is not None:
+                assert isinstance(flattened_buffer, dict)
+                flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
+                flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
+                flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
+                flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
+                if top_k is None or top_k_index is None or hidden_states is None:
+                    top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
+                    top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
+                    hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),))
+                new_batch.reqs[rid_req_map[rid]].top_k = flattened_topk_buffer
+                new_batch.reqs[rid_req_map[rid]].top_k_index = flattened_topk_index_buffer
+                new_batch.reqs[rid_req_map[rid]].hidden_states_spec = flattened_hidden_states_buffer
+                new_batch.reqs[rid_req_map[rid]].verified_id = flattened_verified_id_buffer
+                top_k[rid_req_map[rid]] = flattened_topk_buffer
+                top_k_index[rid_req_map[rid]] = flattened_topk_index_buffer
+                hidden_states[rid_req_map[rid]] = flattened_hidden_states_buffer
+                verified_id[rid_req_map[rid]] = flattened_verified_id_buffer
+                logger.debug(
+                    f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n" +
+                    f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
+                    f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
+                    f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
+            else:
+                flattened_kv_buffer = flattened_buffer.to(self.device)
+            flattened_kv_buffer = flattened_kv_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
                 kv_cache_pool.set_kv_buffer_by_layer(
                     layer_id,
                     new_batch.out_cache_loc[pt_map[rid][0] : pt_map[rid][1]],
-                    layer_kv_buffer[len(rid_req_map[rid].prefix_indices):],
+                    layer_kv_buffer[len(new_batch.reqs[rid_req_map[rid]].prefix_indices):],
                     None
                 )
-            rid_req_map[rid].kv_cache_restored = True
+            new_batch.reqs[rid_req_map[rid]].kv_cache_restored = True
+        spec_info = EagleDraftInput()
+        spec_info.topk_p = top_k.to(self.device)
+        spec_info.topk_index = top_k_index.to(self.device)
+        spec_info.hidden_states = hidden_states.to(self.device)
+        spec_info.verified_id = verified_id.to(self.device)
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:

@@ -280,7 +280,17 @@ class KVTransferAgent:
         res = {}
         for req in req_list:
             kv_cache_bytes = batch_kv_cache[pt:pt+req.kv_cache_length]
-            loaded_tensor = safetensors_load(kv_cache_bytes)["tensor"]
+            loaded_data = safetensors_load(kv_cache_bytes)
+            if len(loaded_data) > 1:  # Has speculative info
+                loaded_tensor = {
+                    "kv_cache": loaded_data["kv_cache"],
+                    "top_k": loaded_data["top_k"],
+                    "top_k_index": loaded_data["top_k_index"],
+                    "hidden_states": loaded_data["hidden_states"],
+                    "verified_id": loaded_data["verified_id"]
+                }
+            else:
+                loaded_tensor = loaded_data["kv_cache"]
             res[req.rid] = loaded_tensor
             pt += req.kv_cache_length
         return res
@@ -295,7 +305,6 @@ class KVTransferAgent:
             mm_inputs=None,
             input_text=req.origin_input_text,
             input_ids=req.origin_input_ids,
-            image_inputs=req.image_inputs,
             sampling_params=req.sampling_params,
             return_logprob=req.return_logprob,
             logprob_start_len=req.logprob_start_len,
