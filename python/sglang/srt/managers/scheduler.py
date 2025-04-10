@@ -1369,9 +1369,11 @@ class Scheduler(
         '''
         pt = 0
         pt_map = {}
+        rid_req_map = {}
         try_to_fetch_kv_cache_req_list = []
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
+            rid_req_map[req.rid] = new_batch.reqs[i]
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
@@ -1388,10 +1390,10 @@ class Scheduler(
                 kv_cache_pool.set_kv_buffer_by_layer(
                     layer_id,
                     new_batch.out_cache_loc[pt_map[rid][0] : pt_map[rid][1]],
-                    layer_kv_buffer[len(req.prefix_indices):],
+                    layer_kv_buffer[len(rid_req_map[rid].prefix_indices):],
                     None
                 )
-            req.kv_cache_restored = True
+            rid_req_map[rid].kv_cache_restored = True
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
