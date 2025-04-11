@@ -654,7 +654,10 @@ def select_top_k_tokens(
 ):
     if i == 0:
         # The first step after extend
+        logger.info(f"def select_top_k_tokens topk_index {topk_index.shape}")
         input_ids = topk_index.flatten()
+        logger.info(f"def select_top_k_tokens input_ids {input_ids.shape}")
+
         hidden_states = hidden_states.repeat_interleave(topk, dim=0)
         scores = topk_p  # shape: (b, topk)
 
