@@ -8,6 +8,7 @@ from sglang.utils import TypeBasedDispatcher
 from sglang.srt.managers.io_struct import (
     BatchEmbeddingOut,
     BatchStrOut,
+    RetryPrefillReq,
 )
 
 from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck, AbortReq, KVTransferFetchBatch
@@ -41,6 +42,7 @@ class PDDisaggregationController:
                 (KVTransferFetch, self._handle_kv_transfer_req),
                 (KVTransferFetchBatch, self._handle_kv_transfer_batch_req),
                 (KVTransferAck, self._handle_kv_transfer_resp),
+                (RetryPrefillReq, self._handle_retry_prefill_req)
             ]
         )
 
@@ -71,4 +73,7 @@ class PDDisaggregationController:
         self.send_to_tokenizer.send_pyobj(req)
        
     def _handle_prefilled_req(self, req: PrefilledReqInput):
+        self.send_to_scheduler.send_pyobj(req)
+    
+    def _handle_retry_prefill_req(self, req: RetryPrefillReq):
         self.send_to_scheduler.send_pyobj(req)

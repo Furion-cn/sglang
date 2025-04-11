@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
-from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck, KVTransferFetchBatch
+from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck, KVTransferFetchBatch, RetryPrefillReq
 from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_PORT
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.mem_cache.radix_cache import ReqToTokenPool, TokenToKVPoolAllocator
@@ -269,14 +269,18 @@ class KVTransferAgent:
             return
         self.send_to_pd_disagg_controller.send_pyobj(PrefilledReqInput(
             rid=req.rid,
-            mm_inputs=None,
             input_text=req.origin_input_text,
             input_ids=req.origin_input_ids,
+            mm_inputs=None,
             sampling_params=req.sampling_params,
             return_logprob=req.return_logprob,
             logprob_start_len=req.logprob_start_len,
             top_logprobs_num=req.top_logprobs_num,
             token_ids_logprob=req.token_ids_logprob,
+            lora_path=req.lora_path,
+            input_embeds=req.input_embeds,
+            custom_logit_processor=req.custom_logit_processor,
+            return_hidden_states=req.return_hidden_states,
             stream=req.stream,
             output_ids=req.output_ids,
             kv_transfer_src_addr=self.addr,
@@ -284,6 +288,29 @@ class KVTransferAgent:
             kv_cache_length=req.kv_cache_length,
         ))
     # when prefill node receive kv transfer request
+
+    def retry_prefill_req(self, req: Req):
+        if self.role == "prefill":
+            return
+        if self.attn_tp_rank!= 0:
+            return
+        self.send_to_pd_disagg_controller.send_pyobj(RetryPrefillReq(
+            rid=req.rid,
+            input_text=req.origin_input_text,
+            input_ids=req.origin_input_ids,
+            mm_inputs=None,
+            sampling_params=req.sampling_params,
+            return_logprob=req.return_logprob,
+            logprob_start_len=req.logprob_start_len,
+            top_logprobs_num=req.top_logprobs_num,
+            token_ids_logprob=req.token_ids_logprob,
+            stream=req.stream,
+            lora_path=req.lora_path,
+            input_embeds=req.input_embeds,
+            custom_logit_processor=req.custom_logit_processor,
+            return_hidden_states=req.return_hidden_states,
+            retry_count=req.retry_count,
+        ))
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
         kv_cache = self.kv_buffer[req.rid]
