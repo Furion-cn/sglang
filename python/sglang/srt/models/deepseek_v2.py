@@ -1264,8 +1264,17 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        pass
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if self.mlp.ep_size > 1:
+            self.mlp.deepep_dispatcher.launch_combine(
+                hidden_states,
+                extra_args.get("topk_idx"),
+                extra_args.get("topk_weights"),
+                forward_mode=forward_batch.forward_mode,
+            )
+            return hidden_states, residual, None
+        return hidden_states, residual, None
     
     def forward_wait_combine_normal(
         self,
@@ -1274,7 +1283,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        pass
+        if self.mlp.ep_size > 1:
+            hidden_states = self.mlp.deepep_dispatcher.wait_combine(forward_batch.forward_mode)
+            return hidden_states, residual, None
+        return hidden_states, residual, None
     
     def forward_step(
         self,
