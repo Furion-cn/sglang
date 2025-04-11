@@ -49,6 +49,11 @@ class KVTransferConfig(BaseModel):
     transfer_engine_metadata_server: str = None
     transfer_engine_rdma_device: str = "mlx5_0"
 
+    # 这里只单向的从 prefill -> decode, 因为只有 prefill 节点接收请求 && warm_up pre_check
+    # 用于 warm_up 前的 health_check
+    decode_cluster_url: str = None
+    decode_cluster_port: int = 30000
+
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
         """Parse the CLI value for the kv cache transfer config."""
@@ -1129,6 +1134,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.disaggregation_bootstrap_port,
             help="Bootstrap server port on the prefill server. Default is 8998.",
+        )
+        parser.add_argument(
+            "--max-req-retry-count",
+            type=int,
+            default=ServerArgs.max_req_retry_count,
+            help="Max number of retries for a request. Default is 3.",
         )
 
     @classmethod
