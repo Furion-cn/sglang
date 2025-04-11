@@ -242,6 +242,7 @@ class DetokenizerManager:
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):
         raise NotImplementedError()  
 
+
 class LimitedCapacityDict(OrderedDict):
     def __init__(self, capacity: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
