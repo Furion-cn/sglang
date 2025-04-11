@@ -31,7 +31,6 @@ from sglang.srt.managers.io_struct import (
     BatchMultimodalDecodeReq,
     BatchStrOut,
     BatchTokenIDOut,
-    RetryPrefillReq,
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
@@ -79,9 +78,6 @@ class DetokenizerManager:
         self.recv_from_scheduler = get_zmq_socket(
             context, zmq.PULL, port_args.detokenizer_ipc_name, True
         )
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
-        )
         if server_args.kv_transfer_config is not None and server_args.kv_transfer_config.role == "decode":
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, f"tcp://{server_args.kv_transfer_config.prefill_dist_init_host}:{PD_DISAGGREGATION_PORT}", False
@@ -109,7 +105,6 @@ class DetokenizerManager:
                 (BatchEmbeddingOut, self.handle_batch_embedding_out),
                 (BatchTokenIDOut, self.handle_batch_token_id_out),
                 (BatchMultimodalDecodeReq, self.handle_multimodal_decode_req),
-                (RetryPrefillReq, self._handle_retry_prefill_req),
             ]
         )
 
@@ -245,10 +240,7 @@ class DetokenizerManager:
         )
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):
-        raise NotImplementedError()
-        
-    def _handle_retry_prefill_req(self, recv_obj: RetryPrefillReq):
-        self.send_to_scheduler.send_pyobj(recv_obj)            
+        raise NotImplementedError()  
 
 class LimitedCapacityDict(OrderedDict):
     def __init__(self, capacity: int, *args, **kwargs):
