@@ -801,6 +801,7 @@ def _wait_and_warmup(
             kill_process_tree(os.getpid())
             return
 
+    _global_state.model_ready = True
     logger.info("The server is fired up and ready to roll!")
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")
