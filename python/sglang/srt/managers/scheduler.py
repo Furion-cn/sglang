@@ -1424,11 +1424,10 @@ class Scheduler(
             try_to_fetch_kv_cache_req_list.append(req)
             pt_map[req.rid] = (pt, pt + new_batch.extend_lens[i])
             pt += new_batch.extend_lens[i]
-            
+
         if refetch_reqs:
             keep_indices = [i for i in range(new_batch.batch_size()) if new_batch.reqs[i] not in refetch_reqs]
             
-            # 处理所有需要重试的请求
             for req in refetch_reqs:
                 req.need_refetch_kv_cache = False
                 retry_req = RetryPrefillReq(
@@ -1451,11 +1450,9 @@ class Scheduler(
                 )
                 self.send_to_tokenizer.send_pyobj(retry_req)
             
-            # 如果所有请求都需要重试，直接返回
             if not keep_indices:
                 return None
                 
-            # 否则过滤批次，只保留不需要重试的请求
             new_batch.filter_batch(keep_indices=keep_indices)
         
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
