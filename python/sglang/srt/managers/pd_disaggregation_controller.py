@@ -76,4 +76,4 @@ class PDDisaggregationController:
         self.send_to_scheduler.send_pyobj(req)
     
     def _handle_retry_prefill_req(self, req: RetryPrefillReq):
-        self.send_to_tokenizer.send_pyobj(req)
+        self.send_to_scheduler.send_pyobj(req)

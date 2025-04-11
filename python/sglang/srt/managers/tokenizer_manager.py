@@ -289,7 +289,6 @@ class TokenizerManager:
                     self._handle_batch_output,
                 ),
                 (OpenSessionReqOutput, self._handle_open_session_req_output),
-                (RetryPrefillReq, self._handle_retry_prefill_req),
                 (
                     UpdateWeightFromDiskReqOutput,
                     self._handle_update_weights_from_disk_req_output,
@@ -1157,10 +1156,6 @@ class TokenizerManager:
         self.session_futures[recv_obj.session_id].set_result(
             recv_obj.session_id if recv_obj.success else None
         )
-
-    def _handle_retry_prefill_req(self, recv_obj: RetryPrefillReq):
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self.send_to_scheduler.send_pyobj(recv_obj)
 
     def _handle_update_weights_from_disk_req_output(self, recv_obj):
         if self.server_args.dp_size == 1:

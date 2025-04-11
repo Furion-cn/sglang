@@ -1404,11 +1404,11 @@ class Scheduler(
             req.kv_cache_restored = True
             pt += new_batch.extend_lens[i]
         '''
+        
         pt = 0
         pt_map = {}
         rid_req_map = {}
         try_to_fetch_kv_cache_req_list = []
-        refetch_reqs = []
 
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
@@ -1424,36 +1424,6 @@ class Scheduler(
             try_to_fetch_kv_cache_req_list.append(req)
             pt_map[req.rid] = (pt, pt + new_batch.extend_lens[i])
             pt += new_batch.extend_lens[i]
-
-        if refetch_reqs:
-            keep_indices = [i for i in range(new_batch.batch_size()) if new_batch.reqs[i] not in refetch_reqs]
-            
-            for req in refetch_reqs:
-                req.need_refetch_kv_cache = False
-                retry_req = RetryPrefillReq(
-                    origin_req=PrefilledReqInput(
-                        rid=req.rid,
-                        input_text=req.input_text,
-                        input_ids=req.input_ids,
-                        mm_inputs=req.mm_inputs,
-                        sampling_params=req.sampling_params,
-                        return_logprob=req.return_logprob,
-                        logprob_start_len=req.logprob_start_len,
-                        top_logprobs_num=req.top_logprobs_num,
-                        token_ids_logprob=req.token_ids_logprob,
-                        stream=req.stream,
-                        lora_path=req.lora_path,
-                        input_embeds=req.input_embeds,
-                        custom_logit_processor=req.custom_logit_processor,
-                        return_hidden_states=req.return_hidden_states,
-                    )
-                )
-                self.send_to_tokenizer.send_pyobj(retry_req)
-            
-            if not keep_indices:
-                return None
-                
-            new_batch.filter_batch(keep_indices=keep_indices)
         
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
         for rid, tensor in kv_bytes_map.items():

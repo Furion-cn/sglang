@@ -143,6 +143,15 @@ class FINISH_ABORT(BaseFinishReason):
             "err_type": self.err_type,
         }
 
+class FINISH_RETRY(BaseFinishReason):
+    def __init__(self, retry_input: RetryPrefillReq):
+        super().__init__()
+        self.retry_input = retry_input
+    def to_json(self):
+        return {
+            "type": "retry",
+            "retry_input": self.retry_input,
+        }
 
 @dataclasses.dataclass
 class MultimodalInputs:
@@ -1336,6 +1345,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             idx = sorted_indices.pop()
             req = self.reqs[idx]
             retracted_reqs.append(req)
+            
+            req.finished_reason = FINISH_RETRY(
+                    f"Failed request: session id {req.rid} is retract, waitting for retry"
+                )
 
             if isinstance(self.tree_cache, ChunkCache):
                 # ChunkCache does not have eviction
