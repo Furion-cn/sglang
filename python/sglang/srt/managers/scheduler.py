@@ -77,6 +77,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    RetryPrefillReq,
     RpcReqInput,
     RpcReqOutput,
     SetInternalStateReq,
@@ -428,6 +429,7 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (RpcReqInput, self.handle_rpc_request),
                 (ExpertDistributionReq, self.expert_distribution_handle),
+                (RetryPrefillReq, self._handle_retry_prefill_req),
             ]
         )
 
@@ -1406,15 +1408,55 @@ class Scheduler(
         pt_map = {}
         rid_req_map = {}
         try_to_fetch_kv_cache_req_list = []
+        refetch_reqs = []
+
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             rid_req_map[req.rid] = new_batch.reqs[i]
+
+            if req.need_refetch_kv_cache:
+                refetch_reqs.append(req)
+                continue
+
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
             try_to_fetch_kv_cache_req_list.append(req)
             pt_map[req.rid] = (pt, pt + new_batch.extend_lens[i])
             pt += new_batch.extend_lens[i]
+            
+        if refetch_reqs:
+            keep_indices = [i for i in range(new_batch.batch_size()) if new_batch.reqs[i] not in refetch_reqs]
+            
+            # 处理所有需要重试的请求
+            for req in refetch_reqs:
+                req.need_refetch_kv_cache = False
+                retry_req = RetryPrefillReq(
+                    origin_req=PrefilledReqInput(
+                        rid=req.rid,
+                        input_text=req.input_text,
+                        input_ids=req.input_ids,
+                        mm_inputs=req.mm_inputs,
+                        sampling_params=req.sampling_params,
+                        return_logprob=req.return_logprob,
+                        logprob_start_len=req.logprob_start_len,
+                        top_logprobs_num=req.top_logprobs_num,
+                        token_ids_logprob=req.token_ids_logprob,
+                        stream=req.stream,
+                        lora_path=req.lora_path,
+                        input_embeds=req.input_embeds,
+                        custom_logit_processor=req.custom_logit_processor,
+                        return_hidden_states=req.return_hidden_states,
+                    )
+                )
+                self.send_to_tokenizer.send_pyobj(retry_req)
+            
+            # 如果所有请求都需要重试，直接返回
+            if not keep_indices:
+                return None
+                
+            # 否则过滤批次，只保留不需要重试的请求
+            new_batch.filter_batch(keep_indices=keep_indices)
         
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
         for rid, tensor in kv_bytes_map.items():
@@ -1939,6 +1981,28 @@ class Scheduler(
 
         barrier()
         return RpcReqOutput(success, "" if not exec else str(exec))
+
+    def _handle_retry_prefill_req(self, recv_req: RetryPrefillReq):
+        prefilled_req = recv_req.origin_req
+
+        tokenized_req = TokenizedGenerateReqInput(
+            rid=prefilled_req.rid,
+            input_text=prefilled_req.input_text,
+            input_ids=prefilled_req.input_ids,
+            mm_inputs=prefilled_req.mm_inputs,
+            sampling_params=prefilled_req.sampling_params,
+            return_logprob=prefilled_req.return_logprob,
+            logprob_start_len=prefilled_req.logprob_start_len,
+            top_logprobs_num=prefilled_req.top_logprobs_num,
+            token_ids_logprob=prefilled_req.token_ids_logprob,
+            stream=prefilled_req.stream,
+            lora_path=prefilled_req.lora_path,
+            input_embeds=prefilled_req.input_embeds,
+            custom_logit_processor=prefilled_req.custom_logit_processor,
+            return_hidden_states=prefilled_req.return_hidden_states,
+        )
+        
+        self.handle_generate_request(tokenized_req)
 
     def save_remote_model(self, params):
         url = params["url"]

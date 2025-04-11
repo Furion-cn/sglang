@@ -696,6 +696,11 @@ class PrefilledReqInput(TokenizedGenerateReqInput):
     kv_cache_length: Optional[int] = None
     output_ids: Optional[List[int]] = None
 
+@dataclass
+class RetryPrefillReq:
+    def __init__(self, req: PrefilledReqInput):
+        self.origin_req = req
+        self.is_retry = True
 
 @dataclass
 class KVTransferFetch:
