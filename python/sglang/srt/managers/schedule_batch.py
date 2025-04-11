@@ -1344,11 +1344,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             first_iter = False
             idx = sorted_indices.pop()
             req = self.reqs[idx]
-            retracted_reqs.append(req)
-            
+
             req.finished_reason = FINISH_RETRY(
                     f"Failed request: session id {req.rid} is retract, waitting for retry"
                 )
+            retracted_reqs.append(req)
+        
 
             if isinstance(self.tree_cache, ChunkCache):
                 # ChunkCache does not have eviction
