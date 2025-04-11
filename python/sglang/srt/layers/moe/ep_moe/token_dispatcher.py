@@ -112,6 +112,20 @@ class _DeepEPDispatcherImplBase:
         self.params_bytes = 2
 
         self.handle = None
+        self.event = None
+        
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ):
+        raise NotImplementedError
+    
+    def wait_dispatch(self):
+        raise NotImplementedError
 
     def dispatch_a(
         self,
@@ -148,6 +162,57 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.async_finish = async_finish
         self.src2dst = None
 
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ):
+        topk_idx = topk_idx.to(torch.int64)
+        previous_event = Buffer.capture() if self.async_finish else None
+        (
+            self.hidden_states,
+            self.topk_idx,
+            self.topk_weights,
+            self.event,
+        ) = self._dispatch_core(
+            hidden_states, topk_idx, topk_weights, num_experts, previous_event
+        )
+    
+    def wait_dispatch(self):
+        self.event.current_stream_wait() if self.async_finish else ()
+        
+        hidden_states = self.hidden_states
+        topk_idx = self.topk_idx
+        topk_weights = self.topk_weights
+        
+        if self.hidden_states.shape[0] > 0:
+            reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
+                hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
+            )
+        else:
+            reorder_topk_ids = torch.empty(
+                (0,), device=hidden_states.device, dtype=torch.int64
+            )
+            seg_indptr = torch.zeros(
+                (self.num_experts + 1,), device=hidden_states.device, dtype=torch.int64
+            )
+
+        masked_m = expected_m = None
+
+        return (
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            reorder_topk_ids,
+            seg_indptr,
+            masked_m,
+            expected_m,
+        )
+        
+    
     def dispatch_a(
         self,
         hidden_states: torch.Tensor,
@@ -538,6 +603,19 @@ class DeepEPDispatcher:
                 return_recv_hook=return_recv_hook,
                 **common_kwargs,
             )
+
+    def launch_dispatch(
+        self, 
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int = 128,
+        forward_mode: ForwardMode = None):
+        self._get_impl(forward_mode).launch_dispatch(hidden_states, topk_idx, topk_weights, num_experts, num_max_dispatch_tokens_per_rank)
+
+    def wait_dispatch(self, forward_mode: ForwardMode = None) -> Tuple:
+        return self._get_impl(forward_mode).wait_dispatch()
 
     def dispatch(self, *args, **kwargs) -> Tuple:
         self.dispatch_a(*args, **kwargs)
