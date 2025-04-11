@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import BatchEmbeddingOut, BatchTokenIDOut, RetryPrefillReq
-from sglang.srt.managers.schedule_batch import FINISH_ABORT, BaseFinishReason, Req, ScheduleBatch
+from sglang.srt.managers.schedule_batch import FINISH_ABORT, FINISH_RETRY, BaseFinishReason, Req, ScheduleBatch
 from sglang.srt.managers.schedule_batch import PDStep
 from sglang.srt.managers.io_struct import PrefilledReqInput
 
@@ -508,8 +508,8 @@ class SchedulerOutputProcessorMixin:
                 continue
             
             # retry
-            if isinstance(req.finished_reason, FINISH_ABORT):
-                req.pd_step = PDStep.DISPATCHING
+            if isinstance(req.finished_reason, FINISH_RETRY):
+                req.pd_step = PDStep.PREFILL
                 self.kv_transfer_agent.retry_prefill_req(req)
                 continue
 

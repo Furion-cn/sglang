@@ -295,23 +295,22 @@ class KVTransferAgent:
         if self.attn_tp_rank!= 0:
             return
         self.send_to_pd_disagg_controller.send_pyobj(RetryPrefillReq(
-                    origin_req=PrefilledReqInput(
-                        rid=req.rid,
-                        input_text=req.origin_input_text,
-                        input_ids=req.origin_input_ids,
-                        mm_inputs=None,
-                        sampling_params=req.sampling_params,
-                        return_logprob=req.return_logprob,
-                        logprob_start_len=req.logprob_start_len,
-                        top_logprobs_num=req.top_logprobs_num,
-                        token_ids_logprob=req.token_ids_logprob,
-                        stream=req.stream,
-                        lora_path=req.lora_path,
-                        input_embeds=req.input_embeds,
-                        custom_logit_processor=req.custom_logit_processor,
-                        return_hidden_states=req.return_hidden_states,
-                    )
-                ))
+            rid=req.rid,
+            input_text=req.origin_input_text,
+            input_ids=req.origin_input_ids,
+            mm_inputs=None,
+            sampling_params=req.sampling_params,
+            return_logprob=req.return_logprob,
+            logprob_start_len=req.logprob_start_len,
+            top_logprobs_num=req.top_logprobs_num,
+            token_ids_logprob=req.token_ids_logprob,
+            stream=req.stream,
+            lora_path=req.lora_path,
+            input_embeds=req.input_embeds,
+            custom_logit_processor=req.custom_logit_processor,
+            return_hidden_states=req.return_hidden_states,
+            retry_count=req.retry_count,
+        ))
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
         kv_cache = self.kv_buffer[req.rid]

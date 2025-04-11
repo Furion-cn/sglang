@@ -304,6 +304,8 @@ class TokenizedGenerateReqInput:
     # Whether to return hidden states
     return_hidden_states: bool = False
 
+    # Single Request Retry Count
+    retry_count: int = 0
 
 @dataclass
 class EmbeddingReqInput:
@@ -697,10 +699,8 @@ class PrefilledReqInput(TokenizedGenerateReqInput):
     output_ids: Optional[List[int]] = None
 
 @dataclass
-class RetryPrefillReq:
-    def __init__(self, req: PrefilledReqInput):
-        self.origin_req = req
-        self.is_retry = True
+class RetryPrefillReq(TokenizedGenerateReqInput):
+    pass
 
 @dataclass
 class KVTransferFetch:

@@ -847,6 +847,7 @@ class Scheduler(
                 custom_logit_processor=custom_logit_processor,
                 return_hidden_states=recv_req.return_hidden_states,
                 eos_token_ids=self.model_config.hf_eos_token_id,
+                retry_count=recv_req.retry_count,
             )
             req.tokenizer = self.tokenizer
 
@@ -1950,26 +1951,7 @@ class Scheduler(
         return RpcReqOutput(success, "" if not exec else str(exec))
 
     def _handle_retry_prefill_req(self, recv_req: RetryPrefillReq):
-        prefilled_req = recv_req.origin_req
-
-        tokenized_req = TokenizedGenerateReqInput(
-            rid=prefilled_req.rid,
-            input_text=prefilled_req.input_text,
-            input_ids=prefilled_req.input_ids,
-            mm_inputs=prefilled_req.mm_inputs,
-            sampling_params=prefilled_req.sampling_params,
-            return_logprob=prefilled_req.return_logprob,
-            logprob_start_len=prefilled_req.logprob_start_len,
-            top_logprobs_num=prefilled_req.top_logprobs_num,
-            token_ids_logprob=prefilled_req.token_ids_logprob,
-            stream=prefilled_req.stream,
-            lora_path=prefilled_req.lora_path,
-            input_embeds=prefilled_req.input_embeds,
-            custom_logit_processor=prefilled_req.custom_logit_processor,
-            return_hidden_states=prefilled_req.return_hidden_states,
-        )
-        
-        self.handle_generate_request(tokenized_req)
+        self.handle_generate_request(TokenizedGenerateReqInput(recv_req))
 
     def save_remote_model(self, params):
         url = params["url"]

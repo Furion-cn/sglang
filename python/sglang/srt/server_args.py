@@ -74,6 +74,7 @@ class ServerArgs:
     completion_template: Optional[str] = None
     is_embedding: bool = False
     revision: Optional[str] = None
+    max_req_retry_count: int = 3
 
     # Port for the HTTP server
     host: str = "127.0.0.1"
