@@ -13,6 +13,8 @@
 # ==============================================================================
 
 """Inference-only DeepSeek NextN Speculative Decoding."""
+import logging
+import time
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -100,7 +102,7 @@ class DeepseekModelNextN(nn.Module):
             torch.cat(
                 (
                     self.enorm(hidden_states),
-                    self.hnorm(forward_batch.spec_info.hidden_states),
+                    self.hnorm(forward_batch.spec_info.hidden_states.to(dtype=hidden_states.dtype)),
                 ),
                 dim=-1,
             )
@@ -156,6 +158,10 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        logging.info(f"***forward*** input_ids {input_ids.shape} positions {positions.shape}")
+        if input_ids.shape != positions.shape:
+            logging.info(f"***Not equal !!!! forward*** input_ids {input_ids.shape} positions {positions.shape}")
+            time.sleep(100000)
         hidden_states = self.model(input_ids, positions, forward_batch)
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch

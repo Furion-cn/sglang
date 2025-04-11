@@ -327,6 +327,7 @@ class EAGLEWorker(TpModelWorker):
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
+        logger.info(f"---eagle worker draft input positions--- {forward_batch.positions.shape}")
         can_cuda_graph = self.cuda_graph_runner and self.cuda_graph_runner.can_run(
             forward_batch
         )
@@ -379,6 +380,7 @@ class EAGLEWorker(TpModelWorker):
             input_ids, hidden_states, scores, tree_info = select_top_k_tokens(
                 i, topk_p, topk_index, hidden_states, scores, self.topk
             )
+            logger.info(f"---eagle worker draft forward positions--- i =  {i} input_ids = {input_ids.shape} positions = {forward_batch.positions.shape}")
             score_list.append(tree_info[0])
             token_list.append(tree_info[1])
             parents_list.append(tree_info[2])
@@ -529,6 +531,18 @@ class EAGLEWorker(TpModelWorker):
         assert isinstance(forward_batch.spec_info, EagleDraftInput)
         assert forward_batch.spec_info is batch.spec_info
         self.capture_for_decode(logits_output, forward_batch.spec_info)
+        # restore spec info for pd disaggregation
+        logger.debug(f"\n\nspec info  batch.spec_info.verified_id.shape {batch.spec_info.verified_id.shape} forward_batch.spec_info.verified_id.shape {forward_batch.spec_info.verified_id.shape} \n\n")
+        for i,req in enumerate(batch.reqs):
+            req.speculative_algorithm = batch.spec_algorithm
+            req.top_k = batch.spec_info.topk_p[i]
+            req.top_k_index = batch.spec_info.topk_index[i]
+            req.hidden_states_spec = batch.spec_info.hidden_states[i]
+            req.verified_id = batch.spec_info.verified_id[i:i+1]
+            logger.info(f"\n\nforward_draft_extend top_k {req.top_k.shape if req.top_k is not None else 0}   \n"
+                        f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
+                        f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec.dtype is not None else None} \n"
+                        f"verified_id {req.verified_id.shape if req.verified_id is not None else None} \n\n")
 
     def forward_draft_extend_after_decode(self, batch: ScheduleBatch):
         # Backup fileds that will be modified in-place
@@ -543,6 +557,7 @@ class EAGLEWorker(TpModelWorker):
             batch,
             self.speculative_num_steps,
         )
+        logger.info(f"forward_draft_extend_after_decode {batch.spec_info.positions.shape}")
         batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         batch.return_logprob = False
         model_worker_batch = batch.get_model_worker_batch()

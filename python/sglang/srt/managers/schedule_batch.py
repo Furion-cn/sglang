@@ -360,6 +360,13 @@ class Req:
         self.kv_cache_length = kv_cache_length
         self.kv_cache_restored = False
 
+        # speculative decoding
+        self.top_k : torch.Tensor = None
+        self.top_k_index : torch.Tensor = None
+        self.hidden_states_spec : torch.Tensor = None
+        self.verified_id : torch.Tensor = None
+        self.speculative_algorithm = None
+
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):
             sampling_params = copy.copy(sampling_params)
@@ -616,6 +623,10 @@ class Req:
         self.extend_logprob_start_len = 0
         self.is_chunked = 0
         self.req_pool_idx = None
+        self.top_k_index = None
+        self.top_k = None
+        self.hidden_states = None
+        self.verified_id = None
 
     def __repr__(self):
         return (
