@@ -317,9 +317,9 @@ class KVTransferAgent:
             kv_cache_length=req.kv_cache_length,
         ))
         if getattr(req,"rid",None) is not None:
-            logging.info(f"Trans Prefilled req {req.rid}")
+            logging.debug(f"Trans Prefilled req {req.rid}")
             if getattr(req,"origin_input_text",None) is not None:
-                logging.info(f"Trans Prefilled req text {req.origin_input_text}")
+                logging.debug(f"Trans Prefilled req text {req.origin_input_text}")
     # when prefill node receive kv transfer request
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):

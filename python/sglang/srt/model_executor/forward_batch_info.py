@@ -292,12 +292,8 @@ class ForwardBatch:
             ret.spec_info is not None
             and getattr(ret.spec_info, "positions", None) is not None
         ):
-            logging.info(f"Override1 the positions with spec_info ret.positions={ret.positions.shape if ret.positions is not None else None} ret.spec_info.positions={ret.spec_info.positions.shape if ret.spec_info.positions is not None else None}")
             ret.positions = ret.spec_info.positions
-            logging.info(f"Override2 the positions with spec_info ret.positions={ret.positions.shape if ret.positions is not None else None} ret.spec_info.positions={ret.spec_info.positions.shape if ret.spec_info.positions is not None else None}")
 
-        else:
-            logging.info(f"No Override the positions with spec_info ret.positions={ret.positions.shape if ret.positions is not None else None} ")
         # Init position information
         if ret.forward_mode.is_decode():
             if ret.positions is None:

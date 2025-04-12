@@ -327,7 +327,6 @@ class EAGLEWorker(TpModelWorker):
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-        logger.info(f"---eagle worker draft input positions--- {forward_batch.positions.shape}")
         can_cuda_graph = self.cuda_graph_runner and self.cuda_graph_runner.can_run(
             forward_batch
         )
@@ -380,7 +379,6 @@ class EAGLEWorker(TpModelWorker):
             input_ids, hidden_states, scores, tree_info = select_top_k_tokens(
                 i, topk_p, topk_index, hidden_states, scores, self.topk
             )
-            logger.info(f"---eagle worker draft forward positions--- i =  {i} input_ids = {input_ids.shape} positions = {forward_batch.positions.shape}")
             score_list.append(tree_info[0])
             token_list.append(tree_info[1])
             parents_list.append(tree_info[2])
@@ -557,7 +555,6 @@ class EAGLEWorker(TpModelWorker):
             batch,
             self.speculative_num_steps,
         )
-        logger.info(f"forward_draft_extend_after_decode {batch.spec_info.positions.shape}")
         batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         batch.return_logprob = False
         model_worker_batch = batch.get_model_worker_batch()

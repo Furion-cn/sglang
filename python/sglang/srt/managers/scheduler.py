@@ -619,7 +619,7 @@ class Scheduler(
                 if getattr(req, "rid", False):
                     self.all_req_ids.add(req.rid)
                     self.all_req[req.rid] = req
-                    logger.info(f"recv req at event_loop_normal {req.rid}")
+                    logger.debug(f"recv req at event_loop_normal {req.rid}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -646,7 +646,7 @@ class Scheduler(
                 if getattr(req, "rid", False):
                     self.all_req_ids.add(req.rid)
                     self.all_req[req.rid] = req
-                    logger.info(f"recv req at event_loop_normal {req.rid}")
+                    logger.debug(f"recv req at event_loop_normal {req.rid}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -1483,7 +1483,7 @@ class Scheduler(
         hidden_states = torch.zeros(new_batch.batch_size(),self.model_config.hidden_size)
         verified_id = torch.zeros(new_batch.batch_size())
         rand_num = randn(1)
-        logger.info(f"kv_bytes_map len {len(kv_bytes_map)}  try_to_fetch_kv_cache_req_list {len(try_to_fetch_kv_cache_req_list)}  new_batch.batch_size() {new_batch.batch_size()} rand_num {rand_num}")
+        logger.debug(f"kv_bytes_map len {len(kv_bytes_map)}  try_to_fetch_kv_cache_req_list {len(try_to_fetch_kv_cache_req_list)}  new_batch.batch_size() {new_batch.batch_size()} rand_num {rand_num}")
         for rid, tensor in kv_bytes_map.items():
             flattened_buffer = tensor
             if new_batch.spec_algorithm is not None:
@@ -1506,12 +1506,12 @@ class Scheduler(
                 top_k_index[rid_req_map[rid]] = flattened_topk_index_buffer
                 hidden_states[rid_req_map[rid]] = flattened_hidden_states_buffer
                 verified_id[rid_req_map[rid]] = flattened_verified_id_buffer
-                logger.info(
+                logger.debug(
                     f"{self.tp_rank} rand_num {rand_num} recover_new_prefilled_batch spec info top k: {new_batch.reqs[rid_req_map[rid]].top_k.shape} {new_batch.reqs[rid_req_map[rid]].top_k.device},\n" +
                     f"  top_k_index: {new_batch.reqs[rid_req_map[rid]].top_k_index.shape} {new_batch.reqs[rid_req_map[rid]].top_k_index.device},\n " +
                     f"  hidden_states: {new_batch.reqs[rid_req_map[rid]].hidden_states_spec.shape} {new_batch.reqs[rid_req_map[rid]].hidden_states_spec.device} \n"
                     f" verified_id: {new_batch.reqs[rid_req_map[rid]].verified_id.shape} {new_batch.reqs[rid_req_map[rid]].verified_id.device}")
-                logger.info(f"recover_new_prefilled_batch(oral_recover) topk_p {top_k.shape if top_k is not None else None}\n"
+                logger.debug(f"recover_new_prefilled_batch(oral_recover) topk_p {top_k.shape if top_k is not None else None}\n"
                             f"topk_index {top_k_index.shape if top_k_index is not None else None}\n"
                             f"hidden_states {hidden_states.shape if hidden_states is not None else None}\n"
                             f"verified_id {verified_id.shape if verified_id is not None else None}\n"
@@ -1536,11 +1536,11 @@ class Scheduler(
             spec_info.hidden_states = hidden_states.to(self.device)
             spec_info.verified_id = verified_id.to(self.device)
             new_batch.spec_info = spec_info
-            logger.info(f" rand_num {rand_num} recover_new_prefilled_batch(oral) topk_p {top_k.shape if top_k is not None else None}\n"
+            logger.debug(f" rand_num {rand_num} recover_new_prefilled_batch(oral) topk_p {top_k.shape if top_k is not None else None}\n"
                         f"topk_index {top_k_index.shape if top_k_index is not None else None}\n"
                         f"hidden_states {hidden_states.shape if hidden_states is not None else None}\n"
                         f"verified_id {verified_id.shape if verified_id is not None else None}")
-            logger.info(f" rand_num {rand_num} recover_new_prefilled_batch(self) topk_index {new_batch.spec_info.topk_index.shape if new_batch.spec_info.topk_index is not None else None}")
+            logger.debug(f" rand_num {rand_num} recover_new_prefilled_batch(self) topk_index {new_batch.spec_info.topk_index.shape if new_batch.spec_info.topk_index is not None else None}")
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:

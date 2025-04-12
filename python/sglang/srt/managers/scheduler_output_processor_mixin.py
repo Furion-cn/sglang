@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -270,12 +271,12 @@ class SchedulerOutputProcessorMixin:
             self.current_stream.synchronize()
             batch.next_batch_sampling_info.sampling_info_done.set()
         reqs = [*batch.reqs, *self.retract_req_queue]
-        self.retract_req_queue = []
-        self.retract_queue = []
         self.stream_output(reqs, batch.return_logprob)
 
         self.token_to_kv_pool_allocator.free_group_end()
 
+        self.retract_req_queue = []
+        self.retract_queue = []
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
         if (
             self.attn_tp_rank == 0

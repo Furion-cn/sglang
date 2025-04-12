@@ -83,7 +83,6 @@ class EagleDraftInput:
         seq_lens_cpu = batch.seq_lens.tolist()
 
         self.positions = torch.empty_like(self.verified_id, dtype=torch.long)
-        logger.info(f"prepare_extend_after_decode positions: {self.positions.shape}")
         new_verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
         self.accept_length.add_(1)
 
@@ -654,10 +653,7 @@ def select_top_k_tokens(
 ):
     if i == 0:
         # The first step after extend
-        logger.info(f"def select_top_k_tokens topk_index {topk_index.shape}")
         input_ids = topk_index.flatten()
-        logger.info(f"def select_top_k_tokens input_ids {input_ids.shape}")
-
         hidden_states = hidden_states.repeat_interleave(topk, dim=0)
         scores = topk_p  # shape: (b, topk)
 
