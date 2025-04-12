@@ -624,3 +624,7 @@ class DeepEPDispatcher:
             return self._low_latency_dispatcher
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
+
+
+DeepEPDispatcherImplLowLatency = _DeepEPDispatcherImplLowLatency
+DeepEPDispatcherImplNormal = _DeepEPDispatcherImplNormal

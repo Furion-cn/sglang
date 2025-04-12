@@ -50,6 +50,8 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, EPMoE
+from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher, DeepEPDispatcherImplLowLatency, \
+    DeepEPDispatcherImplNormal
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -98,15 +100,26 @@ DECODE_ATTN_0_STEP = "attn_0"
 DECODE_ATTN_1_STEP = "attn_1"
 DECODE_SHARED_EXPERTS_STEP = "shared_experts"
 DECODE_MLP_STEP = "mlp"
-DECODE_WAIT_LL_DISPATCH_STEP = "wait_ll_dispatch"
-DECODE_WAIT_LL_COMBINE_STEP = "wait_ll_combine"
-DECODE_LAUNCH_LL_DISPATCH_STEP = "launch_ll_dispatch"
-DECODE_LAUNCH_LL_COMBINE_STEP = "launch_ll_combine"
+DECODE_LAUNCH_DISPATCH_LL_STEP = "launch_dispatch_ll"
+DECODE_WAIT_DISPATCH_LL_STEP = "wait_dispatch_ll"
+DECODE_LAUNCH_COMBINE_LL_STEP = "launch_combine_ll"
+DECODE_WAIT_COMBINE_LL_STEP = "wait_combine_ll"
+
 # common extra_args keys
 EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY = "last_layer_shared_experts_output"
-EXTRA_ARGS_ATTN_0_Q_INPUT_KET = "attn_0_q_input"
-EXTRA_ARGS_ATTN_0_K_INPUT_KET = "attn_0_k_input"
-EXTRA_ARGS_ATTN_0_V_INPUT_KET = "attn_0_v_input"
+EXTRA_ARGS_ATTN_0_Q_INPUT_KEY = "attn_0_q_input"
+EXTRA_ARGS_ATTN_0_K_INPUT_KEY = "attn_0_k_input"
+EXTRA_ARGS_ATTN_0_V_INPUT_KEY = "attn_0_v_input"
+EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY = "attn_1_topk_weights"
+EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY = "attn_1_topk_idx"
+
+# get reorder_topk_ids, seg_indptr, masked_m, expected_m from extra_args
+EXTRA_ARGS_REORDER_TOPK_IDS_KEY = "reorder_topk_ids"
+EXTRA_ARGS_SEG_INDPTR_KEY = "seg_indptr"
+EXTRA_ARGS_MASKED_M_KEY = "masked_m"
+EXTRA_ARGS_EXPECTED_M_KEY = "expected_m"
+EXTRA_ARGS_EVENT_KEY = "event"
+EXTRA_ARGS_HOOK_KEY = "hook"
 
 
 class DeepseekV2MLP(nn.Module):
@@ -175,6 +188,116 @@ class MoEGate(nn.Module):
     def forward(self, hidden_states):
         logits = F.linear(hidden_states, self.weight, None)
         return logits
+
+
+class DeepseekV2TwoMicroBatchesDeepEPMoE(nn.Module):
+    """
+    note:
+    1. MoE consists of MoEGate, MLP and DeepEP Dispatcher
+    2. constraints: only support DeepEP
+    """
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.n_shared_experts = config.n_shared_experts
+        self.n_share_experts_fusion = (
+            global_server_args_dict["n_share_experts_fusion"]
+            if global_server_args_dict["n_share_experts_fusion"] is not None
+            else 0
+        )
+
+        self.routed_scaling_factor = config.routed_scaling_factor
+        if self.tp_size > config.n_routed_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {config.n_routed_experts}."
+            )
+
+        if config.hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {config.hidden_act}. "
+                "Only silu is supported for now."
+            )
+
+        self.gate = MoEGate(config=config, prefix=add_prefix("gate", prefix))
+
+        self.experts = DeepEPMoE(
+            num_experts=config.n_routed_experts + self.n_share_experts_fusion,
+            top_k=config.num_experts_per_tok + min(self.n_share_experts_fusion, 1),
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            correction_bias=self.gate.e_score_correction_bias,
+            prefix=add_prefix("experts", prefix),
+            **(
+                dict(deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
+                if global_server_args_dict["enable_deepep_moe"]
+                else {}
+            ),
+        )
+
+        if config.n_shared_experts is not None and self.n_share_experts_fusion == 0:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            self.shared_experts = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+                prefix=add_prefix("shared_experts", prefix),
+                tp_rank=0,
+                tp_size=1,
+            )
+
+        self.ep_size = get_tensor_model_parallel_world_size()
+        self.num_experts = config.n_routed_experts
+        self.top_k = config.num_experts_per_tok
+        self.renormalize = config.norm_topk_prob
+        self.topk_group = config.topk_group
+        self.num_expert_group = config.n_group
+        self.correction_bias = (
+            self.gate.e_score_correction_bias.data
+            if self.gate.e_score_correction_bias is not None
+            else None
+        )
+
+        # DeepEPDispatcher
+        common_kwargs = dict(
+            group=parallel_state.get_tp_group().device_group,
+            router_topk=self.top_k,
+            permute_fusion=True,
+            num_experts=config.n_routed_experts,
+            num_local_experts=config.n_routed_experts // self.tp_size,
+            hidden_size=config.hidden_size,
+            params_dtype=config.torch_dtype,
+        )
+
+        if self.deepep_mode.enable_normal():
+            self.deep_ep_dispatcher_normal = DeepEPDispatcherImplNormal(
+                async_finish=True,
+                **common_kwargs,
+            )
+        if self.deepep_mode.enable_low_latency():
+            self.deep_ep_dispatcher_ll = DeepEPDispatcherImplLowLatency(
+                return_recv_hook=True,
+                **common_kwargs,
+            )
+
+    def forward(
+        self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
+    ) -> torch.Tensor:
+        raise f"not implemented, because we implement them in individual parts forward"
 
 
 class DeepseekV2MoE(nn.Module):
@@ -1094,7 +1217,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             )
 
         if is_nextn or is_sparse_layer(layer_id):
-            self.mlp = DeepseekV2MoE(
+            # note: discussion, old one DeepseekV2MoE
+            self.mlp = DeepseekV2TwoMicroBatchesDeepEPMoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=add_prefix("mlp", prefix),
@@ -1189,7 +1313,8 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         # add shared
         if EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY in extra_args:
-            hidden_states = hidden_states + extra_args[EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY]
+            if extra_args[EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY]:
+                hidden_states = hidden_states + extra_args[EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY]
             del extra_args[EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY]
 
         # cuda(not hip) && absorb
@@ -1236,20 +1361,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         k_input[..., self.kv_lora_rank:] = k_pe
 
         # update extra_args
-        attn_0_extra_args = {
-            EXTRA_ARGS_ATTN_0_Q_INPUT_KET: q_input,
-            EXTRA_ARGS_ATTN_0_K_INPUT_KET: k_input,
-            EXTRA_ARGS_ATTN_0_V_INPUT_KET: v_input,
-        }
-        if not extra_args:
-            extra_args = {
-                **attn_0_extra_args,
+        extra_args.update(
+            {
+                EXTRA_ARGS_ATTN_0_Q_INPUT_KEY: q_input,
+                EXTRA_ARGS_ATTN_0_K_INPUT_KEY: k_input,
+                EXTRA_ARGS_ATTN_0_V_INPUT_KEY: v_input,
             }
-        else:
-            extra_args = {
-                **extra_args,
-                **attn_0_extra_args,
-            }
+        )
 
         return hidden_states, residual, extra_args
 
@@ -1261,16 +1379,29 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        # get q_input, k_input and v_input from extra_args
-        assert EXTRA_ARGS_ATTN_0_Q_INPUT_KET in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_Q_INPUT_KET} not in extra_args:{extra_args}"
-        assert EXTRA_ARGS_ATTN_0_K_INPUT_KET in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_K_INPUT_KET} not in extra_args:{extra_args}"
-        assert EXTRA_ARGS_ATTN_0_V_INPUT_KET in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_V_INPUT_KET} not in extra_args:{extra_args}"
-        q_input = extra_args[EXTRA_ARGS_ATTN_0_Q_INPUT_KET]
-        k_input = extra_args[EXTRA_ARGS_ATTN_0_K_INPUT_KET]
-        v_input = extra_args[EXTRA_ARGS_ATTN_0_V_INPUT_KET]
+        """
+        note:
+        1. core attention
+        2. output projection
+        3. MoE Gate routing
 
+        """
+        # get q_input, k_input and v_input from extra_args
+        assert EXTRA_ARGS_ATTN_0_Q_INPUT_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_Q_INPUT_KEY} not in extra_args:{extra_args}"
+        assert EXTRA_ARGS_ATTN_0_K_INPUT_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_K_INPUT_KEY} not in extra_args:{extra_args}"
+        assert EXTRA_ARGS_ATTN_0_V_INPUT_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_V_INPUT_KEY} not in extra_args:{extra_args}"
+        q_input = extra_args[EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
+        k_input = extra_args[EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
+        v_input = extra_args[EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
+
+        # core attention calculation
         attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        # del q_input,k_inpu,v_input
+        del extra_args[EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
+        del extra_args[EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
+        del extra_args[EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
 
         if self.w_vc.dtype == torch.float8_e4m3fnuz:
             # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
@@ -1292,11 +1423,43 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        # output projection
         output, _ = self.o_proj(attn_output)
+        # post attention layernorm
         if output.shape[0] != 0:
             output, residual = self.post_attention_layernorm(
                 output, residual
             )
+
+        # MoE Gate routing
+        assert isinstance(self.mlp, DeepseekV2TwoMicroBatchesDeepEPMoE)
+        topk_idx = torch.full(
+            (0, self.top_k), -1, dtype=torch.int, device=output.device
+        )
+        topk_weights = torch.empty(
+            (0, self.top_k), dtype=torch.float32, device=output.device
+        )
+        if hidden_states.shape[0] > 0:
+            # router_logits: (num_tokens, n_experts)
+            router_logits = self.mlp.gate(output)
+            topk_weights, topk_idx = select_experts(
+                hidden_states=output,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=True,
+                renormalize=self.renormalize,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                correction_bias=self.correction_bias,
+            )
+
+        # update extra_args
+        extra_args.update(
+            {
+                EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY: topk_weights,
+                EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY: topk_idx,
+            }
+        )
 
         return output, residual, extra_args
 
@@ -1308,7 +1471,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        if self.mlp.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
+        return shared_output, residual, extra_args if extra_args else {}
 
     def forward_decode_mlp(
         self,
@@ -1318,9 +1483,39 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        # get reorder_topk_ids, seg_indptr, masked_m, expected_m from extra_args
+        assert EXTRA_ARGS_REORDER_TOPK_IDS_KEY in extra_args, \
+            f"layer_id: {self.layer_id}, {EXTRA_ARGS_REORDER_TOPK_IDS_KEY} not in extra_args:{extra_args} "
+        assert EXTRA_ARGS_SEG_INDPTR_KEY in extra_args, \
+            f"layer_id: {self.layer_id}, {EXTRA_ARGS_SEG_INDPTR_KEY} not in extra_args:{extra_args}"
+        assert EXTRA_ARGS_MASKED_M_KEY in extra_args, \
+            f"layer_id: {self.layer_id}, {EXTRA_ARGS_MASKED_M_KEY} not in extra_args:{extra_args}"
+        assert EXTRA_ARGS_EXPECTED_M_KEY in extra_args, \
+            f"layer_id: {self.layer_id}, {EXTRA_ARGS_EXPECTED_M_KEY} not in extra_args:{extra_args}"
 
-    def forward_decode_wait_ll_dispatch(
+        reorder_topk_ids = extra_args[EXTRA_ARGS_REORDER_TOPK_IDS_KEY]
+        seg_indptr = extra_args[EXTRA_ARGS_SEG_INDPTR_KEY]
+        masked_m = extra_args[EXTRA_ARGS_MASKED_M_KEY]
+        expected_m = extra_args[EXTRA_ARGS_EXPECTED_M_KEY]
+
+        final_hidden_states = self.mlp.experts(
+            hidden_states=hidden_states,
+            reorder_topk_ids=reorder_topk_ids,
+            seg_indptr=seg_indptr,
+            masked_m=masked_m,
+            expected_m=expected_m,
+            forward_mode=forward_batch.forward_mode,
+        ) * self.mlp.routed_scaling_factor
+
+        # remove used args
+        del extra_args[EXTRA_ARGS_REORDER_TOPK_IDS_KEY]
+        del extra_args[EXTRA_ARGS_SEG_INDPTR_KEY]
+        del extra_args[EXTRA_ARGS_MASKED_M_KEY]
+        del extra_args[EXTRA_ARGS_EXPECTED_M_KEY]
+
+        return final_hidden_states, residual, extra_args
+
+    def forward_decode_launch_dispatch_ll(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1328,9 +1523,44 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        # get topk_ids and topk_weights
+        assert EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY} not in extra_args:{extra_args} "
+        assert EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
 
-    def forward_decode_wait_ll_combine(
+        topk_idx = extra_args[EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY]
+        topk_weights = extra_args[EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY]
+
+        (
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            masked_m,
+            expected_m,
+            event,
+            hook,
+        ) = self.mlp.deep_ep_dispatcher_ll.dispatch_a(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            self.mlp.num_experts,
+            128,  # note: num_max_dispatch_tokens_per_rank fix to 128
+        )
+
+        # update extra_args
+        extra_args.update(
+            {
+                EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY: topk_weights,
+                EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY: topk_idx,
+                EXTRA_ARGS_MASKED_M_KEY: masked_m,
+                EXTRA_ARGS_EXPECTED_M_KEY: expected_m,
+                EXTRA_ARGS_EVENT_KEY: event,
+                EXTRA_ARGS_HOOK_KEY: hook,
+            }
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_decode_wait_dispatch_ll(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1338,9 +1568,26 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        assert EXTRA_ARGS_HOOK_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_HOOK_KEY} not in extra_args:{extra_args} "
+        hook = extra_args(EXTRA_ARGS_HOOK_KEY)
 
-    def forward_decode_launch_ll_dispatch(
+        hook()
+
+        reorder_topk_ids = seg_indptr = None
+
+        del extra_args[EXTRA_ARGS_HOOK_KEY]
+
+        # update extra_args
+        extra_args.update(
+            {
+                EXTRA_ARGS_REORDER_TOPK_IDS_KEY: reorder_topk_ids,
+                EXTRA_ARGS_SEG_INDPTR_KEY: seg_indptr,
+            }
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_decode_launch_combine_ll(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1348,9 +1595,29 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        assert EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY} not in extra_args:{extra_args} "
+        assert EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
 
-    def forward_decode_launch_ll_combine(
+        topk_idx = extra_args[EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY]
+        topk_weights = extra_args[EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY]
+
+        hidden_states, event, hook = self.mlp.deep_ep_dispatcher_ll.combine_a(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+        )
+
+        # update extra_args
+        extra_args.update(
+            {
+                EXTRA_ARGS_EVENT_KEY: event,
+                EXTRA_ARGS_HOOK_KEY: hook,
+            }
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_decode_wait_combine_ll(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1358,7 +1625,14 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        assert EXTRA_ARGS_HOOK_KEY in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_HOOK_KEY} not in extra_args:{extra_args} "
+        hook = extra_args(EXTRA_ARGS_HOOK_KEY)
+
+        hook()
+
+        del extra_args[EXTRA_ARGS_HOOK_KEY]
+
+        return hidden_states, residual, extra_args
 
     def forward_step(
         self,
@@ -1383,10 +1657,10 @@ class DeepseekV2DecoderLayer(nn.Module):
             DECODE_ATTN_1_STEP: self.forward_decode_attn_1,
             DECODE_SHARED_EXPERTS_STEP: self.forward_decode_shared_expert,
             DECODE_MLP_STEP: self.forward_decode_mlp,
-            DECODE_WAIT_LL_DISPATCH_STEP: self.forward_decode_wait_ll_dispatch,
-            DECODE_WAIT_LL_COMBINE_STEP: self.forward_decode_wait_ll_combine,
-            DECODE_LAUNCH_LL_DISPATCH_STEP: self.forward_decode_launch_ll_dispatch,
-            DECODE_LAUNCH_LL_COMBINE_STEP: self.forward_decode_launch_ll_combine,
+            DECODE_LAUNCH_DISPATCH_LL_STEP: self.forward_decode_launch_dispatch_ll,
+            DECODE_WAIT_DISPATCH_LL_STEP: self.forward_decode_wait_dispatch_ll,
+            DECODE_LAUNCH_COMBINE_LL_STEP: self.forward_decode_launch_combine_ll,
+            DECODE_WAIT_COMBINE_LL_STEP: self.forward_decode_wait_combine_ll,
         }
         if step not in step_to_func:
             raise f"{step} func does not implemented"
@@ -1717,7 +1991,7 @@ class DeepseekV2Model(nn.Module):
         mb0_residual, mb1_residual = None, None
 
         l0, l1 = 2, 3
-        mb0_extra_args, mb1_extra_args = None, None
+        mb0_extra_args, mb1_extra_args = {}, {}
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
             if i < self.config.first_k_dense_replace:
@@ -1737,7 +2011,7 @@ class DeepseekV2Model(nn.Module):
                 # mb0: launch_dispatch
                 _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, forward_batch,
                                                           mb0_residual,
-                                                          DECODE_LAUNCH_LL_DISPATCH_STEP, mb0_extra_args)
+                                                          DECODE_LAUNCH_DISPATCH_LL_STEP, mb0_extra_args)
                 # mb0: shared_expert_output
                 mb0_shared_experts_output_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0,
                                                                                                            mb0_positions,
@@ -1763,7 +2037,7 @@ class DeepseekV2Model(nn.Module):
                 mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
                                                                                      mb0_hidden_states,
                                                                                      forward_batch, mb0_residual,
-                                                                                     DECODE_WAIT_LL_DISPATCH_STEP,
+                                                                                     DECODE_WAIT_DISPATCH_LL_STEP,
                                                                                      mb0_extra_args)
                 # mb0: mlp
                 mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
@@ -1773,7 +2047,7 @@ class DeepseekV2Model(nn.Module):
                 # mb0: launch_combine
                 _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, forward_batch,
                                                           mb0_residual,
-                                                          DECODE_LAUNCH_LL_COMBINE_STEP, mb0_extra_args)
+                                                          DECODE_LAUNCH_COMBINE_LL_STEP, mb0_extra_args)
                 # mb1: attn_1
                 mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
                                                                                      mb1_hidden_states,
@@ -1783,7 +2057,7 @@ class DeepseekV2Model(nn.Module):
                 mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
                                                                                      mb0_hidden_states,
                                                                                      forward_batch, mb0_residual,
-                                                                                     DECODE_WAIT_LL_COMBINE_STEP,
+                                                                                     DECODE_WAIT_COMBINE_LL_STEP,
                                                                                      mb0_extra_args)
 
                 # mb0: deal with mb0_shared_experts_output_hidden_states and mb0_hidden_states
@@ -1793,7 +2067,7 @@ class DeepseekV2Model(nn.Module):
                 # mb1: launch_dispatch
                 _, _, mb1_extra_args = self.forward_layer(l1, mb1_positions, mb1_hidden_states, forward_batch,
                                                           mb1_residual,
-                                                          DECODE_LAUNCH_LL_DISPATCH_STEP, mb1_extra_args)
+                                                          DECODE_LAUNCH_DISPATCH_LL_STEP, mb1_extra_args)
                 # mb1: shared_expert
                 mb1_shared_experts_output_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1,
                                                                                                            mb1_positions,
@@ -1818,7 +2092,7 @@ class DeepseekV2Model(nn.Module):
                 mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
                                                                                      mb1_hidden_states,
                                                                                      forward_batch, mb1_residual,
-                                                                                     DECODE_WAIT_LL_DISPATCH_STEP,
+                                                                                     DECODE_WAIT_DISPATCH_LL_STEP,
                                                                                      mb1_extra_args)
                 # mb1: mlp
                 mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
@@ -1828,7 +2102,7 @@ class DeepseekV2Model(nn.Module):
                 # mb1: launch combine
                 _, _, mb1_extra_args = self.forward_layer(l1, mb1_positions, mb1_hidden_states, forward_batch,
                                                           mb1_residual,
-                                                          DECODE_LAUNCH_LL_COMBINE_STEP, mb1_extra_args)
+                                                          DECODE_LAUNCH_COMBINE_LL_STEP, mb1_extra_args)
                 # mb0: attn_1
                 mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
                                                                                      mb0_hidden_states,
@@ -1838,7 +2112,7 @@ class DeepseekV2Model(nn.Module):
                 mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
                                                                                      mb1_hidden_states,
                                                                                      forward_batch, mb1_residual,
-                                                                                     DECODE_WAIT_LL_COMBINE_STEP,
+                                                                                     DECODE_WAIT_COMBINE_LL_STEP,
                                                                                      mb1_extra_args)
                 # mb1: add mb1_hidden_states and mb1_shared_experts_output_hidden_states
                 # TODO: add, add in attn_0
