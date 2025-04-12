@@ -91,9 +91,6 @@ setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-
-_model_ready = False
-
 @dataclasses.dataclass
 class _GlobalState:
     tokenizer_manager: TokenizerManager
@@ -103,6 +100,35 @@ class _GlobalState:
 def set_global_state(global_state: _GlobalState):
     global _global_state
     _global_state = global_state
+
+@asynccontextmanager
+async def lifespan(fast_api_app: FastAPI):
+    server_args: ServerArgs = fast_api_app.server_args
+    if server_args.warmups is not None:
+        await execute_warmups(
+            server_args.warmups.split(","), _global_state.tokenizer_manager
+        )
+        logger.info("Warmup ended")
+
+    warmup_thread = getattr(fast_api_app, "warmup_thread", None)
+    if warmup_thread is not None:
+        warmup_thread.start()
+    yield
+
+# Fast API
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
+
+##### Native API endpoints #####
+
 
 @app.get("/health")
 async def health() -> Response:
@@ -734,7 +760,7 @@ def _wait_and_warmup(
                         break
                 except requests.exceptions.RequestException:
                     pass
-
+        
         # Wait until the server is launched
         success = False
         for _ in range(120):
@@ -754,7 +780,6 @@ def _wait_and_warmup(
             logger.error(f"Initialization failed. warmup error: {last_traceback}")
             kill_process_tree(os.getpid())
             return
-
         model_info = res.json()
 
         # Send a warmup request
