@@ -365,11 +365,11 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
     ):
         topk_idx = topk_idx.to(torch.int64)
         expected_m = (
-            hidden_states.shape[0]
-            * self.buffer_low_latency.group_size
-            * topk_idx.shape[1]
-            + num_experts
-        ) // num_experts
+                         hidden_states.shape[0]
+                         * self.buffer_low_latency.group_size
+                         * topk_idx.shape[1]
+                         + num_experts
+                     ) // num_experts
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_idx,
@@ -597,3 +597,7 @@ class DeepEPDispatcher:
             return self._low_latency_dispatcher
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
+
+
+DeepEPDispatcherImplLowLatency = _DeepEPDispatcherImplLowLatency
+DeepEPDispatcherImplNormal = _DeepEPDispatcherImplNormal
