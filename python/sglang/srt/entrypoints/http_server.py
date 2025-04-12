@@ -17,33 +17,36 @@ The entry point of inference server. (SRT = SGLang Runtime)
 This file implements HTTP APIs for the inference engine via fastapi.
 """
 
-from sglang.version import __version__
-from sglang.utils import get_exception_traceback
-from sglang.srt.warmup import execute_warmups
-from sglang.srt.utils import (
-    add_api_key_middleware,
-    add_prometheus_middleware,
-    delete_directory,
-    kill_process_tree,
-    set_uvicorn_logging_configs,
-)
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.reasoning_parser import ReasoningParser
-from sglang.srt.openai_api.protocol import ModelCard, ModelList
-from sglang.srt.openai_api.adapter import (
-    v1_batches,
-    v1_cancel_batch,
-    v1_chat_completions,
-    v1_completions,
-    v1_delete_file,
-    v1_embeddings,
-    v1_files_create,
-    v1_retrieve_batch,
-    v1_retrieve_file,
-    v1_retrieve_file_content,
-)
-from sglang.srt.metrics.func_timer import enable_func_timer
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
+import asyncio
+import dataclasses
+import json
+import logging
+import multiprocessing as multiprocessing
+import os
+import threading
+import time
+from ast import Mult
+from http import HTTPStatus
+from typing import AsyncIterator, Callable, Dict, Optional, Union
+
+from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+
+# Fix a bug of Python threading
+setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
+
+from contextlib import asynccontextmanager
+
+import numpy as np
+import orjson
+import requests
+import uvicorn
+import uvloop
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+
+from sglang.srt.entrypoints.engine import _launch_subprocesses
+from sglang.srt.function_call_parser import FunctionCallParser
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     ConfigureLoggingReq,
@@ -60,33 +63,37 @@ from sglang.srt.managers.io_struct import (
     SetInternalStateReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromTensorReqInput,
     VertexGenerateReqInput,
 )
-from sglang.srt.function_call_parser import FunctionCallParser
-from sglang.srt.entrypoints.engine import _launch_subprocesses
-from fastapi.responses import ORJSONResponse, Response, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, Form, Request, UploadFile
-import uvloop
-import uvicorn
-import requests
-import orjson
-import numpy as np
-from contextlib import asynccontextmanager
-import asyncio
-import dataclasses
-import json
-import logging
-import multiprocessing as multiprocessing
-import os
-import threading
-import time
-from http import HTTPStatus
-from typing import AsyncIterator, Callable, Dict, Optional
-
-# Fix a bug of Python threading
-setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
-
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.metrics.func_timer import enable_func_timer
+from sglang.srt.openai_api.adapter import (
+    v1_batches,
+    v1_cancel_batch,
+    v1_chat_completions,
+    v1_completions,
+    v1_delete_file,
+    v1_embeddings,
+    v1_files_create,
+    v1_retrieve_batch,
+    v1_retrieve_file,
+    v1_retrieve_file_content,
+)
+from sglang.srt.openai_api.protocol import ModelCard, ModelList
+from sglang.srt.reasoning_parser import ReasoningParser
+from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import (
+    MultiprocessingSerializer,
+    add_api_key_middleware,
+    add_prometheus_middleware,
+    delete_directory,
+    kill_process_tree,
+    set_uvicorn_logging_configs,
+)
+from sglang.srt.warmup import execute_warmups
+from sglang.utils import get_exception_traceback
+from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -402,6 +409,26 @@ async def init_weights_update_group(
         return ORJSONResponse(content, status_code=200)
     else:
         return ORJSONResponse(content, status_code=HTTPStatus.BAD_REQUEST)
+
+
+@app.post("/update_weights_from_tensor")
+async def update_weights_from_tensor(
+    obj: UpdateWeightsFromTensorReqInput, request: Request
+):
+    """Update the weights from tensor inplace without re-launching the server.
+    Notes:
+    1. Ensure that the model is on the correct device (e.g., GPU) before calling this endpoint. If the model is moved to the CPU unexpectedly, it may cause performance issues or runtime errors.
+    2. HTTP will transmit only the metadata of the tensor, while the tensor itself will be directly copied to the model.
+    3. Any binary data in the named tensors should be base64 encoded.
+    """
+
+    success, message = await _global_state.tokenizer_manager.update_weights_from_tensor(
+        obj, request
+    )
+    content = {"success": success, "message": message}
+    return ORJSONResponse(
+        content, status_code=200 if success else HTTPStatus.BAD_REQUEST
+    )
 
 
 @app.post("/update_weights_from_distributed")

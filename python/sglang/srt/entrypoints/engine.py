@@ -17,45 +17,6 @@ The entry point of inference server. (SRT = SGLang Runtime)
 This file implements python APIs for the inference engine.
 """
 
-from sglang.version import __version__
-from sglang.srt.utils import (
-    MultiprocessingSerializer,
-    assert_pkg_version,
-    configure_logger,
-    get_zmq_socket,
-    kill_process_tree,
-    launch_dummy_health_check_server,
-    maybe_set_triton_cache_manager,
-    prepare_model_and_tokenizer,
-    set_prometheus_multiproc_dir,
-    set_ulimit,
-)
-from sglang.srt.managers.pd_disaggregation_controller import PDDisaggregationController
-from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
-from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.managers.scheduler import run_scheduler_process
-from sglang.srt.managers.io_struct import (
-    EmbeddingReqInput,
-    GenerateReqInput,
-    GetWeightsByNameReqInput,
-    InitWeightsUpdateGroupReqInput,
-    ReleaseMemoryOccupationReqInput,
-    ResumeMemoryOccupationReqInput,
-    RpcReqInput,
-    RpcReqOutput,
-    UpdateWeightFromDiskReqInput,
-    UpdateWeightsFromDistributedReqInput,
-    UpdateWeightsFromTensorReqInput,
-)
-from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
-from sglang.srt.managers.data_parallel_controller import (
-    run_data_parallel_controller_process,
-)
-from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
-import uvloop
-import torch
 import asyncio
 import atexit
 import dataclasses
@@ -73,12 +34,53 @@ from PIL.Image import Image
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 
+import torch
+import uvloop
+
+from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
+from sglang.srt.entrypoints.EngineBase import EngineBase
+from sglang.srt.managers.data_parallel_controller import (
+    run_data_parallel_controller_process,
+)
+from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
+from sglang.srt.managers.io_struct import (
+    EmbeddingReqInput,
+    GenerateReqInput,
+    GetWeightsByNameReqInput,
+    InitWeightsUpdateGroupReqInput,
+    ReleaseMemoryOccupationReqInput,
+    ResumeMemoryOccupationReqInput,
+    RpcReqInput,
+    RpcReqOutput,
+    UpdateWeightFromDiskReqInput,
+    UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromTensorReqInput,
+)
+from sglang.srt.managers.pd_disaggregation_controller import PDDisaggregationController
+from sglang.srt.managers.scheduler import run_scheduler_process
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
+from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
+from sglang.srt.utils import (
+    MultiprocessingSerializer,
+    assert_pkg_version,
+    configure_logger,
+    get_zmq_socket,
+    kill_process_tree,
+    launch_dummy_health_check_server,
+    maybe_set_triton_cache_manager,
+    prepare_model_and_tokenizer,
+    set_prometheus_multiproc_dir,
+    set_ulimit,
+)
+from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
-class Engine:
+class Engine(EngineBase):
     """
     The entry point to the inference engine.
 
