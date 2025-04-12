@@ -77,6 +77,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    RetryPrefillReq,
     RpcReqInput,
     RpcReqOutput,
     SetInternalStateReq,
@@ -428,6 +429,7 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (RpcReqInput, self.handle_rpc_request),
                 (ExpertDistributionReq, self.expert_distribution_handle),
+                (RetryPrefillReq, self._handle_retry_prefill_req),
             ]
         )
 
@@ -845,6 +847,7 @@ class Scheduler(
                 custom_logit_processor=custom_logit_processor,
                 return_hidden_states=recv_req.return_hidden_states,
                 eos_token_ids=self.model_config.hf_eos_token_id,
+                retry_count=recv_req.retry_count,
             )
             req.tokenizer = self.tokenizer
 
@@ -1402,13 +1405,16 @@ class Scheduler(
             req.kv_cache_restored = True
             pt += new_batch.extend_lens[i]
         '''
+        
         pt = 0
         pt_map = {}
         rid_req_map = {}
         try_to_fetch_kv_cache_req_list = []
+
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             rid_req_map[req.rid] = new_batch.reqs[i]
+
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
@@ -1939,6 +1945,9 @@ class Scheduler(
 
         barrier()
         return RpcReqOutput(success, "" if not exec else str(exec))
+
+    def _handle_retry_prefill_req(self, recv_req: RetryPrefillReq):
+        self.handle_generate_request(TokenizedGenerateReqInput(recv_req))
 
     def save_remote_model(self, params):
         url = params["url"]

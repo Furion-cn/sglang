@@ -91,21 +91,15 @@ setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-
-# Store global states
 @dataclasses.dataclass
 class _GlobalState:
     tokenizer_manager: TokenizerManager
     scheduler_info: Dict
-
-
-_global_state: Optional[_GlobalState] = None
-
+    model_ready: bool = False 
 
 def set_global_state(global_state: _GlobalState):
     global _global_state
     _global_state = global_state
-
 
 @asynccontextmanager
 async def lifespan(fast_api_app: FastAPI):
@@ -121,7 +115,6 @@ async def lifespan(fast_api_app: FastAPI):
         warmup_thread.start()
     yield
 
-
 # Fast API
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -134,13 +127,14 @@ app.add_middleware(
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
 
-
 ##### Native API endpoints #####
 
 
 @app.get("/health")
 async def health() -> Response:
     """Check the health of the http server."""
+    if not _global_state.model_ready:
+        return Response(status_code=503, content="Model is still loading")
     return Response(status_code=200)
 
 
@@ -724,13 +718,49 @@ def _wait_and_warmup(
     pipe_finish_writer: Optional[multiprocessing.connection.Connection],
     image_token_text: str,
     launch_callback: Optional[Callable[[], None]] = None,
-):
+):       
+
+    if server_args.kv_transfer_config is not None and server_args.kv_transfer_config.role == "decode":
+        logger.info("Decode node is ready!")
+        _global_state.model_ready = True
+        
+        if pipe_finish_writer is not None:
+            pipe_finish_writer.send("ready")
+            
+        if server_args.delete_ckpt_after_loading:
+            delete_directory(server_args.model_path)
+            
+        if launch_callback is not None:
+            launch_callback()
+            
+        return
+    
     if server_args.kv_transfer_config is None or server_args.kv_transfer_config.role == "prefill":
         headers = {}
         url = server_args.url()
         if server_args.api_key:
             headers["Authorization"] = f"Bearer {server_args.api_key}"
 
+        if server_args.kv_transfer_config is not None:
+            decode_url = f"http://{server_args.kv_transfer_config.decode_dist_init_host}:{server_args.port}"
+            logger.info(f"Prefill node waiting for decode node at {decode_url} to be ready...")
+            
+            decode_ready = False
+            retry_count = 0
+            while not decode_ready:
+                time.sleep(1)
+                retry_count += 1
+                if retry_count % 10 == 0:
+                    logger.info(f"Still waiting for decode node... (waited {retry_count} seconds)")
+                try:
+                    res = requests.get(decode_url + "/health", timeout=5)
+                    if res.status_code == 200:
+                        decode_ready = True
+                        logger.info("Decode node is ready!")
+                        break
+                except requests.exceptions.RequestException as e:
+                    logger.info(f"Failed to connect to decode node: {str(e)}")
+        
         # Wait until the server is launched
         success = False
         for _ in range(120):
@@ -750,7 +780,6 @@ def _wait_and_warmup(
             logger.error(f"Initialization failed. warmup error: {last_traceback}")
             kill_process_tree(os.getpid())
             return
-
         model_info = res.json()
 
         # Send a warmup request
@@ -797,6 +826,7 @@ def _wait_and_warmup(
             kill_process_tree(os.getpid())
             return
 
+    _global_state.model_ready = True
     logger.info("The server is fired up and ready to roll!")
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

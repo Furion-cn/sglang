@@ -74,6 +74,7 @@ class ServerArgs:
     completion_template: Optional[str] = None
     is_embedding: bool = False
     revision: Optional[str] = None
+    max_req_retry_count: int = 3
 
     # Port for the HTTP server
     host: str = "127.0.0.1"
@@ -1128,6 +1129,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.disaggregation_bootstrap_port,
             help="Bootstrap server port on the prefill server. Default is 8998.",
+        )
+        parser.add_argument(
+            "--max-req-retry-count",
+            type=int,
+            default=ServerArgs.max_req_retry_count,
+            help="Max number of retries for a request. Default is 3.",
         )
 
     @classmethod

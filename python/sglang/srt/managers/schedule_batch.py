@@ -79,6 +79,7 @@ global_server_args_dict = {
     "disable_radix_cache": ServerArgs.disable_radix_cache,
     "flashinfer_mla_disable_ragged": ServerArgs.flashinfer_mla_disable_ragged,
     "chunked_prefill_size": ServerArgs.chunked_prefill_size,
+    "max_req_retry_count": ServerArgs.max_req_retry_count,
 }
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,15 @@ class FINISH_ABORT(BaseFinishReason):
             "err_type": self.err_type,
         }
 
+class FINISH_RETRY(BaseFinishReason):
+    def __init__(self, retry_input: RetryPrefillReq):
+        super().__init__()
+        self.retry_input = retry_input
+    def to_json(self):
+        return {
+            "type": "retry",
+            "retry_input": self.retry_input,
+        }
 
 @dataclasses.dataclass
 class MultimodalInputs:
@@ -339,6 +349,7 @@ class Req:
         kv_transfer_src_addr: Optional[str] = None,
         kv_transfer_src_rank: Optional[int] = None,
         kv_cache_length: Optional[int] = None,
+        retry_count: int = 0,
     ):
         # Input and output info
         self.rid = rid
@@ -359,6 +370,7 @@ class Req:
         self.kv_transfer_src_rank = kv_transfer_src_rank
         self.kv_cache_length = kv_cache_length
         self.kv_cache_restored = False
+        self.retry_count = retry_count
 
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):
@@ -502,6 +514,9 @@ class Req:
             self.multimodal_inputs = image_inputs
         else:
             self.multimodal_inputs.merge(image_inputs)
+
+    def add_retry_time(self):
+        self.retry_count += 1
 
     def finished(self) -> bool:
         # Whether request reached finished condition
@@ -1335,7 +1350,20 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             first_iter = False
             idx = sorted_indices.pop()
             req = self.reqs[idx]
+            
+            if server_args.kv_transfer_config is not None:
+                if req.retry_count > global_server_args_dict["attention_backend"]:
+                    req.finished_reason = FINISH_ABORT(
+                        f"Failed request: req id {req.rid} is retract and exceeding the maximum retry count, aborted"
+                    )
+                else:
+                    req.finished_reason = FINISH_RETRY(
+                            f"Failed request: req id {req.rid} is retract, waitting for retry"
+                        )
+                    req.add_retry_time()
+
             retracted_reqs.append(req)
+        
 
             if isinstance(self.tree_cache, ChunkCache):
                 # ChunkCache does not have eviction
