@@ -96,13 +96,17 @@ logger = logging.getLogger(__name__)
 # decode steps
 DECODE_ATTN_0_STEP = "attn_0"
 DECODE_ATTN_1_STEP = "attn_1"
-DECODE_MOE_GATE_STEP = "moe_gate"
 DECODE_SHARED_EXPERTS_STEP = "shared_experts"
 DECODE_MLP_STEP = "mlp"
 DECODE_WAIT_LL_DISPATCH_STEP = "wait_ll_dispatch"
 DECODE_WAIT_LL_COMBINE_STEP = "wait_ll_combine"
 DECODE_LAUNCH_LL_DISPATCH_STEP = "launch_ll_dispatch"
 DECODE_LAUNCH_LL_COMBINE_STEP = "launch_ll_combine"
+# common extra_args keys
+EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY = "last_layer_shared_experts_output"
+EXTRA_ARGS_ATTN_0_Q_INPUT_KET = "attn_0_q_input"
+EXTRA_ARGS_ATTN_0_K_INPUT_KET = "attn_0_k_input"
+EXTRA_ARGS_ATTN_0_V_INPUT_KET = "attn_0_v_input"
 
 
 class DeepseekV2MLP(nn.Module):
@@ -1163,11 +1167,11 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
         """
         note:
-        1. attn_0 does not contain calculation with shared_experts_output
-        2. attn_0 contains calculations before core attn
-        3. attn_0 support absort implementation
+        1. attn_0: add last layer's shared_experts_output
+        2. attn_0: MLA down/up projection
+        3. attn_0: only support absort implementation
         """
-        # 1. calculate residual
+        # calculate residual
         if hidden_states.shape[0] == 0:
             residual = hidden_states
         else:
@@ -1181,9 +1185,73 @@ class DeepseekV2DecoderLayer(nn.Module):
             assert (
                 not self.o_proj.reduce_results
             ), "short-circuiting allreduce will lead to hangs"
-            return hidden_states
+            return hidden_states, residual, extra_args if extra_args else {}
+
+        # add shared
+        if EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY in extra_args:
+            hidden_states = hidden_states + extra_args[EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY]
+            del extra_args[EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY]
 
         # cuda(not hip) && absorb
+        q_len = hidden_states.shape[0]
+        q_input = hidden_states.new_empty(
+            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+        )
+        if self.q_lora_rank is not None:
+            q = self.q_a_proj(hidden_states)[0]
+            q = self.q_a_layernorm(q)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        if self.w_kc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            q_nope_out = torch.bmm(
+                q_nope.to(torch.bfloat16).transpose(0, 1),  # [bs,128,128/attn_tp_size]
+                self.w_kc.to(torch.bfloat16) * self.w_scale,  #
+            )
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            q_nope_val, q_nope_scale = input_to_float8(
+                q_nope.transpose(0, 1), torch.float8_e4m3fn
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        v_input = latent_cache[..., : self.kv_lora_rank]
+        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        k_input = latent_cache.unsqueeze(1)
+        k_input[..., : self.kv_lora_rank] = v_input
+        k_pe = k_input[..., self.kv_lora_rank:]
+
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        q_input[..., self.kv_lora_rank:] = q_pe
+        k_input[..., self.kv_lora_rank:] = k_pe
+
+        # update extra_args
+        attn_0_extra_args = {
+            EXTRA_ARGS_ATTN_0_Q_INPUT_KET: q_input,
+            EXTRA_ARGS_ATTN_0_K_INPUT_KET: k_input,
+            EXTRA_ARGS_ATTN_0_V_INPUT_KET: v_input,
+        }
+        if not extra_args:
+            extra_args = {
+                **attn_0_extra_args,
+            }
+        else:
+            extra_args = {
+                **extra_args,
+                **attn_0_extra_args,
+            }
+
+        return hidden_states, residual, extra_args
 
     def forward_decode_attn_1(
         self,
@@ -1193,17 +1261,44 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        # get q_input, k_input and v_input from extra_args
+        assert EXTRA_ARGS_ATTN_0_Q_INPUT_KET in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_Q_INPUT_KET} not in extra_args:{extra_args}"
+        assert EXTRA_ARGS_ATTN_0_K_INPUT_KET in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_K_INPUT_KET} not in extra_args:{extra_args}"
+        assert EXTRA_ARGS_ATTN_0_V_INPUT_KET in extra_args, f"layer_id: {self.layer_id}, {EXTRA_ARGS_ATTN_0_V_INPUT_KET} not in extra_args:{extra_args}"
+        q_input = extra_args[EXTRA_ARGS_ATTN_0_Q_INPUT_KET]
+        k_input = extra_args[EXTRA_ARGS_ATTN_0_K_INPUT_KET]
+        v_input = extra_args[EXTRA_ARGS_ATTN_0_V_INPUT_KET]
 
-    def forward_decode_moe_gate(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        forward_batch: ForwardBatch,
-        residual: Optional[torch.Tensor],
-        extra_args: Optional[Dict[str, Any]] = None,
-    ) -> (torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]):
-        pass
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        if self.w_vc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                self.w_vc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = input_to_float8(
+                attn_output.transpose(0, 1), torch.float8_e4m3fn
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+        else:
+            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        output, _ = self.o_proj(attn_output)
+        if output.shape[0] != 0:
+            output, residual = self.post_attention_layernorm(
+                output, residual
+            )
+
+        return output, residual, extra_args
 
     def forward_decode_shared_expert(
         self,
@@ -1286,7 +1381,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         step_to_func = {
             DECODE_ATTN_0_STEP: self.forward_decode_attn_0,
             DECODE_ATTN_1_STEP: self.forward_decode_attn_1,
-            DECODE_MOE_GATE_STEP: self.forward_decode_moe_gate,
             DECODE_SHARED_EXPERTS_STEP: self.forward_decode_shared_expert,
             DECODE_MLP_STEP: self.forward_decode_mlp,
             DECODE_WAIT_LL_DISPATCH_STEP: self.forward_decode_wait_ll_dispatch,
@@ -1623,10 +1717,11 @@ class DeepseekV2Model(nn.Module):
         mb0_residual, mb1_residual = None, None
 
         l0, l1 = 2, 3
+        mb0_extra_args, mb1_extra_args = None, None
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
             if i < self.config.first_k_dense_replace:
-                mb0_hidden_states, mb0_residual, extra_args = self.forward_layer(
+                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
                     i, mb0_positions, mb0_hidden_states, forward_batch, mb0_residual, None
                 )
             else:
@@ -1639,7 +1734,7 @@ class DeepseekV2Model(nn.Module):
 
                 # pipeline two micro batches according to https://github.com/deepseek-ai/profile-data
 
-                # mb0: launch_dispatch, shared_expert
+                # mb0: launch_dispatch
                 _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, forward_batch,
                                                           mb0_residual,
                                                           DECODE_LAUNCH_LL_DISPATCH_STEP, mb0_extra_args)
@@ -1651,6 +1746,14 @@ class DeepseekV2Model(nn.Module):
                                                                                                            mb0_residual,
                                                                                                            DECODE_SHARED_EXPERTS_STEP,
                                                                                                            mb0_extra_args)
+                # mb0: set shared_experts_output in extra_args
+                if not mb0_extra_args:
+                    mb0_extra_args = {
+                        EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY: mb0_shared_experts_output_hidden_states}
+                else:
+                    mb0_extra_args[
+                        EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY] = mb0_shared_experts_output_hidden_states
+
                 # mb1: attn_0
                 mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
                                                                                      mb1_hidden_states,
@@ -1684,7 +1787,7 @@ class DeepseekV2Model(nn.Module):
                                                                                      mb0_extra_args)
 
                 # mb0: deal with mb0_shared_experts_output_hidden_states and mb0_hidden_states
-                # TODO: add
+                # TODO: add, no add, add will be completed in attn_0
                 l0 += 1
 
                 # mb1: launch_dispatch
@@ -1699,6 +1802,13 @@ class DeepseekV2Model(nn.Module):
                                                                                                            mb1_residual,
                                                                                                            DECODE_SHARED_EXPERTS_STEP,
                                                                                                            mb1_extra_args)
+                if not mb1_extra_args:
+                    mb1_extra_args = {
+                        EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY: mb1_shared_experts_output_hidden_states}
+                else:
+                    mb1_extra_args[
+                        EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY] = mb1_shared_experts_output_hidden_states
+
                 # mb0: attn_0
                 mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
                                                                                      mb0_hidden_states,
@@ -1731,7 +1841,7 @@ class DeepseekV2Model(nn.Module):
                                                                                      DECODE_WAIT_LL_COMBINE_STEP,
                                                                                      mb1_extra_args)
                 # mb1: add mb1_hidden_states and mb1_shared_experts_output_hidden_states
-                # TODO: add
+                # TODO: add, add in attn_0
                 l1 += 1
 
         hidden_states = torch.cat([mb0_hidden_states, mb1_hidden_states], dim=0)
