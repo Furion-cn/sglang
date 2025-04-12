@@ -49,11 +49,6 @@ class KVTransferConfig(BaseModel):
     transfer_engine_metadata_server: str = None
     transfer_engine_rdma_device: str = "mlx5_0"
 
-    # 这里只单向的从 prefill -> decode, 因为只有 prefill 节点接收请求 && warm_up pre_check
-    # 用于 warm_up 前的 health_check
-    decode_cluster_url: str = None
-    decode_cluster_port: int = 30000
-
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
         """Parse the CLI value for the kv cache transfer config."""

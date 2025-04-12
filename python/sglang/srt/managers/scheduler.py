@@ -1415,10 +1415,6 @@ class Scheduler(
             req = new_batch.reqs[i]
             rid_req_map[req.rid] = new_batch.reqs[i]
 
-            if req.need_refetch_kv_cache:
-                refetch_reqs.append(req)
-                continue
-
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue

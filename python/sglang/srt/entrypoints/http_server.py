@@ -742,7 +742,7 @@ def _wait_and_warmup(
             headers["Authorization"] = f"Bearer {server_args.api_key}"
 
         if server_args.kv_transfer_config is not None:
-            decode_url = f"http://{server_args.kv_transfer_config.decode_cluster_url}:{server_args.kv_transfer_config.decode_cluster_port}"
+            decode_url = f"http://{server_args.kv_transfer_config.decode_dist_init_host}:{server_args.port}"
             logger.info(f"Prefill node waiting for decode node at {decode_url} to be ready...")
             
             decode_ready = False
@@ -758,8 +758,8 @@ def _wait_and_warmup(
                         decode_ready = True
                         logger.info("Decode node is ready!")
                         break
-                except requests.exceptions.RequestException:
-                    pass
+                except requests.exceptions.RequestException as e:
+                    logger.info(f"Failed to connect to decode node: {str(e)}")
         
         # Wait until the server is launched
         success = False
