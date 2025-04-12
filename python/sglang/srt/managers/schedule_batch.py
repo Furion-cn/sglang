@@ -1351,15 +1351,16 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             idx = sorted_indices.pop()
             req = self.reqs[idx]
             
-            if req.retry_count > global_server_args_dict["attention_backend"]:
-                req.finished_reason = FINISH_ABORT(
-                    f"Failed request: req id {req.rid} is retract and exceeding the maximum retry count, aborted"
-                )
-            else:
-                req.finished_reason = FINISH_RETRY(
-                        f"Failed request: req id {req.rid} is retract, waitting for retry"
+            if server_args.kv_transfer_config is not None:
+                if req.retry_count > global_server_args_dict["attention_backend"]:
+                    req.finished_reason = FINISH_ABORT(
+                        f"Failed request: req id {req.rid} is retract and exceeding the maximum retry count, aborted"
                     )
-                req.add_retry_time()
+                else:
+                    req.finished_reason = FINISH_RETRY(
+                            f"Failed request: req id {req.rid} is retract, waitting for retry"
+                        )
+                    req.add_retry_time()
 
             retracted_reqs.append(req)
         
