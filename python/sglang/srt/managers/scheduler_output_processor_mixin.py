@@ -21,7 +21,9 @@ class SchedulerOutputProcessorMixin:
     This class implements the output processing logic for Scheduler.
     We put them into a separate file to make the `scheduler.py` shorter.
     """
-
+    transfer_request = 0
+    retract_queue = []
+    retract_req_queue = []
     def process_batch_result_prefill(
         self,
         batch: ScheduleBatch,
@@ -178,8 +180,10 @@ class SchedulerOutputProcessorMixin:
                 else:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
-
-        self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
+        reqs = [*batch.reqs, *self.retract_req_queue]
+        self.retract_req_queue = []
+        self.retract_queue = []
+        self.stream_output(reqs, batch.return_logprob, skip_stream_req)
 
     def process_batch_result_decode(
         self,
@@ -265,8 +269,10 @@ class SchedulerOutputProcessorMixin:
             batch.next_batch_sampling_info.update_regex_vocab_mask()
             self.current_stream.synchronize()
             batch.next_batch_sampling_info.sampling_info_done.set()
-
-        self.stream_output(batch.reqs, batch.return_logprob)
+        reqs = [*batch.reqs, *self.retract_req_queue]
+        self.retract_req_queue = []
+        self.retract_queue = []
+        self.stream_output(reqs, batch.return_logprob)
 
         self.token_to_kv_pool_allocator.free_group_end()
 

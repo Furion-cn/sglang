@@ -207,7 +207,10 @@ class Scheduler(
                 self.dp_size,
             )
         )
-
+        self.all_req = {}
+        self.all_finished_req = 0
+        self.finished_req_ids = []
+        self.all_req_ids = set()
         # Init inter-process communication
         context = zmq.Context(2)
         if self.attn_tp_rank == 0:
@@ -612,6 +615,11 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             recv_reqs = self.recv_requests()
+            for req in recv_reqs:
+                if getattr(req, "rid", False):
+                    self.all_req_ids.add(req.rid)
+                    self.all_req[req.rid] = req
+                    logger.info(f"recv req at event_loop_normal {req.rid}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -634,6 +642,11 @@ class Scheduler(
 
         while True:
             recv_reqs = self.recv_requests()
+            for req in recv_reqs:
+                if getattr(req, "rid", False):
+                    self.all_req_ids.add(req.rid)
+                    self.all_req[req.rid] = req
+                    logger.info(f"recv req at event_loop_normal {req.rid}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -1188,7 +1201,15 @@ class Scheduler(
                 f"{available_size=}, {protected_size=}, {self.max_total_num_tokens=}\n"
                 f"{self.token_to_kv_pool_allocator.available_size()=}\n"
                 f"{self.tree_cache.evictable_size()=}\n"
+                f"finished_reqs_num {self.all_finished_req} \n"
+                f"waiting_queue {len(self.waiting_queue)} \""
+                f"all_reqs {len(self.all_req_ids)} \n"
+                # 添加未完成请求的分析
+                f"unfinished_reqs: {set(self.all_req_ids) - set(self.finished_req_ids)}\n"
             )
+            unfinished_req = set(self.all_req_ids) - set(self.finished_req_ids)
+            # for req_id in unfinished_req:
+                # logger.info(f"{req_id=} all unfinished req info={self.all_req[req_id]}")
             warnings.warn(msg)
             if crash_on_warnings():
                 raise ValueError(msg)
@@ -1336,6 +1357,8 @@ class Scheduler(
                 req.finished_reason = FINISH_ABORT(
                     message="CUDA OOM when PD-disaggregation,Aborted",
                 )
+                self.retract_queue.append(req.rid)
+                self.retract_req_queue.append(req)
                 continue
 
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
@@ -1368,9 +1391,8 @@ class Scheduler(
         if len(can_run_list) == 0:
             return None
         self.waiting_queue = [
-            x for x in self.waiting_queue if x not in set(can_run_list)
+            x for x in self.waiting_queue if x not in set(can_run_list) and x not in set(self.retract_queue)
         ]
-
         if self.enable_hierarchical_cache:
             self.tree_cache.read_to_load_cache()
 
@@ -1456,10 +1478,10 @@ class Scheduler(
             pt += new_batch.extend_lens[i]
 
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
-        top_k = None
-        top_k_index = None
-        hidden_states = None
-        verified_id = None
+        top_k = torch.zeros(new_batch.batch_size(),self.server_args.speculative_eagle_topk)
+        top_k_index = torch.zeros(new_batch.batch_size(),self.server_args.speculative_eagle_topk)
+        hidden_states = torch.zeros(new_batch.batch_size(),self.model_config.hidden_size)
+        verified_id = torch.zeros(new_batch.batch_size())
         rand_num = randn(1)
         logger.info(f"kv_bytes_map len {len(kv_bytes_map)}  try_to_fetch_kv_cache_req_list {len(try_to_fetch_kv_cache_req_list)}  new_batch.batch_size() {new_batch.batch_size()} rand_num {rand_num}")
         for rid, tensor in kv_bytes_map.items():
@@ -1507,7 +1529,7 @@ class Scheduler(
                     None
                 )
             new_batch.reqs[rid_req_map[rid]].kv_cache_restored = True
-        if new_batch.spec_algorithm is not None and top_k is not None:
+        if new_batch.spec_algorithm is not None:
             spec_info = EagleDraftInput()
             spec_info.topk_p = top_k.to(self.device)
             spec_info.topk_index = top_k_index.to(self.device)
@@ -1762,6 +1784,10 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        for i,req in enumerate(batch.reqs) :
+            if req.finished() :
+                self.all_finished_req += 1
+                self.finished_req_ids.append(req.rid)
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result)
         elif batch.forward_mode.is_extend():

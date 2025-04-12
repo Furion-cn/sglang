@@ -127,7 +127,7 @@ class KVTransferAgent:
         self.handle_kv_cache_fetch_ct = {}
         self.handle_kv_cache_buffer_ptr = {}
         self.handle_kv_cache_buffer_length = {}
-
+        self.dispatched_reqs = 0
         self.attn_tp_rank, self.attn_tp_size, _ = (
             compute_dp_attention_world_info(
                 server_args.enable_dp_attention,
@@ -316,6 +316,10 @@ class KVTransferAgent:
             kv_transfer_src_rank=self.tp_rank,
             kv_cache_length=req.kv_cache_length,
         ))
+        if getattr(req,"rid",None) is not None:
+            logging.info(f"Trans Prefilled req {req.rid}")
+            if getattr(req,"origin_input_text",None) is not None:
+                logging.info(f"Trans Prefilled req text {req.origin_input_text}")
     # when prefill node receive kv transfer request
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
