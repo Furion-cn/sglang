@@ -258,7 +258,7 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
         )
 
-        seg_indptr_cur_rank = seg_indptr[self.start_expert_id : self.end_expert_id + 2]
+        seg_indptr_cur_rank = seg_indptr[self.start_expert_id: self.end_expert_id + 2]
         weight_indices_cur_rank = torch.arange(
             0,
             self.num_experts_per_partition,
@@ -435,7 +435,7 @@ class EPMoE(torch.nn.Module):
         elif shard_id == "w1":
             param.data[expert_id][: self.intermediate_size, :] = loaded_weight
         elif shard_id == "w3":
-            param.data[expert_id][self.intermediate_size :, :] = loaded_weight
+            param.data[expert_id][self.intermediate_size:, :] = loaded_weight
         else:
             raise ValueError(f"Expected shard_id w1,w2 or w3 but got {shard_id}")
 
@@ -467,11 +467,11 @@ class EPMoE(torch.nn.Module):
                 block_n, block_k = self.block_shape[0], self.block_shape[1]
                 if shard_id == "w1":
                     param_data[expert_id][
-                        : (self.intermediate_size + block_n - 1) // block_n, :
+                    : (self.intermediate_size + block_n - 1) // block_n, :
                     ] = loaded_weight
                 elif shard_id == "w3":
                     param_data[expert_id][
-                        (self.intermediate_size + block_n - 1) // block_n :, :
+                    (self.intermediate_size + block_n - 1) // block_n:, :
                     ] = loaded_weight
                 else:  # w2
                     param_data[expert_id] = loaded_weight
@@ -620,6 +620,7 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
                     )
 
         # WEIGHTS
+        # w13_weight=[256/tp_size,2*2048,7168]
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts_per_partition,
@@ -632,6 +633,7 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
+        # w2_weight=[256/tp_size,7168,2048]
         w2_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts_per_partition,
@@ -835,6 +837,7 @@ class DeepEPMoE(EPMoE):
         self.deepep_mode = deepep_mode
         if self.deepep_mode.enable_low_latency():
             assert use_deep_gemm, f"DeepEP {self.deepep_mode} mode requires deep_gemm"
+        # self.w13_weight_fp8=[256/tp_size,2048*2,7168]
         self.w13_weight_fp8 = (
             self.w13_weight,
             (
@@ -843,6 +846,7 @@ class DeepEPMoE(EPMoE):
                 else self.w13_weight_scale
             ),
         )
+        # w2_weight=[256/tp_size,7168,2048]
         self.w2_weight_fp8 = (
             self.w2_weight,
             self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
@@ -984,6 +988,15 @@ class DeepEPMoE(EPMoE):
         masked_m: torch.Tensor,
         expected_m: int,
     ):
+        """
+        # hidden_states_fp8[0]=[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]
+        # hidden_states_fp8[1]=[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 128]
+        # masked_m=[num_local_experts]
+        # expected_m=(bs*world_size*8+256)//256, world_size=dp*attn_tp_size
+
+        # w13_weight=[256/tp_size,2*2048,7168]
+        # w2_weight=[256/tp_size,7168,2048]
+        """
         assert self.quant_method is not None
         assert self.activation == "silu"
         assert (
