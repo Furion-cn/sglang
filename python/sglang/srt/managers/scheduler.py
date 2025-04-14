@@ -1486,7 +1486,7 @@ class Scheduler(
         logger.debug(f"kv_bytes_map len {len(kv_bytes_map)}  try_to_fetch_kv_cache_req_list {len(try_to_fetch_kv_cache_req_list)}  new_batch.batch_size() {new_batch.batch_size()} rand_num {rand_num}")
         for rid, tensor in kv_bytes_map.items():
             flattened_buffer = tensor
-            if new_batch.spec_algorithm is not None:
+            if not new_batch.spec_algorithm.is_none():
                 assert isinstance(flattened_buffer, dict)
                 flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
                 flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
@@ -1529,7 +1529,7 @@ class Scheduler(
                     None
                 )
             new_batch.reqs[rid_req_map[rid]].kv_cache_restored = True
-        if new_batch.spec_algorithm is not None:
+        if not new_batch.spec_algorithm.is_none():
             spec_info = EagleDraftInput()
             spec_info.topk_p = top_k.to(self.device)
             spec_info.topk_index = top_k_index.to(self.device)
