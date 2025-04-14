@@ -112,6 +112,20 @@ class _DeepEPDispatcherImplBase:
         self.params_bytes = 2
 
         self.handle = None
+        self.event = None
+        
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ):
+        raise NotImplementedError
+    
+    def wait_dispatch(self):
+        raise NotImplementedError
 
     def dispatch_a(
         self,
@@ -124,6 +138,17 @@ class _DeepEPDispatcherImplBase:
         raise NotImplementedError
 
     def dispatch_b(self, *args, **kwargs):
+        raise NotImplementedError
+    
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        raise NotImplementedError
+
+    def wait_combine(self):
         raise NotImplementedError
 
     def combine_a(
@@ -148,6 +173,60 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.async_finish = async_finish
         self.src2dst = None
 
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ):
+        topk_idx = topk_idx.to(torch.int64)
+        previous_event = Buffer.capture() if self.async_finish else None
+        (
+            self.hidden_states,
+            self.topk_idx,
+            self.topk_weights,
+            self.event,
+        ) = self._dispatch_core(
+            hidden_states, topk_idx, topk_weights, num_experts, previous_event
+        )
+    
+    def wait_dispatch(self):
+        self.event.current_stream_wait() if self.async_finish else ()
+        
+        hidden_states = self.hidden_states
+        topk_idx = self.topk_idx
+        topk_weights = self.topk_weights
+        
+        if self.hidden_states.shape[0] > 0:
+            reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
+                hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
+            )
+        else:
+            reorder_topk_ids = torch.empty(
+                (0,), device=hidden_states.device, dtype=torch.int64
+            )
+            seg_indptr = torch.zeros(
+                (self.num_experts + 1,), device=hidden_states.device, dtype=torch.int64
+            )
+
+        masked_m = expected_m = None
+        self.event = None
+        self.hidden_states = None
+        self.topk_idx = None
+        self.topk_weights = None
+        return (
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            reorder_topk_ids,
+            seg_indptr,
+            masked_m,
+            expected_m,
+        )
+        
+    
     def dispatch_a(
         self,
         hidden_states: torch.Tensor,
@@ -286,7 +365,47 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             BLOCK_SIZE=512,
         )
         return reorder_topk_ids, seg_indptr, gateup_input
-
+    
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        if hidden_states.shape[0] > 0:
+            num_tokens = self.src2dst.shape[0] // self.router_topk
+            output = torch.empty(
+                (num_tokens, hidden_states.shape[1]),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+            deepep_post_reorder_triton_kernel[(num_tokens,)](
+                hidden_states,
+                output,
+                self.src2dst,
+                topk_idx,
+                topk_weights,
+                self.router_topk,
+                hidden_states.shape[1],
+                BLOCK_SIZE=512,
+            )
+        else:
+            output = torch.zeros(
+                (0, hidden_states.shape[1]),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+        previous_event = Buffer.capture() if self.async_finish else None
+        self.hidden_states, self.event = self._combine_core(output, previous_event)
+        
+    def wait_combine(self):
+        self.event.current_stream_wait() if self.async_finish else ()
+        self.handle = None
+        self.src2dst = None
+        self.event = None
+        return self.hidden_states
+        
+        
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -538,6 +657,32 @@ class DeepEPDispatcher:
                 return_recv_hook=return_recv_hook,
                 **common_kwargs,
             )
+
+    def launch_dispatch(
+        self, 
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int = 128,
+        forward_mode: ForwardMode = None
+    ):
+        self._get_impl(forward_mode).launch_dispatch(hidden_states, topk_idx, topk_weights, num_experts, num_max_dispatch_tokens_per_rank)
+
+    def wait_dispatch(self, forward_mode: ForwardMode = None) -> Tuple:
+        return self._get_impl(forward_mode).wait_dispatch()
+    
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        forward_mode: ForwardMode = None
+    ):
+        self._get_impl(forward_mode).launch_combine(hidden_states, topk_idx, topk_weights)
+    
+    def wait_combine(self, forward_mode: ForwardMode = None) -> Tuple:
+        return self._get_impl(forward_mode).wait_combine()
 
     def dispatch(self, *args, **kwargs) -> Tuple:
         self.dispatch_a(*args, **kwargs)
