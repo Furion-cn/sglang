@@ -32,6 +32,7 @@ import psutil
 import setproctitle
 import torch
 import zmq
+from numpy.matlib import randn
 from torch.distributed import barrier
 
 from sglang.global_config import global_config
@@ -138,6 +139,9 @@ from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 expert_distribution_recorder = ExpertDistributionRecorder()
 
+
+from sglang.srt.speculative.eagle_utils import EagleDraftInput
+
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -203,7 +207,10 @@ class Scheduler(
                 self.dp_size,
             )
         )
-
+        self.all_req = {}
+        self.all_finished_req = 0
+        self.finished_req_ids = []
+        self.all_req_ids = set()
         # Init inter-process communication
         context = zmq.Context(2)
         if self.attn_tp_rank == 0:
@@ -608,6 +615,11 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             recv_reqs = self.recv_requests()
+            for req in recv_reqs:
+                if getattr(req, "rid", False):
+                    self.all_req_ids.add(req.rid)
+                    self.all_req[req.rid] = req
+                    logger.debug(f"recv req at event_loop_normal {req.rid}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -630,6 +642,11 @@ class Scheduler(
 
         while True:
             recv_reqs = self.recv_requests()
+            for req in recv_reqs:
+                if getattr(req, "rid", False):
+                    self.all_req_ids.add(req.rid)
+                    self.all_req[req.rid] = req
+                    logger.debug(f"recv req at event_loop_normal {req.rid}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -1071,7 +1088,7 @@ class Scheduler(
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.cache_hit_rate = cache_hit_rate
             self.metrics_collector.log_stats(self.stats)
-    
+
     def log_recover_stats(
         self,
         adder: PrefillAdder,
@@ -1184,7 +1201,15 @@ class Scheduler(
                 f"{available_size=}, {protected_size=}, {self.max_total_num_tokens=}\n"
                 f"{self.token_to_kv_pool_allocator.available_size()=}\n"
                 f"{self.tree_cache.evictable_size()=}\n"
+                f"finished_reqs_num {self.all_finished_req} \n"
+                f"waiting_queue {len(self.waiting_queue)} \""
+                f"all_reqs {len(self.all_req_ids)} \n"
+                # 添加未完成请求的分析
+                f"unfinished_reqs: {set(self.all_req_ids) - set(self.finished_req_ids)}\n"
             )
+            unfinished_req = set(self.all_req_ids) - set(self.finished_req_ids)
+            # for req_id in unfinished_req:
+                # logger.info(f"{req_id=} all unfinished req info={self.all_req[req_id]}")
             warnings.warn(msg)
             if crash_on_warnings():
                 raise ValueError(msg)
@@ -1221,7 +1246,7 @@ class Scheduler(
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
                 self.running_batch = self.last_batch
-            
+
             if self.server_args.kv_transfer_config.role == "decode":
                 ret = self.recover_new_prefilled_batch()
                 if not self.running_batch.is_empty():
@@ -1235,12 +1260,12 @@ class Scheduler(
                     ret = None
             else:
                 ret = self.get_new_batch_prefill()
-            
+
             if self.server_args.enable_dp_attention:
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
-        
+
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1283,13 +1308,13 @@ class Scheduler(
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
-    
+
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
             return None
-        
+
         running_bs = len(self.running_batch.reqs) if self.running_batch else 0
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
@@ -1328,6 +1353,13 @@ class Scheduler(
             ):
                 self.running_batch.batch_is_full = True
                 break
+            if req.is_retracted and self.server_args.kv_transfer_config:
+                req.finished_reason = FINISH_ABORT(
+                    message="CUDA OOM when PD-disaggregation,Aborted",
+                )
+                self.retract_queue.append(req.rid)
+                self.retract_req_queue.append(req)
+                continue
 
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
                 self.running_batch.batch_is_full = True
@@ -1359,9 +1391,8 @@ class Scheduler(
         if len(can_run_list) == 0:
             return None
         self.waiting_queue = [
-            x for x in self.waiting_queue if x not in set(can_run_list)
+            x for x in self.waiting_queue if x not in set(can_run_list) and x not in set(self.retract_queue)
         ]
-
         if self.enable_hierarchical_cache:
             self.tree_cache.read_to_load_cache()
 
@@ -1384,12 +1415,42 @@ class Scheduler(
         # Recover kv cache from kv_transfer_agent
         '''
         pt = 0
+        top_k = None
+        top_k_index = None
+        hidden_states = None
+        verified_id = None
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
-            flattened_kv_buffer = self.kv_transfer_agent.get_kv_buffer(req).to(self.device)
+            flattened_buffer = self.kv_transfer_agent.get_kv_buffer(req)
+            if new_batch.spec_algorithm is not None:
+                assert isinstance(flattened_buffer,dict)
+                flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
+                flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
+                flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
+                flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
+                if top_k is None or top_k_index is None or hidden_states is None:
+                    top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
+                    top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
+                    hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),))
+                req.top_k = flattened_topk_buffer
+                req.top_k_index = flattened_topk_index_buffer
+                req.hidden_states = flattened_hidden_states_buffer
+                req.verified_id = flattened_verified_id_buffer
+                top_k[i] = flattened_topk_buffer
+                top_k_index[i] = flattened_topk_index_buffer
+                hidden_states[i] = flattened_hidden_states_buffer
+                verified_id[i] = flattened_verified_id_buffer
+                logger.debug(f"{self.tp_rank} recover_new_prefilled_batch spec info top k: {req.top_k.shape} {req.top_k.device},\n"+
+                      f"  top_k_index: {req.top_k_index.shape} {req.top_k_index.device},\n " +
+                      f"  hidden_states: {req.hidden_states.shape} {req.hidden_states.device} \n"
+                      f" verified_id: {req.verified_id.shape} {req.verified_id.device}")
+            else:
+                flattened_kv_buffer = flattened_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
@@ -1408,27 +1469,78 @@ class Scheduler(
         try_to_fetch_kv_cache_req_list = []
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
-            rid_req_map[req.rid] = new_batch.reqs[i]
+            rid_req_map[req.rid] = i
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
             try_to_fetch_kv_cache_req_list.append(req)
             pt_map[req.rid] = (pt, pt + new_batch.extend_lens[i])
             pt += new_batch.extend_lens[i]
-        
+
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
+        top_k = torch.zeros(new_batch.batch_size(),self.server_args.speculative_eagle_topk)
+        top_k_index = torch.zeros(new_batch.batch_size(),self.server_args.speculative_eagle_topk)
+        hidden_states = torch.zeros(new_batch.batch_size(),self.model_config.hidden_size)
+        verified_id = torch.zeros(new_batch.batch_size())
+        rand_num = randn(1)
+        logger.debug(f"kv_bytes_map len {len(kv_bytes_map)}  try_to_fetch_kv_cache_req_list {len(try_to_fetch_kv_cache_req_list)}  new_batch.batch_size() {new_batch.batch_size()} rand_num {rand_num}")
         for rid, tensor in kv_bytes_map.items():
-            flattened_kv_buffer = tensor.to(self.device)
+            flattened_buffer = tensor
+            if not new_batch.spec_algorithm.is_none():
+                assert isinstance(flattened_buffer, dict)
+                flattened_kv_buffer = flattened_buffer["kv_cache"].to(self.device)
+                flattened_topk_buffer = flattened_buffer["top_k"].to(self.device)
+                flattened_topk_index_buffer = flattened_buffer["top_k_index"].to(self.device)
+                flattened_hidden_states_buffer = flattened_buffer["hidden_states"].to(self.device)
+                flattened_verified_id_buffer = flattened_buffer["verified_id"].to(self.device)
+                if top_k is None or top_k_index is None or hidden_states is None:
+                    top_k = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_buffer.shape))
+                    top_k_index = torch.zeros((new_batch.batch_size(),) + tuple(flattened_topk_index_buffer.shape))
+                    hidden_states = torch.zeros((new_batch.batch_size(),) + tuple(flattened_hidden_states_buffer.shape))
+                    verified_id = torch.zeros((new_batch.batch_size(),))
+                new_batch.reqs[rid_req_map[rid]].top_k = flattened_topk_buffer
+                new_batch.reqs[rid_req_map[rid]].top_k_index = flattened_topk_index_buffer
+                new_batch.reqs[rid_req_map[rid]].hidden_states_spec = flattened_hidden_states_buffer
+                new_batch.reqs[rid_req_map[rid]].verified_id = flattened_verified_id_buffer
+                top_k[rid_req_map[rid]] = flattened_topk_buffer
+                top_k_index[rid_req_map[rid]] = flattened_topk_index_buffer
+                hidden_states[rid_req_map[rid]] = flattened_hidden_states_buffer
+                verified_id[rid_req_map[rid]] = flattened_verified_id_buffer
+                logger.debug(
+                    f"{self.tp_rank} rand_num {rand_num} recover_new_prefilled_batch spec info top k: {new_batch.reqs[rid_req_map[rid]].top_k.shape} {new_batch.reqs[rid_req_map[rid]].top_k.device},\n" +
+                    f"  top_k_index: {new_batch.reqs[rid_req_map[rid]].top_k_index.shape} {new_batch.reqs[rid_req_map[rid]].top_k_index.device},\n " +
+                    f"  hidden_states: {new_batch.reqs[rid_req_map[rid]].hidden_states_spec.shape} {new_batch.reqs[rid_req_map[rid]].hidden_states_spec.device} \n"
+                    f" verified_id: {new_batch.reqs[rid_req_map[rid]].verified_id.shape} {new_batch.reqs[rid_req_map[rid]].verified_id.device}")
+                logger.debug(f"recover_new_prefilled_batch(oral_recover) topk_p {top_k.shape if top_k is not None else None}\n"
+                            f"topk_index {top_k_index.shape if top_k_index is not None else None}\n"
+                            f"hidden_states {hidden_states.shape if hidden_states is not None else None}\n"
+                            f"verified_id {verified_id.shape if verified_id is not None else None}\n"
+                            f"rand_num {rand_num}")
+            else:
+                flattened_kv_buffer = flattened_buffer.to(self.device)
+            flattened_kv_buffer = flattened_kv_buffer.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
                 kv_cache_pool.set_kv_buffer_by_layer(
                     layer_id,
                     new_batch.out_cache_loc[pt_map[rid][0] : pt_map[rid][1]],
-                    layer_kv_buffer[len(rid_req_map[rid].prefix_indices):],
+                    layer_kv_buffer[len(new_batch.reqs[rid_req_map[rid]].prefix_indices):],
                     None
                 )
-            rid_req_map[rid].kv_cache_restored = True
+            new_batch.reqs[rid_req_map[rid]].kv_cache_restored = True
+        if not new_batch.spec_algorithm.is_none():
+            spec_info = EagleDraftInput()
+            spec_info.topk_p = top_k.to(self.device)
+            spec_info.topk_index = top_k_index.to(self.device)
+            spec_info.hidden_states = hidden_states.to(self.device)
+            spec_info.verified_id = verified_id.to(self.device)
+            new_batch.spec_info = spec_info
+            logger.debug(f" rand_num {rand_num} recover_new_prefilled_batch(oral) topk_p {top_k.shape if top_k is not None else None}\n"
+                        f"topk_index {top_k_index.shape if top_k_index is not None else None}\n"
+                        f"hidden_states {hidden_states.shape if hidden_states is not None else None}\n"
+                        f"verified_id {verified_id.shape if verified_id is not None else None}")
+            logger.debug(f" rand_num {rand_num} recover_new_prefilled_batch(self) topk_index {new_batch.spec_info.topk_index.shape if new_batch.spec_info.topk_index is not None else None}")
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
@@ -1565,7 +1677,7 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
-    
+
         return new_batch
 
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:
