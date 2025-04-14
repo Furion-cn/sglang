@@ -1784,10 +1784,6 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
-        for i,req in enumerate(batch.reqs) :
-            if req.finished() :
-                self.all_finished_req += 1
-                self.finished_req_ids.append(req.rid)
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result)
         elif batch.forward_mode.is_extend():
