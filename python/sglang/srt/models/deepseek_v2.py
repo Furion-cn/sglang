@@ -2071,30 +2071,42 @@ class DeepseekV2Model(nn.Module):
                 positions, hidden_states, forward_batch, residual
             )
         '''
+        if input_embeds is None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            hidden_states = input_embeds
+
+        residual = None
+
+        # first k dense layers
+        for i in range(self.config.first_k_dense_replace):
+            expert_distribution_recorder.set_current_layer(i)
+            layer = self.layers[i]
+            hidden_states, residual = layer(positions, hidden_states, forward_batch, residual, None)
 
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             return self.forward_prefill(
-                input_ids,
+                hidden_states,
                 positions,
                 forward_batch,
-                input_embeds,
+                residual,
             )
         elif forward_batch.forward_mode == ForwardMode.DECODE:
             return self.forward_decode(
-                input_ids,
+                hidden_states,
                 positions,
                 forward_batch,
-                input_embeds,
+                residual,
             )
         else:
             raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
 
     def forward_prefill(
         self,
-        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
-        input_embeds: torch.Tensor = None,
+        residual: torch.Tensor,
     ) -> torch.Tensor:
         """
         # prefill primary step
@@ -2107,18 +2119,6 @@ class DeepseekV2Model(nn.Module):
         launch_normal_dispatch_step = "launch_normal_dispatch"
         launch_normal_combine_step = "launch_normal_combine"
         """
-
-        if input_embeds is None:
-            hidden_states = self.embed_tokens(input_ids)
-        else:
-            hidden_states = input_embeds
-
-        residual = None
-
-        # first k dense layers
-        for i in range(self.config.first_k_dense_replace):
-            layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, forward_batch, residual, None)
 
         # split forward_batch into two micro-batches
         bs_joint_batch_boundary, fwd_batch0, fwd_batch1 = token_balanced_batch_split(forward_batch)
@@ -2225,10 +2225,10 @@ class DeepseekV2Model(nn.Module):
 
     def forward_decode(
         self,
-        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
-        input_embeds: torch.Tensor = None,
+        residual: torch.Tensor,
     ) -> torch.Tensor:
         """
         # decode primary step
@@ -2242,137 +2242,122 @@ class DeepseekV2Model(nn.Module):
         launch_ll_dispatch_step = "launch_ll_dispatch"
         launch_ll_combine_step = "launch_ll_combine"
         """
-        if input_embeds is None:
-            hidden_states = self.embed_tokens(input_ids)
-        else:
-            hidden_states = input_embeds
-
-        mb0_hidden_states, mb0_positions, mb1_hidden_states, mb1_positions = hidden_states, positions, None, None
-        mb0_residual, mb1_residual = None, None
-
-        l0, l1 = 2, 3
+        bs_joint_batch_boundary, fwd_batch0, fwd_batch1 = token_balanced_batch_split(forward_batch)
+        mb0_hidden_states = hidden_states[0:bs_joint_batch_boundary]
+        mb1_hidden_states = hidden_states[bs_joint_batch_boundary:]
+        mb0_positions = positions[0:bs_joint_batch_boundary]
+        mb1_positions = positions[bs_joint_batch_boundary:]
+        mb0_residual = residual[0:bs_joint_batch_boundary]
+        mb1_residual = residual[bs_joint_batch_boundary:]
         mb0_extra_args, mb1_extra_args = {}, {}
+        l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
+
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
-            if i < self.config.first_k_dense_replace:
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
-                    i, mb0_positions, mb0_hidden_states, forward_batch, mb0_residual, None
-                )
-            else:
-                if i == 3:  # note: first_k_dense_replace=3
-                    # split batch into two
-                    bs_joint_batch_boundary, fwd_batch0, fwd_batch1 = token_balanced_batch_split(forward_batch)
-                    mb0_hidden_states = mb0_hidden_states[0:bs_joint_batch_boundary]
-                    mb1_hidden_states = mb0_hidden_states[bs_joint_batch_boundary:]
-                    mb0_positions = mb0_positions[0:bs_joint_batch_boundary]
-                    mb1_positions = mb0_positions[bs_joint_batch_boundary:]
-                    mb0_residual = mb0_residual[0:bs_joint_batch_boundary]
-                    mb1_residual = mb0_residual[bs_joint_batch_boundary:]
+            # pipeline two micro batches according to https://github.com/deepseek-ai/profile-data
 
-                # pipeline two micro batches according to https://github.com/deepseek-ai/profile-data
+            # mb0: launch_dispatch
+            _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, fwd_batch0,
+                                                      mb0_residual,
+                                                      MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP, mb0_extra_args)
+            # mb0: shared_expert_output
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0,
+                                                                                 mb0_positions,
+                                                                                 mb0_hidden_states,
+                                                                                 fwd_batch0,
+                                                                                 mb0_residual,
+                                                                                 MicroBatchOverlapStep.SHARED_EXPERTS,
+                                                                                 mb0_extra_args)
 
-                # mb0: launch_dispatch
-                _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, fwd_batch0,
-                                                          mb0_residual,
-                                                          MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP, mb0_extra_args)
-                # mb0: shared_expert_output
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0,
-                                                                                     mb0_positions,
-                                                                                     mb0_hidden_states,
-                                                                                     fwd_batch0,
-                                                                                     mb0_residual,
-                                                                                     MicroBatchOverlapStep.SHARED_EXPERTS,
-                                                                                     mb0_extra_args)
+            # mb1: attn_0
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
+                                                                                 mb1_hidden_states,
+                                                                                 fwd_batch1, mb1_residual,
+                                                                                 MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
+                                                                                 mb1_extra_args)
+            # mb0: wait_dispatch
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
+                                                                                 mb0_hidden_states,
+                                                                                 fwd_batch0, mb0_residual,
+                                                                                 MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
+                                                                                 mb0_extra_args)
+            # mb0: mlp
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
+                                                                                 mb0_hidden_states,
+                                                                                 fwd_batch0, mb0_residual,
+                                                                                 MicroBatchOverlapStep.MLP,
+                                                                                 mb0_extra_args)
+            # mb0: launch_combine
+            _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, fwd_batch0,
+                                                      mb0_residual,
+                                                      MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP, mb0_extra_args)
+            # mb1: attn_1
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
+                                                                                 mb1_hidden_states,
+                                                                                 fwd_batch1, mb1_residual,
+                                                                                 MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
+                                                                                 mb1_extra_args)
+            # mb0: wait_combine
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
+                                                                                 mb0_hidden_states,
+                                                                                 fwd_batch0, mb0_residual,
+                                                                                 MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
+                                                                                 mb0_extra_args)
 
-                # mb1: attn_0
-                mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
-                                                                                     mb1_hidden_states,
-                                                                                     fwd_batch1, mb1_residual,
-                                                                                     MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
-                                                                                     mb1_extra_args)
-                # mb0: wait_dispatch
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
-                                                                                     mb0_hidden_states,
-                                                                                     fwd_batch0, mb0_residual,
-                                                                                     MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
-                                                                                     mb0_extra_args)
-                # mb0: mlp
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
-                                                                                     mb0_hidden_states,
-                                                                                     fwd_batch0, mb0_residual,
-                                                                                     MicroBatchOverlapStep.MLP,
-                                                                                     mb0_extra_args)
-                # mb0: launch_combine
-                _, _, mb0_extra_args = self.forward_layer(l0, mb0_positions, mb0_hidden_states, fwd_batch0,
-                                                          mb0_residual,
-                                                          MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP, mb0_extra_args)
-                # mb1: attn_1
-                mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
-                                                                                     mb1_hidden_states,
-                                                                                     fwd_batch1, mb1_residual,
-                                                                                     MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
-                                                                                     mb1_extra_args)
-                # mb0: wait_combine
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
-                                                                                     mb0_hidden_states,
-                                                                                     fwd_batch0, mb0_residual,
-                                                                                     MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
-                                                                                     mb0_extra_args)
+            # mb0: deal with mb0_shared_experts_output_hidden_states and mb0_hidden_states
+            # TODO: add, no add, add will be completed in attn_0
+            l0 += 1
 
-                # mb0: deal with mb0_shared_experts_output_hidden_states and mb0_hidden_states
-                # TODO: add, no add, add will be completed in attn_0
-                l0 += 1
+            # mb1: launch_dispatch
+            _, _, mb1_extra_args = self.forward_layer(l1, mb1_positions, mb1_hidden_states, fwd_batch1,
+                                                      mb1_residual,
+                                                      MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP, mb1_extra_args)
+            # mb1: shared_expert
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1,
+                                                                                 mb1_positions,
+                                                                                 mb1_hidden_states,
+                                                                                 fwd_batch1,
+                                                                                 mb1_residual,
+                                                                                 MicroBatchOverlapStep.SHARED_EXPERTS,
+                                                                                 mb1_extra_args)
 
-                # mb1: launch_dispatch
-                _, _, mb1_extra_args = self.forward_layer(l1, mb1_positions, mb1_hidden_states, fwd_batch1,
-                                                          mb1_residual,
-                                                          MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP, mb1_extra_args)
-                # mb1: shared_expert
-                mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1,
-                                                                                     mb1_positions,
-                                                                                     mb1_hidden_states,
-                                                                                     fwd_batch1,
-                                                                                     mb1_residual,
-                                                                                     MicroBatchOverlapStep.SHARED_EXPERTS,
-                                                                                     mb1_extra_args)
-
-                # mb0: attn_0
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
-                                                                                     mb0_hidden_states,
-                                                                                     fwd_batch0, mb0_residual,
-                                                                                     MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
-                                                                                     mb0_extra_args)
-                # mb1: wait_launch
-                mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
-                                                                                     mb1_hidden_states,
-                                                                                     fwd_batch1, mb1_residual,
-                                                                                     MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
-                                                                                     mb1_extra_args)
-                # mb1: mlp
-                mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
-                                                                                     mb1_hidden_states,
-                                                                                     fwd_batch1, mb1_residual,
-                                                                                     MicroBatchOverlapStep.MLP,
-                                                                                     mb1_extra_args)
-                # mb1: launch combine
-                _, _, mb1_extra_args = self.forward_layer(l1, mb1_positions, mb1_hidden_states, fwd_batch1,
-                                                          mb1_residual,
-                                                          MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP, mb1_extra_args)
-                # mb0: attn_1
-                mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
-                                                                                     mb0_hidden_states,
-                                                                                     fwd_batch0, mb0_residual,
-                                                                                     MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
-                                                                                     mb0_extra_args)
-                # mb1: wait_combine
-                mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
-                                                                                     mb1_hidden_states,
-                                                                                     fwd_batch1, mb1_residual,
-                                                                                     MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
-                                                                                     mb1_extra_args)
-                # mb1: add mb1_hidden_states and mb1_shared_experts_output_hidden_states
-                # TODO: add, add in attn_0
-                l1 += 1
+            # mb0: attn_0
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
+                                                                                 mb0_hidden_states,
+                                                                                 fwd_batch0, mb0_residual,
+                                                                                 MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
+                                                                                 mb0_extra_args)
+            # mb1: wait_launch
+            mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
+                                                                                 mb1_hidden_states,
+                                                                                 fwd_batch1, mb1_residual,
+                                                                                 MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
+                                                                                 mb1_extra_args)
+            # mb1: mlp
+            mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
+                                                                                 mb1_hidden_states,
+                                                                                 fwd_batch1, mb1_residual,
+                                                                                 MicroBatchOverlapStep.MLP,
+                                                                                 mb1_extra_args)
+            # mb1: launch combine
+            _, _, mb1_extra_args = self.forward_layer(l1, mb1_positions, mb1_hidden_states, fwd_batch1,
+                                                      mb1_residual,
+                                                      MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP, mb1_extra_args)
+            # mb0: attn_1
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(l0, mb0_positions,
+                                                                                 mb0_hidden_states,
+                                                                                 fwd_batch0, mb0_residual,
+                                                                                 MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
+                                                                                 mb0_extra_args)
+            # mb1: wait_combine
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(l1, mb1_positions,
+                                                                                 mb1_hidden_states,
+                                                                                 fwd_batch1, mb1_residual,
+                                                                                 MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
+                                                                                 mb1_extra_args)
+            # mb1: add mb1_hidden_states and mb1_shared_experts_output_hidden_states
+            # TODO: add, add in attn_0
+            l1 += 1
 
         hidden_states = torch.cat([mb0_hidden_states, mb1_hidden_states], dim=0)
         residual = torch.cat([mb0_residual, mb1_residual], dim=0)
@@ -2391,7 +2376,7 @@ class DeepseekV2Model(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
-        step: Optional[str] = None,
+        step: Optional[MicroBatchOverlapStep] = None,
         extra_args: Optional[Dict[str, Any]] = {},
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
         if layer_id >= len(self.layers) or layer_id < self.config.first_k_dense_replace:
