@@ -1425,7 +1425,7 @@ class Scheduler(
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
         for rid, tensor in kv_bytes_map.items():
             idx = index_req_map[rid]
-            if not new_batch.spec_algorithm.is_none:
+            if new_batch.spec_algorithm is not None and not new_batch.spec_algorithm.is_none:
                 assert isinstance(tensor, dict) is True
                 new_batch.reqs[idx].new_batch.hidden_states = tensor["hidden_states"].to(self.device)
                 new_batch.reqs[idx].verified_id = tensor["verified_id"].to(self.device)
@@ -1448,7 +1448,7 @@ class Scheduler(
                     None
                 )
             new_batch.reqs[index_req_map[rid]].kv_cache_restored = True
-        if not new_batch.spec_algorithm.is_none():
+        if new_batch.spec_algorithm is not None and not new_batch.spec_algorithm.is_none():
             spec_info = EagleDraftInput()
             spec_info.topk_p = top_k.to(self.device)
             spec_info.topk_index = top_k_index.to(self.device)

@@ -178,7 +178,7 @@ class KVTransferAgent:
             [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
              for i in range(self.layer_num)]
         )
-        if not req.speculative_algorithm.is_none():
+        if req.speculative_algorithm is not None and not req.speculative_algorithm.is_none():
             assert req.top_k is not None, "speculative decoding req.top_k is None"
             assert req.top_k_index is not None, "speculative decoding req.top_k_index is None"
             assert req.hidden_states_spec is not None, "speculative decoding req.hidden_states_spec is None"
