@@ -17,33 +17,36 @@ The entry point of inference server. (SRT = SGLang Runtime)
 This file implements HTTP APIs for the inference engine via fastapi.
 """
 
-from sglang.version import __version__
-from sglang.utils import get_exception_traceback
-from sglang.srt.warmup import execute_warmups
-from sglang.srt.utils import (
-    add_api_key_middleware,
-    add_prometheus_middleware,
-    delete_directory,
-    kill_process_tree,
-    set_uvicorn_logging_configs,
-)
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.reasoning_parser import ReasoningParser
-from sglang.srt.openai_api.protocol import ModelCard, ModelList
-from sglang.srt.openai_api.adapter import (
-    v1_batches,
-    v1_cancel_batch,
-    v1_chat_completions,
-    v1_completions,
-    v1_delete_file,
-    v1_embeddings,
-    v1_files_create,
-    v1_retrieve_batch,
-    v1_retrieve_file,
-    v1_retrieve_file_content,
-)
-from sglang.srt.metrics.func_timer import enable_func_timer
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
+import asyncio
+import dataclasses
+import json
+import logging
+import multiprocessing as multiprocessing
+import os
+import threading
+import time
+from ast import Mult
+from http import HTTPStatus
+from typing import AsyncIterator, Callable, Dict, Optional, Union
+
+from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+
+# Fix a bug of Python threading
+setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
+
+from contextlib import asynccontextmanager
+
+import numpy as np
+import orjson
+import requests
+import uvicorn
+import uvloop
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+
+from sglang.srt.entrypoints.engine import _launch_subprocesses
+from sglang.srt.function_call_parser import FunctionCallParser
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     ConfigureLoggingReq,
@@ -60,52 +63,50 @@ from sglang.srt.managers.io_struct import (
     SetInternalStateReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromTensorReqInput,
     VertexGenerateReqInput,
 )
-from sglang.srt.function_call_parser import FunctionCallParser
-from sglang.srt.entrypoints.engine import _launch_subprocesses
-from fastapi.responses import ORJSONResponse, Response, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, Form, Request, UploadFile
-import uvloop
-import uvicorn
-import requests
-import orjson
-import numpy as np
-from contextlib import asynccontextmanager
-import asyncio
-import dataclasses
-import json
-import logging
-import multiprocessing as multiprocessing
-import os
-import threading
-import time
-from http import HTTPStatus
-from typing import AsyncIterator, Callable, Dict, Optional
-
-# Fix a bug of Python threading
-setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
-
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.metrics.func_timer import enable_func_timer
+from sglang.srt.openai_api.adapter import (
+    v1_batches,
+    v1_cancel_batch,
+    v1_chat_completions,
+    v1_completions,
+    v1_delete_file,
+    v1_embeddings,
+    v1_files_create,
+    v1_retrieve_batch,
+    v1_retrieve_file,
+    v1_retrieve_file_content,
+)
+from sglang.srt.openai_api.protocol import ModelCard, ModelList
+from sglang.srt.reasoning_parser import ReasoningParser
+from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import (
+    MultiprocessingSerializer,
+    add_api_key_middleware,
+    add_prometheus_middleware,
+    delete_directory,
+    kill_process_tree,
+    set_uvicorn_logging_configs,
+)
+from sglang.srt.warmup import execute_warmups
+from sglang.utils import get_exception_traceback
+from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-
-# Store global states
 @dataclasses.dataclass
 class _GlobalState:
     tokenizer_manager: TokenizerManager
     scheduler_info: Dict
-
-
-_global_state: Optional[_GlobalState] = None
-
+    model_ready: bool = False 
 
 def set_global_state(global_state: _GlobalState):
     global _global_state
     _global_state = global_state
-
 
 @asynccontextmanager
 async def lifespan(fast_api_app: FastAPI):
@@ -121,7 +122,6 @@ async def lifespan(fast_api_app: FastAPI):
         warmup_thread.start()
     yield
 
-
 # Fast API
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -134,13 +134,14 @@ app.add_middleware(
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
 
-
 ##### Native API endpoints #####
 
 
 @app.get("/health")
 async def health() -> Response:
     """Check the health of the http server."""
+    if not _global_state.model_ready:
+        return Response(status_code=503, content="Model is still loading")
     return Response(status_code=200)
 
 
@@ -410,6 +411,26 @@ async def init_weights_update_group(
         return ORJSONResponse(content, status_code=HTTPStatus.BAD_REQUEST)
 
 
+@app.post("/update_weights_from_tensor")
+async def update_weights_from_tensor(
+    obj: UpdateWeightsFromTensorReqInput, request: Request
+):
+    """Update the weights from tensor inplace without re-launching the server.
+    Notes:
+    1. Ensure that the model is on the correct device (e.g., GPU) before calling this endpoint. If the model is moved to the CPU unexpectedly, it may cause performance issues or runtime errors.
+    2. HTTP will transmit only the metadata of the tensor, while the tensor itself will be directly copied to the model.
+    3. Any binary data in the named tensors should be base64 encoded.
+    """
+
+    success, message = await _global_state.tokenizer_manager.update_weights_from_tensor(
+        obj, request
+    )
+    content = {"success": success, "message": message}
+    return ORJSONResponse(
+        content, status_code=200 if success else HTTPStatus.BAD_REQUEST
+    )
+
+
 @app.post("/update_weights_from_distributed")
 async def update_weights_from_distributed(
     obj: UpdateWeightsFromDistributedReqInput, request: Request
@@ -562,7 +583,12 @@ def available_models():
     model_cards = []
     for served_model_name in served_model_names:
         model_cards.append(
-            ModelCard(id=served_model_name, root=served_model_name))
+            ModelCard(
+                id=served_model_name,
+                root=served_model_name,
+                max_model_len=_global_state.tokenizer_manager.model_config.context_len,
+            )
+        )
     return ModelList(data=model_cards)
 
 
@@ -724,13 +750,49 @@ def _wait_and_warmup(
     pipe_finish_writer: Optional[multiprocessing.connection.Connection],
     image_token_text: str,
     launch_callback: Optional[Callable[[], None]] = None,
-):
+):       
+
+    if server_args.kv_transfer_config is not None and server_args.kv_transfer_config.role == "decode":
+        logger.info("Decode node is ready!")
+        _global_state.model_ready = True
+        
+        if pipe_finish_writer is not None:
+            pipe_finish_writer.send("ready")
+            
+        if server_args.delete_ckpt_after_loading:
+            delete_directory(server_args.model_path)
+            
+        if launch_callback is not None:
+            launch_callback()
+            
+        return
+    
     if server_args.kv_transfer_config is None or server_args.kv_transfer_config.role == "prefill":
         headers = {}
         url = server_args.url()
         if server_args.api_key:
             headers["Authorization"] = f"Bearer {server_args.api_key}"
 
+        if server_args.kv_transfer_config is not None:
+            decode_url = f"http://{server_args.kv_transfer_config.decode_dist_init_host}:{server_args.port}"
+            logger.info(f"Prefill node waiting for decode node at {decode_url} to be ready...")
+            
+            decode_ready = False
+            retry_count = 0
+            while not decode_ready:
+                time.sleep(1)
+                retry_count += 1
+                if retry_count % 10 == 0:
+                    logger.info(f"Still waiting for decode node... (waited {retry_count} seconds)")
+                try:
+                    res = requests.get(decode_url + "/health", timeout=5)
+                    if res.status_code == 200:
+                        decode_ready = True
+                        logger.info("Decode node is ready!")
+                        break
+                except requests.exceptions.RequestException as e:
+                    pass
+        
         # Wait until the server is launched
         success = False
         for _ in range(120):
@@ -750,7 +812,6 @@ def _wait_and_warmup(
             logger.error(f"Initialization failed. warmup error: {last_traceback}")
             kill_process_tree(os.getpid())
             return
-
         model_info = res.json()
 
         # Send a warmup request
@@ -797,6 +858,7 @@ def _wait_and_warmup(
             kill_process_tree(os.getpid())
             return
 
+    _global_state.model_ready = True
     logger.info("The server is fired up and ready to roll!")
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

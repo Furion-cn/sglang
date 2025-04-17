@@ -1,21 +1,21 @@
-import os
 import hashlib
-import asyncio
 import torch
-from typing import Union, Optional
+import os
+from typing import Union
 import zmq
 import logging
 import socket
-from dataclasses import dataclass
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
-from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck, KVTransferFetchBatch
+from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck
+from sglang.srt.managers.schedule_batch import FINISH_ABORT
 from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_PORT
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.mem_cache.radix_cache import ReqToTokenPool, TokenToKVPoolAllocator
 from sglang.srt.managers.schedule_batch import Req
-from sglang.srt.utils import broadcast_pyobj
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import save as safetensors_save
@@ -90,8 +90,8 @@ class TransferEngine:
         ret = self.engine.transferSync(remote_url, buffer,
                                        peer_buffer_address, length, op)
         if ret < 0:
-            logger.error("Transfer Return Error")
-            raise Exception("Transfer Return Error")
+            logger.error(f"Transfer Return Error: {ret}")
+            raise Exception(f"Transfer Return Error: {ret}")
         return ret
 
     def write_bytes_to_buffer(self, buffer: int, user_data: bytes,
@@ -114,20 +114,22 @@ class KVTransferAgent:
                  token_to_kv_pool_allocator: TokenToKVPoolAllocator = None,
                  layer_num: int = 0,
                  tp_rank: int = 0,
-                 attn_tp_cpu_group: torch.distributed.ProcessGroup = None,
+                 kv_cache_size_factor: int = 0,
                  device: str = "cpu"):
         self.kv_buffer = {}
         self.layer_num = layer_num
         self.tp_rank = tp_rank
         self.tp_size = server_args.tp_size
-        self.attn_tp_cpu_group = attn_tp_cpu_group
         self.role = server_args.kv_transfer_config.role
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.handle_kv_cache_fetch_ct = {}
         self.handle_kv_cache_buffer_ptr = {}
         self.handle_kv_cache_buffer_length = {}
-        self.dispatched_reqs = 0
+        self.kv_cache_size_factor = kv_cache_size_factor
+        self.waiting_kv_transfers = {}
+        self.waiting_kv_transfer_lock = threading.Lock()
+
         self.attn_tp_rank, self.attn_tp_size, _ = (
             compute_dp_attention_world_info(
                 server_args.enable_dp_attention,
@@ -138,7 +140,10 @@ class KVTransferAgent:
         )
 
         tp_size_per_node = server_args.tp_size // server_args.nnodes
-        self.addr = f"{socket.gethostname()}:{KV_TRANSFER_AGENT_PORT+self.tp_rank % tp_size_per_node}"
+        hostname = os.environ.get(
+            "KV_TRANSFER_AGENT_HOSTNAME", socket.gethostname())
+        self.addr = f"{hostname}:{KV_TRANSFER_AGENT_PORT+self.tp_rank % tp_size_per_node}"
+        logger.debug(f"KVTransferAgent addr: {self.addr}")
 
         if server_args.nnodes == 1 and server_args.dist_init_addr is None:
             dist_init_host = "127.0.0.1"
@@ -175,14 +180,14 @@ class KVTransferAgent:
         )
         if req.speculative_algorithm is not None:
             kv_cache_and_spec_info = safetensors_save({"kv_cache": flatten.to(self.device),
-                                         "top_k": req.top_k.to(self.device) if req.top_k is not None else None,
-                                         "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
-                                         "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None,
-                                         "verified_id":req.verified_id.to(self.device) if req.verified_id is not None else None},)
+                                                       "top_k": req.top_k.to(self.device) if req.top_k is not None else None,
+                                                       "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
+                                                       "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None,
+                                                       "verified_id":req.verified_id.to(self.device) if req.verified_id is not None else None},)
             logger.debug(f" kv_transfer_agent send top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
-                        f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
-                        f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
-                        f"verified_id {req.verified_id.shape if req.verified_id is not None else None}")
+                         f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
+                         f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
+                         f"verified_id {req.verified_id.shape if req.verified_id is not None else None}")
             self.kv_buffer[req.rid] = kv_cache_and_spec_info
             return len(kv_cache_and_spec_info)
         else:
@@ -190,7 +195,7 @@ class KVTransferAgent:
             self.kv_buffer[req.rid] = kv_cache
             return len(kv_cache)
 
-    def get_kv_buffer(self, req: Req) -> Union[torch.Tensor, dict]:
+    def get_kv_buffer(self, req: Req) -> torch.Tensor:
         if self.attn_tp_rank == 0:
             dst_ptr = self._allocate_transfer_kv_buffer(req.kv_cache_length)
             # fetch kv buffer util transfer done
@@ -238,68 +243,112 @@ class KVTransferAgent:
             if req.kv_transfer_src_addr not in same_src_req_list:
                 same_src_req_list[req.kv_transfer_src_addr] = []
             same_src_req_list[req.kv_transfer_src_addr].append(req)
-        for src_addr, reql in same_src_req_list.items():
-            rid_tensor_map = self.get_batch_kv_buffer_from_same_src(reql)
+        for _, same_src_reqs in same_src_req_list.items():
+            rid_tensor_map = self._get_kv_buffer_from_same_src(same_src_reqs)
             for rid, tensor in rid_tensor_map.items():
                 res[rid] = tensor
         return res
 
-    def get_batch_kv_buffer_from_same_src(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
+    def _get_kv_buffer_from_same_src(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         if len(req_list) == 0:
             return {}
         batch_kv_cache_length = 0
         for req in req_list:
             batch_kv_cache_length += req.kv_cache_length
-        # allocate buffer
-        dst_ptr = self._allocate_transfer_kv_buffer(batch_kv_cache_length)
-        # send fetch request
-        self.send_to_pd_disagg_controller.send_pyobj(KVTransferFetchBatch(
-            fetch_batch_req_hash=hashlib.md5(''.join([req.rid for req in req_list]).encode()).hexdigest(),
-            rids=[req.rid for req in req_list],
-            src_addr=req_list[0].kv_transfer_src_addr,
-            src_rank=req_list[0].kv_transfer_src_rank,
-            dst_addr=self.addr,
-            dst_rank=self.tp_rank,
-            dst_ptr=dst_ptr,
-            fetch_ct=self.attn_tp_size,
-        ))
-        # recv ack
-        recv_obj = self.recv_from_pd_disagg_controller.recv_pyobj()
-        if not isinstance(recv_obj, KVTransferAck):
-            raise ValueError(f"Unknown message type: {type(recv_obj)}")
-        elif recv_obj.code != 0:
-            raise Exception(f"KV transfer failed: {recv_obj.code}")
-        # read from buffer
-        batch_kv_cache = self._read_bytes_from_buffer(
-            dst_ptr, batch_kv_cache_length)
-        # free buffer
-        self._free_transfer_kv_buffer(dst_ptr, batch_kv_cache_length)
-
-        # load to device
-        pt = 0
         res = {}
-        for req in req_list:
-            kv_cache_bytes = batch_kv_cache[pt:pt+req.kv_cache_length]
-            loaded_data = safetensors_load(kv_cache_bytes)
-            if len(loaded_data) > 1:  # Has speculative info
-                loaded_tensor = {
-                    "kv_cache": loaded_data["kv_cache"],
-                    "top_k": loaded_data["top_k"],
-                    "top_k_index": loaded_data["top_k_index"],
-                    "hidden_states": loaded_data["hidden_states"],
-                    "verified_id": loaded_data["verified_id"]
-                }
-            else:
-                loaded_tensor = loaded_data["kv_cache"]
-            res[req.rid] = loaded_tensor
-            pt += req.kv_cache_length
+        batch_kv_cache = None
+        try:
+            # allocate buffer
+            dst_ptr = self._allocate_transfer_kv_buffer(batch_kv_cache_length)
+            # send fetch request
+            logger.debug(f"[KVTransferAgent] Sending kv transfer fetch request")
+            kv_transfer_fetch = KVTransferFetch(
+                rids=[req.rid for req in req_list],
+                reqs_hash=hashlib.md5(
+                    ''.join([req.rid for req in req_list]).encode()).hexdigest(),
+                src_addr=req_list[0].kv_transfer_src_addr,
+                src_rank=req_list[0].kv_transfer_src_rank,
+                dst_addr=self.addr,
+                dst_rank=self.tp_rank,
+                dst_ptr=dst_ptr,
+                fetch_ct=self.attn_tp_size,
+            )
+            # send kv transfer request and wait for it to be done
+            received_kv_cache_length = self._send_kv_transfer_req(
+                kv_transfer_fetch)
+            # read from buffer
+            batch_kv_cache = self._read_bytes_from_buffer(
+                dst_ptr, received_kv_cache_length)
+            loaded_tensor = safetensors_load(batch_kv_cache)
+            pt = 0
+            for req in req_list:
+                loaded_data = loaded_tensor[:, pt:pt +
+                                                   len(req.origin_input_ids), :, :]
+                if len(loaded_data) > 1:  # Has speculative info
+                    req_tensor_data = {
+                        "kv_cache": loaded_data["kv_cache"],
+                        "top_k": loaded_data["top_k"],
+                        "top_k_index": loaded_data["top_k_index"],
+                        "hidden_states": loaded_data["hidden_states"],
+                        "verified_id": loaded_data["verified_id"]
+                    }
+                else:
+                    req_tensor_data = loaded_data["kv_cache"]
+                res[req.rid] = req_tensor_data
+                pt += len(req.kv_cache_length)
+        except Exception as e:
+            logger.error(f"[KVTransferAgent] Get batch kv buffer failed: {e}")
+            if batch_kv_cache is not None:
+                logger.error(f"[KVTransferAgent] Batch kv cache: {str(batch_kv_cache)}")
+            for req in req_list:
+                req.finished_reason = FINISH_ABORT(
+                    message=f"Get batch kv buffer failed: {e}")
+            return {}
+        finally:
+            # free buffer
+            if dst_ptr > 0:
+                self._free_transfer_kv_buffer(dst_ptr, batch_kv_cache_length)
         return res
+
+    def _send_kv_transfer_req(self, kv_transfer_fetch: KVTransferFetch, timeout: int = 60) -> int:
+        """Send kv transfer request and wait for it to be done.
+        If timeout, raise an exception. Default timeout is 60 seconds.
+        """
+        with self.waiting_kv_transfer_lock:
+            self.waiting_kv_transfers[kv_transfer_fetch.reqs_hash] = None
+
+        self.send_to_pd_disagg_controller.send_pyobj(kv_transfer_fetch)
+
+        logger.debug(
+            f"[KVTransferAgent] Waiting for kv transfer {kv_transfer_fetch.reqs_hash} to be done")
+
+        start_time = time.time()
+        while True:
+            with self.waiting_kv_transfer_lock:
+                if kv_transfer_fetch.reqs_hash not in self.waiting_kv_transfers:
+                    raise Exception(
+                        f"KV transfer {kv_transfer_fetch.reqs_hash} not in waiting list")
+
+                result = self.waiting_kv_transfers[kv_transfer_fetch.reqs_hash]
+                if result is not None:
+                    del self.waiting_kv_transfers[kv_transfer_fetch.reqs_hash]
+                    if result.error_message is not None:
+                        raise Exception(
+                            f"KV transfer failed: {result.error_message}")
+                    return result.kv_cache_length
+
+                if time.time() - start_time > timeout:
+                    raise Exception("KV transfer timeout")
+
+            time.sleep(0.01)
 
     def dispatch_prefilled_req(self, req: Req):
         if self.role == "decode":
             return
         if self.attn_tp_rank != 0:
             return
+        logger.debug(
+            f"[KVTransferAgent] Dispatch prefilled request {req.rid}, output_ids: {req.output_ids}")
         self.send_to_pd_disagg_controller.send_pyobj(PrefilledReqInput(
             rid=req.rid,
             mm_inputs=None,
@@ -316,63 +365,61 @@ class KVTransferAgent:
             kv_transfer_src_rank=self.tp_rank,
             kv_cache_length=req.kv_cache_length,
         ))
-        if getattr(req,"rid",None) is not None:
-            logging.debug(f"Trans Prefilled req {req.rid}")
-            if getattr(req,"origin_input_text",None) is not None:
-                logging.debug(f"Trans Prefilled req text {req.origin_input_text}")
-    # when prefill node receive kv transfer request
+        logger.debug(
+            f"[KVTransferAgent] Dispatched prefilled request {req.rid}, output_ids: {req.output_ids}")
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
-        kv_cache = self.kv_buffer[req.rid]
-        kv_cache_length = len(kv_cache)
-        src_ptr = self._allocate_transfer_kv_buffer(kv_cache_length)
-        self._write_bytes_to_buffer(src_ptr, kv_cache, kv_cache_length)
-        # send data to remote_addr
-        op_write = 1
-        self.engine.transfer_sync(
-            req.dst_addr, src_ptr, req.dst_ptr, kv_cache_length, op_write)
-        # send ack to remote addr
-        self.send_to_pd_disagg_controller.send_pyobj(
-            KVTransferAck(req.rid, req.dst_addr, req.dst_rank, 0))
-        # free buffer
-        self._free_transfer_kv_buffer(src_ptr, kv_cache_length)
-        del self.kv_buffer[req.rid]
-
-    def _handle_kv_transfer_batch_fetch(self, req: KVTransferFetchBatch):
-        if req.fetch_batch_req_hash not in self.handle_kv_cache_fetch_ct:
-            # calculate the total length of the kv cache
-            batch_kv_cache_length = sum([len(self.kv_buffer[rid]) for rid in req.rids])
-
-            # allocate buffer
-            src_ptr = self._allocate_transfer_kv_buffer(batch_kv_cache_length)
-
-            # write to buffer
-            write_to_buffer_ptr = src_ptr
-            for rid in req.rids:
-                kv_buffer_length = len(self.kv_buffer[rid])
-                self._write_bytes_to_buffer(write_to_buffer_ptr, self.kv_buffer[rid], kv_buffer_length)
-                write_to_buffer_ptr += kv_buffer_length
-            self.handle_kv_cache_buffer_ptr[req.fetch_batch_req_hash] = src_ptr
-            self.handle_kv_cache_fetch_ct[req.fetch_batch_req_hash] = 0
-            self.handle_kv_cache_buffer_length[req.fetch_batch_req_hash] = batch_kv_cache_length
-        # send data to remote_addr
-        op_write = 1
-        self.engine.transfer_sync(
-            req.dst_addr, self.handle_kv_cache_buffer_ptr[req.fetch_batch_req_hash], req.dst_ptr, self.handle_kv_cache_buffer_length[req.fetch_batch_req_hash], op_write)
+        batch_kv_cache_length = 0
+        try:
+            if req.reqs_hash not in self.handle_kv_cache_fetch_ct:
+                kv_caches = torch.cat([self.kv_buffer[rid]
+                                      for rid in req.rids], dim=1)
+                serialized = safetensors_save({"tensor": kv_caches})
+                batch_kv_cache_length = len(serialized)
+                src_ptr = self._allocate_transfer_kv_buffer(
+                    batch_kv_cache_length)
+                self._write_bytes_to_buffer(
+                    src_ptr, serialized, batch_kv_cache_length)
+                self.handle_kv_cache_buffer_ptr[req.reqs_hash] = src_ptr
+                self.handle_kv_cache_fetch_ct[req.reqs_hash] = 0
+                self.handle_kv_cache_buffer_length[req.reqs_hash] = batch_kv_cache_length
+            # send data to remote_addr
+            op_write = 1
+            self.engine.transfer_sync(
+                req.dst_addr, self.handle_kv_cache_buffer_ptr[req.reqs_hash], req.dst_ptr, self.handle_kv_cache_buffer_length[req.reqs_hash], op_write)
+            ack_error_message = None
+        except Exception as e:
+            logger.error(f"[KVTransferAgent] KV transfer failed: {e}")
+            ack_error_message = str(e)
 
         # send ack to remote addr
         self.send_to_pd_disagg_controller.send_pyobj(
-            KVTransferAck(None, req.dst_addr, req.dst_rank, 0))
+            KVTransferAck(None, req.reqs_hash, req.dst_addr, req.dst_rank, ack_error_message, batch_kv_cache_length))
+
+        if ack_error_message is not None:
+            return
 
         # free buffer
-        self.handle_kv_cache_fetch_ct[req.fetch_batch_req_hash] += 1
-        if self.handle_kv_cache_fetch_ct[req.fetch_batch_req_hash] == req.fetch_ct:
-            self._free_transfer_kv_buffer(self.handle_kv_cache_buffer_ptr[req.fetch_batch_req_hash], self.handle_kv_cache_buffer_length[req.fetch_batch_req_hash])
+        self.handle_kv_cache_fetch_ct[req.reqs_hash] += 1
+        if self.handle_kv_cache_fetch_ct[req.reqs_hash] == req.fetch_ct:
+            self._free_transfer_kv_buffer(
+                self.handle_kv_cache_buffer_ptr[req.reqs_hash], self.handle_kv_cache_buffer_length[req.reqs_hash])
             for rid in req.rids:
                 del self.kv_buffer[rid]
-            del self.handle_kv_cache_buffer_ptr[req.fetch_batch_req_hash]
-            del self.handle_kv_cache_fetch_ct[req.fetch_batch_req_hash]
-            del self.handle_kv_cache_buffer_length[req.fetch_batch_req_hash]
+            del self.handle_kv_cache_buffer_ptr[req.reqs_hash]
+            del self.handle_kv_cache_fetch_ct[req.reqs_hash]
+            del self.handle_kv_cache_buffer_length[req.reqs_hash]
+
+    def _handle_kv_transfer_ack(self, kv_transfer_ack: KVTransferAck):
+        with self.waiting_kv_transfer_lock:
+            if kv_transfer_ack.reqs_hash not in self.waiting_kv_transfers:
+                logger.debug(
+                    f"[KVTransferAgent] Received kv transfer ack: {kv_transfer_ack.reqs_hash} but not in waiting list")
+                return
+            self.waiting_kv_transfers[kv_transfer_ack.reqs_hash] = kv_transfer_ack
+            logger.debug(
+                f"[KVTransferAgent] Received kv transfer ack: {kv_transfer_ack.reqs_hash} with error message: {kv_transfer_ack.error_message}")
+
     def _allocate_transfer_kv_buffer(self, length: int) -> int:
         return self.engine.allocate_managed_buffer(length)
 
@@ -386,13 +433,11 @@ class KVTransferAgent:
         self.engine.write_bytes_to_buffer(buffer, data, length)
 
     def event_loop(self):
-        if self.role == "decode":
-            return
         while True:
             recv_obj = self.recv_from_pd_disagg_controller.recv_pyobj()
             if isinstance(recv_obj, KVTransferFetch):
                 self._handle_kv_transfer_fetch(recv_obj)
-            elif isinstance(recv_obj, KVTransferFetchBatch):
-                self._handle_kv_transfer_batch_fetch(recv_obj)
+            elif isinstance(recv_obj, KVTransferAck):
+                self._handle_kv_transfer_ack(recv_obj)
             else:
-                raise ValueError(f"Unknown message type: {type(recv_obj)}")
+                raise ValueError(f"[KVTransferAgent] Unknown message type: {type(recv_obj)}")
