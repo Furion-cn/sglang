@@ -439,6 +439,9 @@ class SchedulerDisaggregationDecodeMixin:
                 else:
                     result = self.run_batch(batch)
                     self.process_batch_result(batch, result)
+            
+            if len(self.aborted_reqs) > 0:
+                self.process_aborted_requests()
 
             if batch is None and (
                 len(self.disagg_decode_transfer_queue.queue)

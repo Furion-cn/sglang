@@ -188,6 +188,9 @@ class SchedulerDisaggregationPrefillMixin:
             if batch:
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_prefill(batch, result)
+            
+            if len(self.aborted_reqs) > 0:
+                self.process_aborted_requests()
 
             if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
