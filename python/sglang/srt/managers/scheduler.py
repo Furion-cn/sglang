@@ -1408,11 +1408,11 @@ class Scheduler(
         '''
         pt = 0
         pt_map = {}
-        rid_req_map = {}
+        index_req_map = {}
         try_to_fetch_kv_cache_req_list = []
         for i in range(new_batch.batch_size()):
             req = new_batch.reqs[i]
-            rid_req_map[req.rid] = new_batch.reqs[i]
+            index_req_map[req.rid] = i
             if req.kv_cache_restored:
                 pt += new_batch.extend_lens[i]
                 continue
@@ -1420,22 +1420,30 @@ class Scheduler(
             pt_map[req.rid] = (pt, pt + new_batch.extend_lens[i])
             pt += new_batch.extend_lens[i]
         top_k = torch.zeros(new_batch.batch_size(),self.server_args.speculative_eagle_topk)
-        top_k_index = torch.zeros(new_batch.batch_size(),self.server_args.speculative_eagle_topk)
-        hidden_states = torch.zeros(new_batch.batch_size(),self.model_config.hidden_size)
+        top_k_index = torch.zeros(new_batch.batch_size(), self.server_args.speculative_eagle_topk)
+        hidden_states = torch.zeros(new_batch.batch_size(), self.model_config.hidden_size)
         verified_id = torch.zeros(new_batch.batch_size())
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
         for rid, tensor in kv_bytes_map.items():
-            flattened_kv_buffer = tensor.to(self.device)
+            if not new_batch.spec_algorithm.is_none:
+                assert isinstance(tensor, dict) is True
+                new_batch.reqs[index_req_map[rid]].new_batch.hidden_states = tensor["hidden_states"].to(self.device)
+                new_batch.reqs[index_req_map[rid]].verified_id = tensor["verified_id"].to(self.device)
+                new_batch.reqs[index_req_map[rid]].top_k_index = tensor["top_k_index"].to(self.device)
+                new_batch.reqs[index_req_map[rid]].top_k = tensor["top_k"].to(self.device)
+                flattened_kv_buffer = tensor["kv_cache"].to(self.device)
+            else:
+                flattened_kv_buffer = tensor.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
                 kv_cache_pool.set_kv_buffer_by_layer(
                     layer_id,
-                    new_batch.out_cache_loc[pt_map[rid][0] : pt_map[rid][1]],
-                    layer_kv_buffer[len(rid_req_map[rid].prefix_indices):],
+                    new_batch.out_cache_loc[pt_map[rid][0]: pt_map[rid][1]],
+                    layer_kv_buffer[len(new_batch.reqs[index_req_map[rid]].prefix_indices):],
                     None
                 )
-            rid_req_map[rid].kv_cache_restored = True
+            new_batch.reqs[index_req_map[rid]].kv_cache_restored = True
         if not new_batch.spec_algorithm.is_none():
             spec_info = EagleDraftInput()
             spec_info.topk_p = top_k.to(self.device)
@@ -1443,11 +1451,6 @@ class Scheduler(
             spec_info.hidden_states = hidden_states.to(self.device)
             spec_info.verified_id = verified_id.to(self.device)
             new_batch.spec_info = spec_info
-            logger.debug(f" rand_num {rand_num} recover_new_prefilled_batch(oral) topk_p {top_k.shape if top_k is not None else None}\n"
-                             f"topk_index {top_k_index.shape if top_k_index is not None else None}\n"
-                             f"hidden_states {hidden_states.shape if hidden_states is not None else None}\n"
-                             f"verified_id {verified_id.shape if verified_id is not None else None}")
-                logger.debug(f" rand_num {rand_num} recover_new_prefilled_batch(self) topk_index {new_batch.spec_info.topk_index.shape if new_batch.spec_info.topk_index is not None else None}")
         return new_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:

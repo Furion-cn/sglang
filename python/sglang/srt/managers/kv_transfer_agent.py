@@ -179,23 +179,28 @@ class KVTransferAgent:
              for i in range(self.layer_num)]
         )
         if req.speculative_algorithm is not None:
-            kv_cache_and_spec_info = safetensors_save({"kv_cache": flatten.to(self.device),
-                                                       "top_k": req.top_k.to(self.device) if req.top_k is not None else None,
-                                                       "top_k_index":req.top_k_index.to(self.device) if req.top_k_index is not None else None,
-                                                       "hidden_states":req.hidden_states_spec.to(self.device) if req.hidden_states_spec is not None else None,
-                                                       "verified_id":req.verified_id.to(self.device) if req.verified_id is not None else None},)
-            logger.debug(f" kv_transfer_agent send top_k {req.top_k.shape if req.top_k is not None else 0}  \n"
-                         f"top_k_index {req.top_k_index.shape if req.top_k_index is not None else 0} \n"
-                         f"hidden_states {req.hidden_states_spec.shape if req.hidden_states_spec is not None else None} \n"
-                         f"verified_id {req.verified_id.shape if req.verified_id is not None else None}")
+            assert req.top_k is not None, "speculative decoding req.top_k is None"
+            assert req.top_k_index is not None, "speculative decoding req.top_k_index is None"
+            assert req.hidden_states_spec is not None, "speculative decoding req.hidden_states_spec is None"
+            assert req.verified_id is not None, "speculative decoding req.verified_id is None"
+            kv_cache_and_spec_info = {{"kv_cache": flatten.to(self.device),
+                                        "top_k": req.top_k.to(self.device) ,
+                                        "top_k_index": req.top_k_index.to(self.device) ,
+                                        "hidden_states": req.hidden_states_spec.to(self.device) ,
+                                        "verified_id": req.verified_id.to(self.device) }}
             self.kv_buffer[req.rid] = kv_cache_and_spec_info
-            return len(kv_cache_and_spec_info)
+            return (self.kv_cache_size_factor +
+                    flatten.numel() * flatten.element_size() +
+                    req.top_k.numel() * req.top_k.element_size() +
+                    req.top_k_index.numel() * req.top_k_index.element_size() +
+                    req.hidden_states_spec.numel() * req.hidden_states_spec.element_size() +
+                    req.verified_id.numel() * req.verified_id.element_size())
         else:
-            kv_cache = safetensors_save({"kv_cache": flatten.to(self.device)})
-            self.kv_buffer[req.rid] = kv_cache
-            return len(kv_cache)
+            self.kv_buffer[req.rid] = flatten.to(self.device)
+            return (self.kv_cache_size_factor +
+                    flatten.numel() * flatten.element_size())
 
-    def get_kv_buffer(self, req: Req) -> torch.Tensor:
+    def get_kv_buffer(self, req: Req) -> Union[torch.Tensor, dict]:
         if self.attn_tp_rank == 0:
             dst_ptr = self._allocate_transfer_kv_buffer(req.kv_cache_length)
             # fetch kv buffer util transfer done
@@ -249,7 +254,7 @@ class KVTransferAgent:
                 res[rid] = tensor
         return res
 
-    def _get_kv_buffer_from_same_src(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
+    def _get_kv_buffer_from_same_src(self, req_list: List[Req]) -> dict[str, Union[torch.Tensor, dict]]:
         if len(req_list) == 0:
             return {}
         batch_kv_cache_length = 0
@@ -283,7 +288,7 @@ class KVTransferAgent:
             pt = 0
             for req in req_list:
                 loaded_data = loaded_tensor[:, pt:pt +
-                                                   len(req.origin_input_ids), :, :]
+                                                  len(req.origin_input_ids), :, :]
                 if len(loaded_data) > 1:  # Has speculative info
                     req_tensor_data = {
                         "kv_cache": loaded_data["kv_cache"],
@@ -372,9 +377,23 @@ class KVTransferAgent:
         batch_kv_cache_length = 0
         try:
             if req.reqs_hash not in self.handle_kv_cache_fetch_ct:
-                kv_caches = torch.cat([self.kv_buffer[rid]
-                                      for rid in req.rids], dim=1)
-                serialized = safetensors_save({"tensor": kv_caches})
+
+                if isinstance(self.kv_buffer[req.rids[0]], dict):
+                    kv_caches = torch.cat([self.kv_buffer[rid]["kv_cache"]
+                                              for rid in req.rids], dim=1)
+                    top_ks = torch.cat([self.kv_buffer[rid]["top_k"]
+                                              for rid in req.rids], dim=1)
+                    top_k_indexs = torch.cat([self.kv_buffer[rid]["top_k_index"]
+                                              for rid in req.rids], dim=1)
+                    hidden_states_spec_infos = torch.cat([self.kv_buffer[rid]["hidden_states_spec_info"]
+                                              for rid in req.rids], dim=1)
+                    verified_ids = torch.cat([self.kv_buffer[rid]["verified_ids"]
+                                              for rid in req.rids], dim=1)
+                else:
+                    kv_caches = torch.cat([self.kv_buffer[rid]
+                                           for rid in req.rids], dim=1)
+
+                serialized = safetensors_save({"kv_cache": kv_caches})
                 batch_kv_cache_length = len(serialized)
                 src_ptr = self._allocate_transfer_kv_buffer(
                     batch_kv_cache_length)
