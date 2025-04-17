@@ -1877,7 +1877,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             return self.forward_normal(
                 positions, hidden_states, forward_batch, residual
-            ), None
+            )
 
     def forward_normal(
         self,
@@ -2082,7 +2082,7 @@ class DeepseekV2Model(nn.Module):
             for i in range(len(self.layers)):
                 expert_distribution_recorder.set_current_layer(i)
                 layer = self.layers[i]
-                hidden_states, residual = layer(
+                hidden_states, residual, _ = layer(
                     positions, hidden_states, forward_batch, residual
                 )
         else:
@@ -2090,7 +2090,7 @@ class DeepseekV2Model(nn.Module):
             for i in range(self.config.first_k_dense_replace):
                 expert_distribution_recorder.set_current_layer(i)
                 layer = self.layers[i]
-                hidden_states, residual = layer(positions, hidden_states, forward_batch, residual, None)
+                hidden_states, residual, _ = layer(positions, hidden_states, forward_batch, residual)
             
             if forward_batch.forward_mode == ForwardMode.EXTEND:
                 hidden_states, residual =  self.forward_prefill(
