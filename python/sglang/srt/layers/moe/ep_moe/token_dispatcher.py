@@ -217,7 +217,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             self.topk_weights,
             self.event,
         ) = self._dispatch_core(
-            hidden_states, topk_idx, topk_weights, num_experts, previous_event
+            hidden_states, topk_idx, topk_weights, previous_event
         )
     
     def wait_dispatch(self):
@@ -695,8 +695,8 @@ class DeepEPDispatcher:
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         num_experts: int,
-        num_max_dispatch_tokens_per_rank: int = 128,
-        forward_mode: ForwardMode = None
+        num_max_dispatch_tokens_per_rank: Optional[int] = 128,
+        forward_mode: Optional[ForwardMode] = None
     ):
         self._get_impl(forward_mode).launch_dispatch(hidden_states, topk_idx, topk_weights, num_experts, num_max_dispatch_tokens_per_rank)
 

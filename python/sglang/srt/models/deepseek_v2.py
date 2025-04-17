@@ -1750,7 +1750,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states,
                 extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY),
                 extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY),
-                self.num_experts,
+                self.mlp.num_experts,
                 forward_mode=forward_batch.forward_mode,
             )
 
