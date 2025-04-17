@@ -2077,29 +2077,44 @@ class DeepseekV2Model(nn.Module):
             hidden_states = input_embeds
 
         residual = None
-
-        # first k dense layers
-        for i in range(self.config.first_k_dense_replace):
-            expert_distribution_recorder.set_current_layer(i)
-            layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, forward_batch, residual, None)
-
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
-            return self.forward_prefill(
-                hidden_states,
-                positions,
-                forward_batch,
-                residual,
-            )
-        elif forward_batch.forward_mode == ForwardMode.DECODE:
-            return self.forward_decode(
-                hidden_states,
-                positions,
-                forward_batch,
-                residual,
-            )
+        
+        if forward_batch.batch_size == 1:
+            for i in range(len(self.layers)):
+                expert_distribution_recorder.set_current_layer(i)
+                layer = self.layers[i]
+                hidden_states, residual = layer(
+                    positions, hidden_states, forward_batch, residual
+                )
         else:
-            raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
+            # first k dense layers
+            for i in range(self.config.first_k_dense_replace):
+                expert_distribution_recorder.set_current_layer(i)
+                layer = self.layers[i]
+                hidden_states, residual = layer(positions, hidden_states, forward_batch, residual, None)
+            
+            if forward_batch.forward_mode == ForwardMode.EXTEND:
+                hidden_states, residual =  self.forward_prefill(
+                    hidden_states,
+                    positions,
+                    forward_batch,
+                    residual,
+                )
+            elif forward_batch.forward_mode == ForwardMode.DECODE:
+                hidden_states, residual = self.forward_decode(
+                    hidden_states,
+                    positions,
+                    forward_batch,
+                    residual,
+                )
+            else:
+                raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
+        
+        if not forward_batch.forward_mode.is_idle():
+            if residual is None:
+                hidden_states = self.norm(hidden_states)
+            else:
+                hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
     def forward_prefill(
         self,
@@ -2215,13 +2230,9 @@ class DeepseekV2Model(nn.Module):
             l1 += 1
 
         hidden_states = torch.cat([hidden_states_0, hidden_states_1], dim=0)
-
-        if not forward_batch.forward_mode.is_idle():
-            if residual is None:
-                hidden_states = self.norm(hidden_states)
-            else:
-                hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        residual = torch.cat([residual_0, residual_1], dim=0)
+        
+        return hidden_states, residual
 
     def forward_decode(
         self,
@@ -2362,12 +2373,7 @@ class DeepseekV2Model(nn.Module):
         hidden_states = torch.cat([mb0_hidden_states, mb1_hidden_states], dim=0)
         residual = torch.cat([mb0_residual, mb1_residual], dim=0)
 
-        if not forward_batch.forward_mode.is_idle():
-            if residual is None:
-                hidden_states = self.norm(hidden_states)
-            else:
-                hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        return hidden_states, residual
 
     def forward_layer(
         self,
