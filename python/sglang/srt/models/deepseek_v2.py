@@ -1193,6 +1193,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.dp_size = get_attention_dp_size()
         self.attn_tp_size = get_attention_tp_size()
         self.attn_tp_rank = get_attention_tp_rank()
+        self.num_local_heads = config.num_attention_heads
 
         if not global_server_args_dict["disable_mla"]:
             self.self_attn = DeepseekV2AttentionMLA(
@@ -2145,7 +2146,7 @@ class DeepseekV2Model(nn.Module):
         residual_1 = residual[bs_joint_batch_boundary:]
         extra_args_0, extra_args_1 = {}, {}
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
-
+    
         # last moe layer
         for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
             # overlap b1 attn and b0 shared_experts with b0 combine
