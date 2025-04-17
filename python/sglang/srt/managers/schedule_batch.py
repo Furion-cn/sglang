@@ -690,10 +690,6 @@ class Req:
         self.is_chunked = 0
         self.req_pool_idx = None
         self.already_computed = 0
-        self.top_k_index = None
-        self.top_k = None
-        self.hidden_states = None
-        self.verified_id = None
 
     def __repr__(self):
         return (

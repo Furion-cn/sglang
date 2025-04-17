@@ -734,7 +734,6 @@ def select_top_k_tokens(
 ):
     if i == 0:
         # The first step after extend
-        # topk_index (b, topk)
         input_ids = topk_index.flatten()
         hidden_states = hidden_states.repeat_interleave(topk, dim=0)
         scores = topk_p  # shape: (b, topk)

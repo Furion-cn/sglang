@@ -33,7 +33,6 @@ import psutil
 import setproctitle
 import torch
 import zmq
-from numpy.matlib import randn
 from torch.distributed import barrier
 
 from sglang.global_config import global_config
@@ -1425,12 +1424,17 @@ class Scheduler(
         verified_id = torch.zeros(new_batch.batch_size())
         kv_bytes_map = self.kv_transfer_agent.get_batch_kv_buffer(try_to_fetch_kv_cache_req_list)
         for rid, tensor in kv_bytes_map.items():
+            idx = index_req_map[rid]
             if not new_batch.spec_algorithm.is_none:
                 assert isinstance(tensor, dict) is True
-                new_batch.reqs[index_req_map[rid]].new_batch.hidden_states = tensor["hidden_states"].to(self.device)
-                new_batch.reqs[index_req_map[rid]].verified_id = tensor["verified_id"].to(self.device)
-                new_batch.reqs[index_req_map[rid]].top_k_index = tensor["top_k_index"].to(self.device)
-                new_batch.reqs[index_req_map[rid]].top_k = tensor["top_k"].to(self.device)
+                new_batch.reqs[idx].new_batch.hidden_states = tensor["hidden_states"].to(self.device)
+                new_batch.reqs[idx].verified_id = tensor["verified_id"].to(self.device)
+                new_batch.reqs[idx].top_k_index = tensor["top_k_index"].to(self.device)
+                new_batch.reqs[idx].top_k = tensor["top_k"].to(self.device)
+                top_k[idx] = tensor["top_k"].to(self.device)
+                hidden_states[idx] = tensor["hidden_states"].to(self.device)
+                verified_id[idx] = tensor["verified_id"].to(self.device)
+                top_k_index[idx] = tensor["top_k_index"].to(self.device)
                 flattened_kv_buffer = tensor["kv_cache"].to(self.device)
             else:
                 flattened_kv_buffer = tensor.to(self.device)
