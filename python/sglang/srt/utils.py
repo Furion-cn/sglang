@@ -637,6 +637,9 @@ def assert_pkg_version(pkg: str, min_version: str, message: str):
 
 def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = None):
     """Kill the process and all its child processes."""
+    # Remove sigchld handler to avoid spammy logs.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 
     if parent_pid is None:
         parent_pid = os.getpid()
@@ -671,37 +674,26 @@ def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = N
             pass
 
 
-def setup_child_process_monitor():
-    print("Setting up child process monitor...")
-    def child_handler(signum, frame):
-        while True:
+def monitor_children_and_exit_on_failure():
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Start monitoring child processes")
+    parent = psutil.Process(os.getpid())
+    while True:
+        for child in parent.children(recursive=True):
             try:
-                pid, status = os.waitpid(-1, os.WNOHANG)
-                if pid <= 0: 
-                    break
-                
-                exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
-                signal_num = os.WTERMSIG(status) if os.WIFSIGNALED(status) else -1
-
-                if exit_code != 0 or signal_num != -1:
-                    print(f"Child process {pid} terminated with exit code {exit_code} and signal {signal_num}")
-
-                    if exit_code == 131 or signal_num in (4, 6, 11):
-                        print("Critical error detected, main process will exit...")
-                        sys.exit(1)
-            except ChildProcessError:
-                break
+                if not child.is_running():
+                    exitcode = child.wait(timeout=0)
+                    if exitcode != 0:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Child process {child.pid} exited abnormally with exit code {exitcode}")
+                        os._exit(1)
+                elif child.status() == psutil.STATUS_ZOMBIE:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Child process {child.pid} is zombie (abnormal exit)")
+                    os._exit(1)
+            except psutil.NoSuchProcess:
+                continue
             except Exception as e:
-                print(f"Error in child process monitor: {e}")
-                break
+                print(f"Error monitoring child process: {e}")
+        time.sleep(0.5)
     
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGCHLD, child_handler)
-    else:
-        print("Warning: setup_child_process_monitor called from non-main thread, signal handler not installed")
-    
-    signal.signal(signal.SIGCHLD, child_handler)
-
 def monkey_patch_p2p_access_check():
     """
     Monkey patch the slow p2p access check.
