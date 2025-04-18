@@ -2726,12 +2726,8 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
         not fwd_batch.forward_mode.is_decode()
         and getattr(fwd_batch, "extend_num_tokens") is not None
     ):
-        setattr(sub_fwd_batch0, "extend_num_tokens", bs_joint_batch_boundary)
-        setattr(
-            sub_fwd_batch1,
-            "extend_num_tokens",
-            getattr(fwd_batch, "extend_num_tokens") - bs_joint_batch_boundary,
-        )
+        sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary.item()
+        sub_fwd_batch1.extend_num_tokens = fwd_batch.extend_num_tokens - sub_fwd_batch0.extend_num_tokens
 
     for key in [
         "input_ids",
@@ -2745,14 +2741,14 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
     sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
     
-    sub_fwd_batch0.global_num_tokens_gpu = sum(sub_fwd_batch0.extend_seq_lens)
-    sub_fwd_batch1.global_num_tokens_gpu = sum(sub_fwd_batch1.extend_seq_lens)
+    sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(0, keepdim=True)
+    sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(0, keepdim=True)
     
     sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
     sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
 
-    sub_fwd_batch0.batch_size = bs_joint_batch_boundary
-    sub_fwd_batch1.batch_size = fwd_batch.batch_size - bs_joint_batch_boundary
+    sub_fwd_batch0.batch_size = bs_joint_batch_boundary.item()
+    sub_fwd_batch1.batch_size = fwd_batch.batch_size - bs_joint_batch_boundary.item()
     
     return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
 
