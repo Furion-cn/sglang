@@ -2707,13 +2707,13 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     for key in [
         "req_pool_indices",
         "seq_lens",
-        "seq_lens_cpu",
+        "seq_lens_cpu", # Optional[torch.Tensor]
         #"decode_seq_lens_cpu",
         "extend_seq_lens",
         "extend_prefix_lens",
         "extend_start_loc",
         "extend_prefix_lens_cpu",
-        "extend_seq_lens_cpu",
+        "extend_seq_lens_cpu", # Optional[List[int]]
         "extend_logprob_start_lens_cpu",
         
     ]:
@@ -2740,20 +2740,16 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     ]:
         setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:bs_joint_batch_boundary])
         setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[bs_joint_batch_boundary:])
-
-    for key in [
-        "global_num_tokens_cpu",
-        "global_num_tokens_gpu",
-    ]:
-        setattr(sub_fwd_batch0, key, bs_joint_batch_boundary)
-        setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[0] - bs_joint_batch_boundary)
         
-    for key in [
-        "seq_lens_sum",
-    ]:
-        setattr(sub_fwd_batch0, key, sum(getattr(sub_fwd_batch0, 'seq_lens_cpu')))
-        setattr(sub_fwd_batch1, key, sum(getattr(sub_fwd_batch1, 'seq_lens_cpu')))
     
+    sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
+    sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
+    
+    sub_fwd_batch0.global_num_tokens_gpu = sum(sub_fwd_batch0.extend_seq_lens)
+    sub_fwd_batch1.global_num_tokens_gpu = sum(sub_fwd_batch1.extend_seq_lens)
+    
+    sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
+    sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
 
     sub_fwd_batch0.batch_size = bs_joint_batch_boundary
     sub_fwd_batch1.batch_size = fwd_batch.batch_size - bs_joint_batch_boundary
