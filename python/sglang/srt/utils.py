@@ -675,7 +675,7 @@ def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = N
 
 
 def setup_child_process_monitor():
-    logger.info("Setting up child process monitor...")
+    print("Setting up child process monitor...")
     def child_handler(signum, frame):
         try:
             pid, status = os.waitpid(-1, os.WNOHANG)
@@ -684,13 +684,13 @@ def setup_child_process_monitor():
                 signal_num = os.WTERMSIG(status) if os.WIFSIGNALED(status) else -1
 
                 if exit_code != 0 or signal_num != -1:
-                    logger.error(f"Child process {pid} terminated with exit code {exit_code} and signal {signal_num}")
+                    print(f"Child process {pid} terminated with exit code {exit_code} and signal {signal_num}")
 
                     if exit_code == 131 or signal_num in (4, 6, 11):
-                        logger.critical("Critical error detected, main process will exit...")
+                        print("Critical error detected, main process will exit...")
                         sys.exit(1)
         except Exception as e:
-            logger.error(f"Error in child process monitor: {e}")
+            print(f"Error in child process monitor: {e}")
     
     signal.signal(signal.SIGCHLD, child_handler)
 
