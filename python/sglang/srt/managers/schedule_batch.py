@@ -1006,7 +1006,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[dict, torch.Tensor]], speculative_eagle_topk: Optional[int]):
+    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[dict, torch.Tensor]]):
         self.forward_mode = ForwardMode.DECODE
 
         bs = len(self.reqs)
@@ -1171,10 +1171,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Restore KV cache
         pt = 0
-        top_k = torch.zeros(self.batch_size(),self.speculative_eagle_topk)
-        top_k_index = torch.zeros(self.batch_size(), self.speculative_eagle_topk)
-        hidden_states = torch.zeros(self.batch_size(), self.model_config.hidden_size)
-        verified_id = torch.zeros(self.batch_size())
+        if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
+            assert self.speculative_eagle_topk is not None,"speculative_eagle_topk is not setted correctly"
+            top_k = torch.zeros(self.batch_size(),self.speculative_eagle_topk)
+            top_k_index = torch.zeros(self.batch_size(), self.speculative_eagle_topk)
+            hidden_states = torch.zeros(self.batch_size(), self.model_config.hidden_size)
+            verified_id = torch.zeros(self.batch_size())
         for i, req in enumerate(self.reqs):
             tensor = kv_buffer[req.rid]
             if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
@@ -1197,10 +1199,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 )
             req.kv_cache_restored = True
             pt += req.extend_input_len
-        logger.info(f"spec_info top_k {top_k.shape},{top_k.device}\n"
-                    f"top_k_index {top_k_index.shape},{top_k_index.device}\n"
-                    f"hidden_states {hidden_states.shape},{hidden_states.device}\n"
-                    f"verified_id {verified_id.shape},{verified_id.device}\n")
+        if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
+            logger.info(f"spec_info top_k {top_k.shape},{top_k.device}\n"
+                        f"top_k_index {top_k_index.shape},{top_k_index.device}\n"
+                        f"hidden_states {hidden_states.shape},{hidden_states.device}\n"
+                        f"verified_id {verified_id.shape},{verified_id.device}\n")
         if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
             spec_info = EagleDraftInput()
             spec_info.topk_p = top_k.to(self.device)

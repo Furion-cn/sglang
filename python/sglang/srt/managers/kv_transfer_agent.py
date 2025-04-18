@@ -366,8 +366,10 @@ class KVTransferAgent:
                 else:
                     kv_caches = torch.cat([self.kv_buffer[rid]
                                            for rid in req.rids], dim=1)
+                    logger.info(f"_handle_kv_transfer_fetch kv_caches {kv_caches.shape} {kv_caches.device}")
                     serialized = safetensors_save({"batch_kv_cache": kv_caches,})
                 batch_kv_cache_length = len(serialized)
+                logger.info(f"_handle_kv_transfer_fetch batch_kv_cache_length {batch_kv_cache_length} ")
                 src_ptr = self._allocate_transfer_kv_buffer(
                     batch_kv_cache_length)
                 self._write_bytes_to_buffer(
