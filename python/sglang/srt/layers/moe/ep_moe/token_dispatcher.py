@@ -20,6 +20,9 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class DeepEPDispatchMode(IntEnum):
     NORMAL = auto()
@@ -151,7 +154,7 @@ class _DeepEPDispatcherImplBase:
         topk_weights: torch.Tensor,
         num_experts: int,
         num_max_dispatch_tokens_per_rank: int,
-    ):
+    ) -> torch.Tensor:
         raise NotImplementedError
     
     def wait_dispatch(self):
@@ -208,7 +211,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
         num_experts: int,
         num_max_dispatch_tokens_per_rank: int,
-    ):
+    ) -> torch.Tensor:
         topk_idx = topk_idx.to(torch.int64)
         previous_event = Buffer.capture() if self.async_finish else None
         (
@@ -219,6 +222,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         ) = self._dispatch_core(
             hidden_states, topk_idx, topk_weights, previous_event
         )
+        return self.hidden_states
     
     def wait_dispatch(self):
         self.event.current_stream_wait() if self.async_finish else ()
@@ -318,7 +322,6 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             async_finish=self.async_finish,
             allocate_on_comm_stream=previous_event is not None,
         )
-
         # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
         # However, doing this would incur an unknown synchronization error, but keeping
         # `handle` as a member variable works.
@@ -342,7 +345,6 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             async_finish=self.async_finish,
             allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
         )
-
         return (
             recv_x,
             recv_topk_idx,
@@ -697,8 +699,8 @@ class DeepEPDispatcher:
         num_experts: int,
         num_max_dispatch_tokens_per_rank: Optional[int] = 128,
         forward_mode: Optional[ForwardMode] = None
-    ):
-        self._get_impl(forward_mode).launch_dispatch(hidden_states, topk_idx, topk_weights, num_experts, num_max_dispatch_tokens_per_rank)
+    ) -> torch.Tensor:
+        return self._get_impl(forward_mode).launch_dispatch(hidden_states, topk_idx, topk_weights, num_experts, num_max_dispatch_tokens_per_rank)
 
     def wait_dispatch(self, forward_mode: ForwardMode = None) -> Tuple:
         return self._get_impl(forward_mode).wait_dispatch()
