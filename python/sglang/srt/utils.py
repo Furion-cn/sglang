@@ -684,8 +684,12 @@ def monitor_children_and_exit_on_failure():
             try:
                 if not child.is_running():
                     exitcode = child.wait(timeout=0)
+                    if exitcode != 0:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid} exited with exit code {exitcode}")
+                        sys.stdout.flush()
+                        sys.stderr.flush()
                     if exitcode in fatal_exitcodes:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Child process {child.pid} exited abnormally with exit code {exitcode}")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid} exited abnormally with exit code {exitcode}")
                         sys.stdout.flush()
                         sys.stderr.flush()
                         os._exit(1)
