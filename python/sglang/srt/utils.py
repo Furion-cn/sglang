@@ -684,9 +684,11 @@ def monitor_children_and_exit_on_failure():
                     exitcode = child.wait(timeout=0)
                     if exitcode != 0:
                         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Child process {child.pid} exited abnormally with exit code {exitcode}")
+                        time.sleep(1)
                         os._exit(1)
                 elif child.status() == psutil.STATUS_ZOMBIE:
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Child process {child.pid} is zombie (abnormal exit)")
+                    time.sleep(1)
                     os._exit(1)
             except psutil.NoSuchProcess:
                 continue
