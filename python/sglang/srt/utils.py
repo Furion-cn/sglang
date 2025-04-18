@@ -681,9 +681,8 @@ def monitor_children_and_exit_on_failure(parent_pid):
     fatal_exitcodes = {128 + sig for sig in fatal_signals}
     while True:
         for child in parent.children(recursive=True):
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid}")
-            sys.stdout.flush()
-            sys.stderr.flush()
+            if child.pid == 178 or child.pid == 179:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid}, {child.cmdline}, {child.is_running}")
             try:
                 if not child.is_running():
                     exitcode = child.wait(timeout=0)
@@ -706,7 +705,7 @@ def monitor_children_and_exit_on_failure(parent_pid):
                 continue
             except Exception as e:
                 print(f"Error monitoring child process: {e}")
-        time.sleep(0.5)
+        time.sleep(1)
     
 def monkey_patch_p2p_access_check():
     """
