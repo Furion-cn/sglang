@@ -675,6 +675,7 @@ def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = N
 
 
 def setup_child_process_monitor():
+    logger.info("Setting up child process monitor...")
     def child_handler(signum, frame):
         try:
             pid, status = os.waitpid(-1, os.WNOHANG)

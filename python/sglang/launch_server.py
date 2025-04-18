@@ -11,7 +11,7 @@ if __name__ == "__main__":
     server_args = prepare_server_args(sys.argv[1:])
 
     try:
-        launch_server(server_args)
         setup_child_process_monitor()
+        launch_server(server_args)
     finally:
         kill_process_tree(os.getpid(), include_parent=False)
