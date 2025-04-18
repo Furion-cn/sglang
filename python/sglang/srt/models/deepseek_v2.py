@@ -2747,8 +2747,8 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
     sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
 
-    sub_fwd_batch0.batch_size = batch_boundary.item()
-    sub_fwd_batch1.batch_size = fwd_batch.batch_size - batch_boundary.item()
+    sub_fwd_batch0.batch_size = batch_boundary
+    sub_fwd_batch1.batch_size = fwd_batch.batch_size - sub_fwd_batch0.batch_size
     
     return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
 
