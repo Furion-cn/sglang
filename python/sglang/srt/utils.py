@@ -679,10 +679,11 @@ def monitor_children_and_exit_on_failure(parent_pid):
     parent = psutil.Process(parent_pid)
     fatal_signals = {4, 6, 9, 11}  # SIGILL, SIGABRT, SIGKILL, SIGSEGV
     fatal_exitcodes = {128 + sig for sig in fatal_signals}
+    loop_count = 0
     while True:
         for child in parent.children(recursive=True):
-            if child.pid == 178 or child.pid == 179:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid}, {child.cmdline}, {child.is_running}")
+            if loop_count % 15 == 0 and (child.pid == 178 or child.pid == 179):
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [Loop_counts: {loop_count}] Detected child process {child.pid}, cmd line: {child.cmdline()}, is running: {child.is_running()}")
             try:
                 if not child.is_running():
                     exitcode = child.wait(timeout=0)
@@ -706,6 +707,7 @@ def monitor_children_and_exit_on_failure(parent_pid):
             except Exception as e:
                 print(f"Error monitoring child process: {e}")
         time.sleep(1)
+        loop_count += 1
     
 def monkey_patch_p2p_access_check():
     """
