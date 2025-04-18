@@ -1004,7 +1004,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, torch.Tensor]):
+    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[dict, torch.Tensor]]):
         self.forward_mode = ForwardMode.DECODE
 
         bs = len(self.reqs)
@@ -1169,8 +1169,21 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Restore KV cache
         pt = 0
+        top_k = torch.zeros(self.batch_size(),self.server_args.speculative_eagle_topk)
+        top_k_index = torch.zeros(self.batch_size(), self.server_args.speculative_eagle_topk)
+        hidden_states = torch.zeros(self.batch_size(), self.model_config.hidden_size)
+        verified_id = torch.zeros(self.batch_size())
         for i, req in enumerate(self.reqs):
-            flattened_kv_buffer = kv_buffer[req.rid].to(self.device)
+            tensor = kv_buffer[req.rid]
+            if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
+                assert isinstance(tensor, dict) is True
+                top_k[i] = tensor["top_k"].to(self.device)
+                hidden_states[i] = tensor["hidden_states"].to(self.device)
+                verified_id[i] = tensor["verified_id"].to(self.device)
+                top_k_index[i] = tensor["top_k_index"].to(self.device)
+                flattened_kv_buffer = tensor["kv_cache"].to(self.device)
+            else:
+                flattened_kv_buffer = tensor.to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
@@ -1182,6 +1195,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 )
             req.kv_cache_restored = True
             pt += req.extend_input_len
+        if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
+            spec_info = EagleDraftInput()
+            spec_info.topk_p = top_k.to(self.device)
+            spec_info.topk_index = top_k_index.to(self.device)
+            spec_info.hidden_states = hidden_states.to(self.device)
+            spec_info.verified_id = verified_id.to(self.device)
+            self.spec_info = spec_info
 
     def prepare_for_extend(self):
         self.forward_mode = ForwardMode.EXTEND

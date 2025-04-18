@@ -201,7 +201,7 @@ class KVTransferAgent:
                     flatten.numel() * flatten.element_size())
 
 
-    def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
+    def get_kv_buffer(self, req_list: List[Req]) -> dict[str, Union[torch.Tensor, dict]]:
         same_src_req_list = {}
         res = {}
         for req in req_list:
@@ -222,6 +222,7 @@ class KVTransferAgent:
             batch_kv_cache_length += req.kv_cache_length
         res = {}
         batch_kv_cache = None
+        dst_ptr = 0
         try:
             # allocate buffer
             dst_ptr = self._allocate_transfer_kv_buffer(batch_kv_cache_length)
@@ -273,12 +274,11 @@ class KVTransferAgent:
             for req in req_list:
                 req.finished_reason = FINISH_ABORT(
                     message=f"Get batch kv buffer failed: {e}")
-            return {}
         finally:
             # free buffer
             if dst_ptr > 0:
                 self._free_transfer_kv_buffer(dst_ptr, batch_kv_cache_length)
-        return res
+            return res
 
     def _send_kv_transfer_req(self, kv_transfer_fetch: KVTransferFetch, timeout: int = 60) -> int:
         """Send kv transfer request and wait for it to be done.
