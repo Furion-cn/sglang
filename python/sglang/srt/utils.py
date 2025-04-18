@@ -674,25 +674,29 @@ def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = N
             pass
 
 
-def monitor_children_and_exit_on_failure():
+def monitor_children_and_exit_on_failure(parent_pid):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Start monitoring child processes")
-    parent = psutil.Process(os.getpid())
+    parent = psutil.Process(parent_pid)
     fatal_signals = {4, 6, 9, 11}  # SIGILL, SIGABRT, SIGKILL, SIGSEGV
     fatal_exitcodes = {128 + sig for sig in fatal_signals}
     while True:
         for child in parent.children(recursive=True):
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid}")
+            sys.stdout.flush()
+            sys.stderr.flush()
             try:
                 if not child.is_running():
                     exitcode = child.wait(timeout=0)
-                    if exitcode != 0:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid} exited with exit code {exitcode}")
-                        sys.stdout.flush()
-                        sys.stderr.flush()
-                    if exitcode in fatal_exitcodes:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid} exited abnormally with exit code {exitcode}")
-                        sys.stdout.flush()
-                        sys.stderr.flush()
-                        os._exit(1)
+                    if exitcode is not None:
+                        if exitcode != 0:
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid} exited with exit code {exitcode}")
+                            sys.stdout.flush()
+                            sys.stderr.flush()
+                        if exitcode in fatal_exitcodes:
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Detected child process {child.pid} exited abnormally with exit code {exitcode}")
+                            sys.stdout.flush()
+                            sys.stderr.flush()
+                            os._exit(1)
                 # elif child.status() == psutil.STATUS_ZOMBIE:
                 #     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Child process {child.pid} is zombie (abnormal exit)")
                 #     sys.stdout.flush()
