@@ -776,6 +776,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # Speculative decoding
     spec_algorithm: SpeculativeAlgorithm = None
+    speculative_eagle_topk: int = 0
     spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]] = None
 
     # Enable custom logit processor
@@ -795,9 +796,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         enable_overlap: bool,
         spec_algorithm: SpeculativeAlgorithm,
         enable_custom_logit_processor: bool,
+        speculative_eagle_topk: Optional[int] = 0,
     ):
         return_logprob = any(req.return_logprob for req in reqs)
-
         return cls(
             reqs=reqs,
             req_to_token_pool=req_to_token_pool,
@@ -810,6 +811,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             has_grammar=any(req.grammar for req in reqs),
             device=req_to_token_pool.device,
             spec_algorithm=spec_algorithm,
+            speculative_eagle_topk = speculative_eagle_topk,
             enable_custom_logit_processor=enable_custom_logit_processor,
             return_hidden_states=any(req.return_hidden_states for req in reqs),
         )
@@ -1004,7 +1006,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[dict, torch.Tensor]]):
+    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[dict, torch.Tensor]], speculative_eagle_topk: Optional[int]):
         self.forward_mode = ForwardMode.DECODE
 
         bs = len(self.reqs)
@@ -1169,8 +1171,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Restore KV cache
         pt = 0
-        top_k = torch.zeros(self.batch_size(),self.server_args.speculative_eagle_topk)
-        top_k_index = torch.zeros(self.batch_size(), self.server_args.speculative_eagle_topk)
+        top_k = torch.zeros(self.batch_size(),self.speculative_eagle_topk)
+        top_k_index = torch.zeros(self.batch_size(), self.speculative_eagle_topk)
         hidden_states = torch.zeros(self.batch_size(), self.model_config.hidden_size)
         verified_id = torch.zeros(self.batch_size())
         for i, req in enumerate(self.reqs):
@@ -1195,6 +1197,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 )
             req.kv_cache_restored = True
             pt += req.extend_input_len
+        logger.info(f"spec_info top_k {top_k.shape},{top_k.device}\n"
+                    f"top_k_index {top_k_index.shape},{top_k_index.device}\n"
+                    f"hidden_states {hidden_states.shape},{hidden_states.device}\n"
+                    f"verified_id {verified_id.shape},{verified_id.device}\n")
         if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
             spec_info = EagleDraftInput()
             spec_info.topk_p = top_k.to(self.device)

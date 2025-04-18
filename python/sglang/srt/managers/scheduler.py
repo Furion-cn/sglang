@@ -1381,6 +1381,7 @@ class Scheduler(
             self.enable_overlap,
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
+            self.server_args.speculative_eagle_topk,
         )
         new_batch.recover_for_decode(origin_output_ids, kv_buffer)
         return new_batch
