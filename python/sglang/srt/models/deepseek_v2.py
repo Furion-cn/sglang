@@ -2146,6 +2146,9 @@ class DeepseekV2Model(nn.Module):
         residual_1 = residual[bs_joint_batch_boundary:]
         extra_args_0, extra_args_1 = {}, {}
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
+        # init attn_backend metadata again
+        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        fwd_batch1.attn_backend_1.init_forward_metadata(fwd_batch1)
     
         # last moe layer
         for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
@@ -2263,6 +2266,9 @@ class DeepseekV2Model(nn.Module):
         mb1_residual = residual[bs_joint_batch_boundary:]
         mb0_extra_args, mb1_extra_args = {}, {}
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
+        # init attn_backend metadata again
+        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        fwd_batch1.attn_backend_1.init_forward_metadata(fwd_batch1)
 
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)

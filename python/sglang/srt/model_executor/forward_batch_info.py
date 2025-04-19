@@ -199,6 +199,8 @@ class ForwardBatch:
     req_to_token_pool: ReqToTokenPool = None
     token_to_kv_pool: KVCache = None
     attn_backend: AttentionBackend = None
+    # note: only used in fa3 with two micro batches
+    attn_backend_1: AttentionBackend = None
 
     # For DP attention
     global_num_tokens_cpu: Optional[List[int]] = None
@@ -259,6 +261,7 @@ class ForwardBatch:
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
             attn_backend=model_runner.attn_backend,
+            attn_backend_1=model_runner.attn_backend_1,
             spec_algorithm=batch.spec_algorithm,
             spec_info=batch.spec_info,
             capture_hidden_mode=batch.capture_hidden_mode,
