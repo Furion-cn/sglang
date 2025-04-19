@@ -42,9 +42,10 @@ from sglang.srt.utils import (
 
 logger = logging.getLogger(__name__)
 
+
 class KVTransferConfig(BaseModel):
-    role: str = "prefill" # "prefill" or "decode"
-    
+    role: str = "prefill"  # "prefill" or "decode"
+
     decode_dist_init_host: str = None
     prefill_dist_init_host: str = None
 
@@ -57,6 +58,7 @@ class KVTransferConfig(BaseModel):
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
         """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
+
 
 @dataclasses.dataclass
 class ServerArgs:
@@ -380,7 +382,8 @@ class ServerArgs:
 
             if self.page_size > 1 and self.speculative_eagle_topk > 1:
                 self.speculative_eagle_topk = 1
-                logger.info("speculative_eagle_topk is changed to 1 when page_size > 1")
+                logger.info(
+                    "speculative_eagle_topk is changed to 1 when page_size > 1")
 
             # The token generated from the verify step is counted.
             # If sepculative_num_steps >= speculative_num_draft_tokens, the additional tokens will definitely be discarded.
@@ -402,7 +405,8 @@ class ServerArgs:
         # PD disaggregation
         if self.disaggregation_mode == "prefill":
             self.disable_cuda_graph = True
-            logger.warning("KV cache is forced as chunk cache for decode server")
+            logger.warning(
+                "KV cache is forced as chunk cache for decode server")
             self.disable_overlap_schedule = True
             logger.warning("Overlap scheduler is disabled for prefill server")
         elif self.disaggregation_mode == "decode":
@@ -499,7 +503,8 @@ class ServerArgs:
             "--dtype",
             type=str,
             default=ServerArgs.dtype,
-            choices=["auto", "half", "float16", "bfloat16", "float", "float32"],
+            choices=["auto", "half", "float16",
+                     "bfloat16", "float", "float32"],
             help="Data type for model weights and activations.\n\n"
             '* "auto" will use FP16 precision for FP32 and FP16 models, and '
             "BF16 precision for BF16 models.\n"
@@ -808,7 +813,8 @@ class ServerArgs:
         # Multi-node distributed serving
         parser.add_argument(
             "--dist-init-addr",
-            "--nccl-init-addr",  # For backward compatbility. This will be removed in the future.
+            # For backward compatbility. This will be removed in the future.
+            "--nccl-init-addr",
             type=str,
             help="The host address for initializing distributed backend (e.g., `192.168.0.2:25000`).",
         )
@@ -1174,12 +1180,11 @@ class ServerArgs:
                             default=None,
                             help='The configurations for distributed KV cache '
                             'transfer. Should be a JSON string.')
-        
+
         # micro batch overlap for deepep moe
         parser.add_argument(
             "--enable-micro-batch-overlap",
-            type=bool,
-            default=ServerArgs.enable_micro_batch_overlap,
+            action="store_true",
             help="Enable micro batch overlap for deepep moe.",
         )
 
@@ -1331,7 +1336,8 @@ class PortArgs:
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.
             if server_args.nnodes == 1 and server_args.dist_init_addr is None:
-                dist_init_addr = ("127.0.0.1", server_args.port + ZMQ_TCP_PORT_DELTA)
+                dist_init_addr = (
+                    "127.0.0.1", server_args.port + ZMQ_TCP_PORT_DELTA)
             elif server_args.dist_init_addr.startswith("["):  # ipv6 address
                 port_num, host = configure_ipv6(server_args.dist_init_addr)
                 dist_init_addr = (host, str(port_num))

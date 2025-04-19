@@ -450,19 +450,18 @@ class DeepseekV2MoE(nn.Module):
                         return_recv_hook=True,
                     ),
                 }
-            else:
-                self.deepep_dispatcher = DeepEPDispatcher(
-                    group=parallel_state.get_tp_group().device_group,
-                    router_topk=self.top_k,
-                    permute_fusion=True,
-                    num_experts=config.n_routed_experts,
-                    num_local_experts=config.n_routed_experts // self.tp_size,
-                    hidden_size=config.hidden_size,
-                    params_dtype=config.torch_dtype,
-                    deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
-                    async_finish=True,  # TODO
-                    return_recv_hook=True,
-                )
+            self.deepep_dispatcher = DeepEPDispatcher(
+                group=parallel_state.get_tp_group().device_group,
+                router_topk=self.top_k,
+                permute_fusion=True,
+                num_experts=config.n_routed_experts,
+                num_local_experts=config.n_routed_experts // self.tp_size,
+                hidden_size=config.hidden_size,
+                params_dtype=config.torch_dtype,
+                deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
+                async_finish=True,  # TODO
+                return_recv_hook=True,
+            )
 
     def forward(
         self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
