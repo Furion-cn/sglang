@@ -85,6 +85,7 @@ global_server_args_dict = {
     "chunked_prefill_size": ServerArgs.chunked_prefill_size,
     "n_share_experts_fusion": ServerArgs.n_share_experts_fusion,
     "disable_shared_experts_fusion": ServerArgs.disable_shared_experts_fusion,
+    "enable_micro_batch_overlap": ServerArgs.enable_micro_batch_overlap,
 }
 
 logger = logging.getLogger(__name__)

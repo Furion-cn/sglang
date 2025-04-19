@@ -205,6 +205,8 @@ class ServerArgs:
 
     # KV cache transfer
     kv_transfer_config: Optional[KVTransferConfig] = None
+    # micro batch overlap for deepep moe
+    enable_micro_batch_overlap: bool = False
 
     # Debug tensor dumps
     debug_tensor_dump_output_folder: Optional[str] = None
@@ -1172,6 +1174,14 @@ class ServerArgs:
                             default=None,
                             help='The configurations for distributed KV cache '
                             'transfer. Should be a JSON string.')
+        
+        # micro batch overlap for deepep moe
+        parser.add_argument(
+            "--enable-micro-batch-overlap",
+            type=bool,
+            default=ServerArgs.enable_micro_batch_overlap,
+            help="Enable micro batch overlap for deepep moe.",
+        )
 
         # Debug tensor dumps
         parser.add_argument(
