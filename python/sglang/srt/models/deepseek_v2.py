@@ -65,6 +65,7 @@ from sglang.srt.layers.quantization.int8_utils import (
     block_dequant as int8_block_dequant,
 )
 from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.rotary_embedding import get_rope, get_rope_wrapper
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -77,6 +78,8 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import DeepEPMode, add_prefix, is_cuda, is_hip
 from copy import copy, deepcopy
 from enum import Enum
+from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.configs.model_config import ModelConfig
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -2078,7 +2081,7 @@ class DeepseekV2Model(nn.Module):
             hidden_states = input_embeds
 
         residual = None
-        
+
         if forward_batch.batch_size == 1:
             for i in range(len(self.layers)):
                 expert_distribution_recorder.set_current_layer(i)
@@ -2092,9 +2095,9 @@ class DeepseekV2Model(nn.Module):
                 expert_distribution_recorder.set_current_layer(i)
                 layer = self.layers[i]
                 hidden_states, residual, _ = layer(positions, hidden_states, forward_batch, residual)
-            
+
             if forward_batch.forward_mode == ForwardMode.EXTEND:
-                hidden_states, residual =  self.forward_prefill(
+                hidden_states, residual = self.forward_prefill(
                     hidden_states,
                     positions,
                     forward_batch,
@@ -2109,7 +2112,7 @@ class DeepseekV2Model(nn.Module):
                 )
             else:
                 raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
-        
+
         if not forward_batch.forward_mode.is_idle():
             if residual is None:
                 hidden_states = self.norm(hidden_states)
@@ -2146,7 +2149,10 @@ class DeepseekV2Model(nn.Module):
         residual_1 = residual[bs_joint_batch_boundary:]
         extra_args_0, extra_args_1 = {}, {}
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
-    
+        # init attn_backend metadata again
+        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        fwd_batch1.attn_backend_1.init_forward_metadata(fwd_batch1)
+
         # last moe layer
         for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
             # overlap b1 attn and b0 shared_experts with b0 combine
@@ -2232,7 +2238,7 @@ class DeepseekV2Model(nn.Module):
 
         hidden_states = torch.cat([hidden_states_0, hidden_states_1], dim=0)
         residual = torch.cat([residual_0, residual_1], dim=0)
-        
+
         return hidden_states, residual
 
     def forward_decode(
@@ -2263,6 +2269,10 @@ class DeepseekV2Model(nn.Module):
         mb1_residual = residual[bs_joint_batch_boundary:]
         mb0_extra_args, mb1_extra_args = {}, {}
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
+
+        # init attn_backend metadata again
+        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        fwd_batch1.attn_backend_1.init_forward_metadata(fwd_batch1)
 
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
@@ -2315,9 +2325,6 @@ class DeepseekV2Model(nn.Module):
                                                                                  fwd_batch0, mb0_residual,
                                                                                  MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
                                                                                  mb0_extra_args)
-
-            # mb0: deal with mb0_shared_experts_output_hidden_states and mb0_hidden_states
-            # TODO: add, no add, add will be completed in attn_0
             l0 += 1
 
             # mb1: launch_dispatch
@@ -2367,8 +2374,6 @@ class DeepseekV2Model(nn.Module):
                                                                                  fwd_batch1, mb1_residual,
                                                                                  MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
                                                                                  mb1_extra_args)
-            # mb1: add mb1_hidden_states and mb1_shared_experts_output_hidden_states
-            # TODO: add, add in attn_0
             l1 += 1
 
         hidden_states = torch.cat([mb0_hidden_states, mb1_hidden_states], dim=0)
@@ -2707,15 +2712,15 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     for key in [
         "req_pool_indices",
         "seq_lens",
-        "seq_lens_cpu", # Optional[torch.Tensor]
-        #"decode_seq_lens_cpu",
+        "seq_lens_cpu",  # Optional[torch.Tensor]
+        # "decode_seq_lens_cpu",
         "extend_seq_lens",
         "extend_prefix_lens",
         "extend_start_loc",
         "extend_prefix_lens_cpu",
-        "extend_seq_lens_cpu", # Optional[List[int]]
+        "extend_seq_lens_cpu",  # Optional[List[int]]
         "extend_logprob_start_lens_cpu",
-        
+
     ]:
         if getattr(fwd_batch, key) is not None:
             # skip for decode mode
@@ -2736,20 +2741,19 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     ]:
         setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:bs_joint_batch_boundary])
         setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[bs_joint_batch_boundary:])
-        
-    
+
     sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
     sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
-    
+
     sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(0, keepdim=True)
     sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(0, keepdim=True)
-    
+
     sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
     sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
 
     sub_fwd_batch0.batch_size = batch_boundary
     sub_fwd_batch1.batch_size = fwd_batch.batch_size - sub_fwd_batch0.batch_size
-    
+
     return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
 
 

@@ -199,6 +199,8 @@ class ForwardBatch:
     req_to_token_pool: ReqToTokenPool = None
     token_to_kv_pool: KVCache = None
     attn_backend: AttentionBackend = None
+    # note: only used in fa3 with two micro batches
+    attn_backend_1: AttentionBackend = None
 
     # For DP attention
     global_num_tokens_cpu: Optional[List[int]] = None
@@ -259,6 +261,7 @@ class ForwardBatch:
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
             attn_backend=model_runner.attn_backend,
+            attn_backend_1=model_runner.attn_backend_1,
             spec_algorithm=batch.spec_algorithm,
             spec_info=batch.spec_info,
             capture_hidden_mode=batch.capture_hidden_mode,
@@ -407,13 +410,13 @@ class ForwardBatch:
                 if mm_input is None:
                     # text only
                     mrope_positions = [
-                        [
-                            pos
-                            for pos in range(
-                                extend_prefix_len, extend_prefix_len + extend_seq_len
-                            )
-                        ]
-                    ] * 3
+                                          [
+                                              pos
+                                              for pos in range(
+                                              extend_prefix_len, extend_prefix_len + extend_seq_len
+                                          )
+                                          ]
+                                      ] * 3
                 else:
                     image_grid_thws_list = [
                         item.image_grid_thws
@@ -452,8 +455,8 @@ class ForwardBatch:
                     mrope_positions, mrope_position_delta = (
                         MRotaryEmbedding.get_input_positions(
                             input_tokens=self.input_ids[
-                                extend_start_loc : extend_start_loc + extend_seq_len
-                            ].tolist(),
+                                         extend_start_loc: extend_start_loc + extend_seq_len
+                                         ].tolist(),
                             image_grid_thw=image_grid_thw,
                             video_grid_thw=video_grid_thw,
                             image_token_id=hf_config.image_token_id,

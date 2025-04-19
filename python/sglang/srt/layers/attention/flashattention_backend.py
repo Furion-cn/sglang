@@ -300,8 +300,8 @@ class FlashAttentionBackend(AttentionBackend):
         self.kv_cache_dtype_str = model_runner.server_args.kv_cache_dtype
         self.page_size = model_runner.page_size
         self.use_mla = (
-            model_runner.model_config.attention_arch == AttentionArch.MLA
-        ) and (not global_server_args_dict["disable_mla"])
+                           model_runner.model_config.attention_arch == AttentionArch.MLA
+                       ) and (not global_server_args_dict["disable_mla"])
         self.skip_prefill = skip_prefill
 
         self.topk = topk
@@ -344,8 +344,8 @@ class FlashAttentionBackend(AttentionBackend):
                     (1, 0),
                 )
                 metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
-                    forward_batch.req_pool_indices, : metadata.max_seq_len_k
-                ]
+                                      forward_batch.req_pool_indices, : metadata.max_seq_len_k
+                                      ]
             else:
                 # Normal Decode
                 metadata.cache_seqlens_int32 = seqlens_in_batch.to(torch.int32)
@@ -357,8 +357,8 @@ class FlashAttentionBackend(AttentionBackend):
                     torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0)
                 )
                 metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
-                    forward_batch.req_pool_indices, : metadata.max_seq_len_k
-                ]
+                                      forward_batch.req_pool_indices, : metadata.max_seq_len_k
+                                      ]
         elif forward_batch.forward_mode.is_target_verify():
             metadata.cache_seqlens_int32 = (
                 forward_batch.seq_lens + self.speculative_num_draft_tokens
@@ -380,8 +380,8 @@ class FlashAttentionBackend(AttentionBackend):
                 (1, 0),
             )
             metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
-                forward_batch.req_pool_indices, : metadata.max_seq_len_k
-            ]
+                                  forward_batch.req_pool_indices, : metadata.max_seq_len_k
+                                  ]
 
         elif forward_batch.forward_mode.is_extend_or_draft_extend():
             metadata.cache_seqlens_int32 = seqlens_in_batch.to(torch.int32)
@@ -390,8 +390,8 @@ class FlashAttentionBackend(AttentionBackend):
                 torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0)
             )
             metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
-                forward_batch.req_pool_indices, : metadata.max_seq_len_k
-            ]
+                                  forward_batch.req_pool_indices, : metadata.max_seq_len_k
+                                  ]
 
             if (
                 any(forward_batch.extend_prefix_lens_cpu)
@@ -421,8 +421,8 @@ class FlashAttentionBackend(AttentionBackend):
                 effective_chunk_size = min(self.attention_chunk_size, max_seq_len)
                 # Make sure effective_chunk_size is divisible by page_size
                 effective_chunk_size = (
-                    effective_chunk_size // self.page_size
-                ) * self.page_size
+                                           effective_chunk_size // self.page_size
+                                       ) * self.page_size
                 if effective_chunk_size < self.page_size:
                     effective_chunk_size = self.page_size
 
@@ -464,16 +464,16 @@ class FlashAttentionBackend(AttentionBackend):
             )
             metadata.encoder_max_seq_len_k = metadata.encoder_lens_int32.max().item()
             metadata.encoder_page_table = forward_batch.req_to_token_pool.req_to_token[
-                forward_batch.req_pool_indices, : metadata.encoder_max_seq_len_k
-            ]
+                                          forward_batch.req_pool_indices, : metadata.encoder_max_seq_len_k
+                                          ]
 
             # Currently only support forward_batch.encoder_lens.numel() == 1
             metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
-                forward_batch.req_pool_indices,
-                metadata.encoder_max_seq_len_k : (
-                    metadata.encoder_max_seq_len_k + metadata.max_seq_len_k
-                ),
-            ]
+                                  forward_batch.req_pool_indices,
+                                  metadata.encoder_max_seq_len_k: (
+                                      metadata.encoder_max_seq_len_k + metadata.max_seq_len_k
+                                  ),
+                                  ]
 
         # Convert the page table to a strided format which is needed by FA3 API
         if self.page_size > 1:
@@ -596,7 +596,7 @@ class FlashAttentionBackend(AttentionBackend):
         else:
             # Do absorbed multi-latent attention
             kv_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
-            k_rope = kv_cache[:, :, layer.v_head_dim :]
+            k_rope = kv_cache[:, :, layer.v_head_dim:]
             c_kv = kv_cache[:, :, : layer.v_head_dim]
             k_rope_cache = k_rope.view(
                 -1,
@@ -609,7 +609,7 @@ class FlashAttentionBackend(AttentionBackend):
             )
             q_all = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
             q_nope = q_all[:, :, : layer.v_head_dim]
-            q_rope = q_all[:, :, layer.v_head_dim :]
+            q_rope = q_all[:, :, layer.v_head_dim:]
             o = flash_attn_with_kvcache(
                 q=q_rope,
                 k_cache=k_rope_cache,
@@ -724,7 +724,7 @@ class FlashAttentionBackend(AttentionBackend):
         else:
             # Do absorbed multi-latent attention
             kv_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
-            k_rope = kv_cache[:, :, layer.v_head_dim :]
+            k_rope = kv_cache[:, :, layer.v_head_dim:]
             c_kv = kv_cache[:, :, : layer.v_head_dim]
             k_rope_cache = k_rope.view(
                 -1,
@@ -738,7 +738,7 @@ class FlashAttentionBackend(AttentionBackend):
 
             q_all = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
             q_nope = q_all[:, :, : layer.v_head_dim]
-            q_rope = q_all[:, :, layer.v_head_dim :]
+            q_rope = q_all[:, :, layer.v_head_dim:]
 
             o = flash_attn_with_kvcache(
                 q=q_rope,
@@ -843,14 +843,14 @@ class FlashAttentionBackend(AttentionBackend):
             if spec_info is not None:
                 # Draft Decode
                 metadata.cache_seqlens_int32 = self.decode_cuda_graph_metadata[
-                    "cache_seqlens"
-                ][:bs]
+                                                   "cache_seqlens"
+                                               ][:bs]
                 metadata.max_seq_len_k = seq_lens.max().item() + (
                     self.speculative_step_id + 1
                 )
                 metadata.cu_seqlens_q = self.decode_cuda_graph_metadata["cu_seqlens_q"][
-                    : bs + 1
-                ]
+                                        : bs + 1
+                                        ]
                 metadata.cu_seqlens_k = torch.nn.functional.pad(
                     torch.cumsum(
                         metadata.cache_seqlens_int32, dim=0, dtype=torch.int32
@@ -858,8 +858,8 @@ class FlashAttentionBackend(AttentionBackend):
                     (1, 0),
                 )
                 metadata.page_table = self.decode_cuda_graph_metadata[
-                    "page_table_draft_decode"
-                ][req_pool_indices, :]
+                                          "page_table_draft_decode"
+                                      ][req_pool_indices, :]
             else:
                 # Normal Decode
                 # Get sequence information
@@ -873,8 +873,8 @@ class FlashAttentionBackend(AttentionBackend):
                 metadata.max_seq_len_k = seq_lens.max().item()
                 # Precompute page table
                 metadata.page_table = self.decode_cuda_graph_metadata["page_table"][
-                    req_pool_indices, :
-                ]
+                                      req_pool_indices, :
+                                      ]
                 # Precompute cumulative sequence lengths
                 metadata.cu_seqlens_q = torch.arange(
                     0, batch_size + 1, dtype=torch.int32, device=device
@@ -882,8 +882,8 @@ class FlashAttentionBackend(AttentionBackend):
             self.decode_cuda_graph_metadata[bs] = metadata
         elif forward_mode.is_target_verify():
             metadata.cache_seqlens_int32 = self.target_verify_metadata["cache_seqlens"][
-                :bs
-            ]
+                                           :bs
+                                           ]
             metadata.cache_seqlens_int32.copy_(
                 (seq_lens + self.speculative_num_draft_tokens).to(torch.int32)
             )
@@ -902,27 +902,27 @@ class FlashAttentionBackend(AttentionBackend):
             )
 
             metadata.cu_seqlens_k = self.target_verify_metadata["cu_seqlens_k"][
-                : (bs + 1)
-            ]
+                                    : (bs + 1)
+                                    ]
 
             metadata.page_table = self.target_verify_metadata["page_table"][
-                req_pool_indices, :
-            ]
+                                  req_pool_indices, :
+                                  ]
 
             self.target_verify_metadata[bs] = metadata
 
         if encoder_lens is not None:
             encoder_bs = encoder_lens.numel()
             metadata.encoder_lens_int32 = self.encoder_metadata["encoder_lens_int32"][
-                :encoder_bs
-            ]
+                                          :encoder_bs
+                                          ]
             metadata.encoder_cu_seqlens_k = self.encoder_metadata[
-                "encoder_cu_seqlens_k"
-            ][: (encoder_bs + 1)]
+                                                "encoder_cu_seqlens_k"
+                                            ][: (encoder_bs + 1)]
 
             metadata.encoder_page_table = self.encoder_metadata["encoder_page_table"][
-                req_pool_indices, :
-            ]
+                                          req_pool_indices, :
+                                          ]
 
         self.forward_metadata = metadata
 
@@ -964,8 +964,8 @@ class FlashAttentionBackend(AttentionBackend):
                 )
 
                 page_table = self.req_to_token[
-                    req_pool_indices, : metadata.max_seq_len_k
-                ]
+                             req_pool_indices, : metadata.max_seq_len_k
+                             ]
 
                 metadata.page_table[:, : metadata.max_seq_len_k].copy_(page_table)
             else:
@@ -979,12 +979,12 @@ class FlashAttentionBackend(AttentionBackend):
                 )
 
                 max_seq_pages = (
-                    metadata.max_seq_len_k + self.page_size - 1
-                ) // self.page_size
+                                    metadata.max_seq_len_k + self.page_size - 1
+                                ) // self.page_size
                 page_indices = self.req_to_token[
                     req_pool_indices[:, None],
                     self.decode_cuda_graph_metadata["strided_indices"][:max_seq_pages][
-                        None, :
+                    None, :
                     ],
                 ]
                 page_indices //= self.page_size
@@ -1028,11 +1028,11 @@ class FlashAttentionBackend(AttentionBackend):
 
             # Update the regular page table
             page_table = self.req_to_token[
-                req_pool_indices,
-                metadata.encoder_max_seq_len_k : (
-                    metadata.encoder_max_seq_len_k + metadata.max_seq_len_k
-                ),
-            ]
+                         req_pool_indices,
+                         metadata.encoder_max_seq_len_k: (
+                             metadata.encoder_max_seq_len_k + metadata.max_seq_len_k
+                         ),
+                         ]
             metadata.page_table[:, : metadata.max_seq_len_k].copy_(page_table)
 
         self.forward_metadata = metadata
