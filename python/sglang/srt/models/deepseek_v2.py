@@ -2166,6 +2166,7 @@ class DeepseekV2Model(nn.Module):
             hidden_states_1, residual_1, extra_args_1 = self.forward_layer(l1, positions_1, hidden_states_1, fwd_batch1,
                                                                            residual_1, MicroBatchOverlapStep.MOE_GATE,
                                                                            extra_args_1)
+            
             after_dispatch_hidden_states_0 = extra_args_0.get(
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY)
             
@@ -2221,10 +2222,15 @@ class DeepseekV2Model(nn.Module):
             hidden_states_0, residual_0, extra_args_0 = self.forward_layer(l0, positions_0, hidden_states_0, fwd_batch0,
                                                                            residual_0, MicroBatchOverlapStep.MLP,
                                                                            extra_args_0)
-            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(l1, positions_1, hidden_states_1, fwd_batch1,
+            
+            after_dispatch_hidden_states_1 = extra_args_1.get(
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY)
+            
+            _, residual_1, extra_args_1 = self.forward_layer(l1, positions_1, after_dispatch_hidden_states_1, fwd_batch1,
                                                                            residual_1,
                                                                            MicroBatchOverlapStep.SHARED_EXPERTS,
                                                                            extra_args_1)
+            
             hidden_states_1, residual_1, extra_args_1 = self.forward_layer(l1, positions_1, hidden_states_1, fwd_batch1,
                                                                            residual_1,
                                                                            MicroBatchOverlapStep.WAIT_COMBINE_NORMAL,
