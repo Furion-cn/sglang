@@ -914,7 +914,6 @@ class ModelRunner:
             )
 
             self.attn_backend = FlashAttentionBackend(self)
-            self.attn_backend_1 = FlashAttentionBackend(self)
         else:
             raise ValueError(
                 f"Invalid attention backend: {self.server_args.attention_backend}"

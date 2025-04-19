@@ -2150,7 +2150,7 @@ class DeepseekV2Model(nn.Module):
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
         # init attn_backend metadata again
         fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
-        fwd_batch1.attn_backend_1.init_forward_metadata(fwd_batch1)
+        fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
     
         # last moe layer
         for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
@@ -2280,7 +2280,7 @@ class DeepseekV2Model(nn.Module):
         l0, l1 = self.config.first_k_dense_replace - 1, self.config.first_k_dense_replace
         # init attn_backend metadata again
         fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
-        fwd_batch1.attn_backend_1.init_forward_metadata(fwd_batch1)
+        fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
 
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
@@ -2755,12 +2755,13 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
         setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:bs_joint_batch_boundary])
         setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[bs_joint_batch_boundary:])
         
+    if hasattr(fwd_batch, "extend_seq_lens_cpu") and hasattr(fwd_batch, "global_num_tokens_cpu"):
+        sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
+        sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
     
-    sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
-    sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
-    
-    sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(0, keepdim=True)
-    sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(0, keepdim=True)
+    if hasattr(fwd_batch, "extend_seq_lens") and hasattr(fwd_batch, "global_num_tokens_gpu"):
+        sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(0, keepdim=True)
+        sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(0, keepdim=True)
     
     sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
     sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
