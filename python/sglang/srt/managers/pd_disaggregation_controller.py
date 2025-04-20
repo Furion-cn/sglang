@@ -15,7 +15,7 @@ from sglang.srt.managers.io_struct import PrefilledReqInput, AbortReq, KVTransfe
 
 logger = logging.getLogger(__name__)
 
-PD_DISAGGREGATION_PORT = 17000
+PD_DISAGGREGATION_PORT = 18000
 
 
 class PDDisaggregationController:

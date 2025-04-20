@@ -398,7 +398,6 @@ class Req:
         eos_token_ids: Optional[Set[int]] = None,
         kv_transfer_src_addr: Optional[str] = None,
         kv_transfer_src_rank: Optional[int] = None,
-        kv_cache_length: Optional[int] = None,
         bootstrap_host: Optional[str] = None,
         bootstrap_room: Optional[int] = None,
     ):
@@ -419,7 +418,6 @@ class Req:
         self.input_embeds = input_embeds
         self.kv_transfer_src_addr = kv_transfer_src_addr
         self.kv_transfer_src_rank = kv_transfer_src_rank
-        self.kv_cache_length = kv_cache_length
         self.kv_cache_restored = False
 
         # Sampling info
