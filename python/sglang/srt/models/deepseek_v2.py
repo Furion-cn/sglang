@@ -58,7 +58,11 @@ from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.fp8_kernel import per_tensor_quant_mla_fp8
+from sglang.srt.layers.quantization.deep_gemm import _ENABLE_JIT_DEEPGEMM
+from sglang.srt.layers.quantization.fp8_kernel import (
+    per_tensor_quant_mla_deep_gemm_masked_fp8,
+    per_tensor_quant_mla_fp8,
+)
 from sglang.srt.layers.quantization.fp8_utils import (
     block_quant_to_tensor_quant,
     channel_quant_to_tensor_quant,
@@ -84,6 +88,10 @@ _is_cuda = is_cuda()
 
 if _is_cuda:
     from sgl_kernel import awq_dequantize, bmm_fp8, merge_state_v2
+
+    from sglang.srt.layers.quantization.deep_gemm import (
+        grouped_gemm_nt_f8f8bf16_masked as deep_gemm_grouped_gemm_nt_f8f8bf16_masked,
+    )
 else:
     from vllm._custom_ops import awq_dequantize
 
@@ -878,57 +886,96 @@ class DeepseekV2AttentionMLA(nn.Module):
                 latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
             q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-            if self.w_kc.dtype == torch.float8_e4m3fnuz:
-                q_nope_out = torch.bmm(
-                    q_nope.to(torch.bfloat16).transpose(0, 1),
-                    self.w_kc.to(torch.bfloat16) * self.w_scale,
+        if self.use_deep_gemm_bmm:
+            q_nope_val, q_nope_scale, masked_m, expected_m, aligned_m = (
+                per_tensor_quant_mla_deep_gemm_masked_fp8(
+                    q_nope.transpose(0, 1), dtype=torch.float8_e4m3fn
                 )
-            elif self.w_kc.dtype == torch.float8_e4m3fn:
-                q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
-                    q_nope.transpose(0, 1),
-                )
-                q_nope_out = bmm_fp8(
-                    q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
-                )
-            else:
-                q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
-            q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+            )
+            q_nope_out = q_nope.new_empty(
+                (self.num_local_heads, aligned_m, self.kv_lora_rank)
+            )
+            deep_gemm_grouped_gemm_nt_f8f8bf16_masked(
+                (q_nope_val, q_nope_scale),
+                (self.w_kc, self.w_scale_k),
+                q_nope_out,
+                masked_m,
+                expected_m,
+            )
+            q_nope_out = q_nope_out[:, :expected_m, :]
+        elif self.w_kc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            q_nope_out = torch.bmm(
+                q_nope.to(torch.bfloat16).transpose(0, 1),
+                self.w_kc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                q_nope.transpose(0, 1),
+                zero_allocator.allocate(1),
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
-            v_input = latent_cache[..., : self.kv_lora_rank]
-            v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
-            k_input = latent_cache.unsqueeze(1)
-            k_input[..., : self.kv_lora_rank] = v_input
-            k_pe = k_input[..., self.kv_lora_rank:]
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        v_input = latent_cache[..., : self.kv_lora_rank]
+        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        k_input = latent_cache.unsqueeze(1)
+        k_input[..., : self.kv_lora_rank] = v_input
+        k_pe = k_input[..., self.kv_lora_rank :]
 
-            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-            q_input[..., self.kv_lora_rank:] = q_pe
-            k_input[..., self.kv_lora_rank:] = k_pe
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        q_input[..., self.kv_lora_rank :] = q_pe
+        k_input[..., self.kv_lora_rank :] = k_pe
 
-            attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-            attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
-            if self.w_vc.dtype == torch.float8_e4m3fnuz:
-                attn_bmm_output = torch.bmm(
-                    attn_output.to(torch.bfloat16).transpose(0, 1),
-                    self.w_vc.to(torch.bfloat16) * self.w_scale,
+        if self.use_deep_gemm_bmm:
+            attn_output_val, attn_output_scale, masked_m, expected_m, aligned_m = (
+                per_tensor_quant_mla_deep_gemm_masked_fp8(
+                    attn_output.transpose(0, 1), dtype=torch.float8_e4m3fn
                 )
-            elif self.w_vc.dtype == torch.float8_e4m3fn:
-                attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
-                    attn_output.transpose(0, 1),
-                )
-                attn_bmm_output = bmm_fp8(
-                    attn_output_val,
-                    self.w_vc,
-                    attn_output_scale,
-                    self.w_scale,
-                    torch.bfloat16,
-                )
-            else:
-                attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
-            attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+            )
+            attn_bmm_output = attn_output.new_empty(
+                (self.num_local_heads, aligned_m, self.v_head_dim)
+            )
+            deep_gemm_grouped_gemm_nt_f8f8bf16_masked(
+                (attn_output_val, attn_output_scale),
+                (self.w_vc, self.w_scale_v),
+                attn_bmm_output,
+                masked_m,
+                expected_m,
+            )
+            attn_bmm_output = attn_bmm_output[:, :expected_m, :]
+        elif self.w_vc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                self.w_vc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                attn_output.transpose(0, 1),
+                zero_allocator.allocate(1),
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+        else:
+            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        output, _ = self.o_proj(attn_output)
 
-            output, _ = self.o_proj(attn_output)
-            return output
+        return output
 
     def forward_absorb_fused_mla_rope(
         self,
@@ -1200,6 +1247,19 @@ class DeepseekV2AttentionMLA(nn.Module):
             return output
 
 
+class _FFNInputMode(Enum):
+    # The MLP sublayer requires 1/tp_size tokens as input
+    SCATTERED = auto()
+    # The MLP sublayer requires all tokens as input
+    FULL = auto()
+
+
+@dataclass
+class _DecoderLayerInfo:
+    is_sparse: bool
+    ffn_input_mode: _FFNInputMode
+
+
 class DeepseekV2DecoderLayer(nn.Module):
 
     @nvtx.annotate(color="lightcoral", category="deepseek_v2_decoder_layer")
@@ -1300,6 +1360,25 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+
+    @staticmethod
+    def _enable_moe_dense_fully_dp():
+        return global_server_args_dict["moe_dense_tp_size"] == 1
+
+    @staticmethod
+    def _compute_info(config: PretrainedConfig, layer_id: int, is_nextn: bool):
+        is_sparse = is_nextn or (
+            config.n_routed_experts is not None
+            and layer_id >= config.first_k_dense_replace
+            and layer_id % config.moe_layer_freq == 0
+        )
+        ffn_input_mode = (
+            _FFNInputMode.SCATTERED
+            if (global_server_args_dict["enable_deepep_moe"] and is_sparse)
+            or (DeepseekV2DecoderLayer._enable_moe_dense_fully_dp() and not is_sparse)
+            else _FFNInputMode.FULL
+        )
+        return _DecoderLayerInfo(is_sparse=is_sparse, ffn_input_mode=ffn_input_mode)
 
     def forward(
         self,
@@ -1639,6 +1718,16 @@ class DeepseekV2ForCausalLM(nn.Module):
                                 weight = w
                                 weight_scale = self_attn.kv_b_proj.weight_scale_inv
 
+                        if (
+                            _is_cuda
+                            and _ENABLE_JIT_DEEPGEMM
+                            and weight_block_size[0] == 128
+                            and weight_block_size[1] == 128
+                            and model_dtype == torch.bfloat16
+                        ):
+                            block_scale = weight_scale
+                            use_deep_gemm_bmm = True
+                        else:
                             w, scale = block_quant_to_tensor_quant(
                                 weight, weight_scale, weight_block_size
                             )
