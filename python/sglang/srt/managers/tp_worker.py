@@ -112,7 +112,7 @@ class TpModelWorker:
                 self.max_total_num_tokens // 2
                 if server_args.max_running_requests is None
                 else server_args.max_running_requests
-                // (server_args.dp_size if server_args.enable_dp_attention else 1)
+                     // (server_args.dp_size if server_args.enable_dp_attention else 1)
             ),
             self.model_runner.req_to_token_pool.size,
         )
@@ -181,6 +181,10 @@ class TpModelWorker:
             next_token_ids = None
         else:
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
+
+        logger.debug(f'~~~~~~~~~~ forward_batch_generation, logits_output: {logits_output}, \
+                     next_token_ids: {next_token_ids}, \
+                     next_token_ids.shape:{next_token_ids.shape}')
 
         return logits_output, next_token_ids
 
