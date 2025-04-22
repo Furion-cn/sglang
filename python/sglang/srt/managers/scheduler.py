@@ -398,7 +398,6 @@ class Scheduler(
                 self.token_to_kv_pool_allocator,
                 self.model_config.num_hidden_layers,
                 self.tp_rank,
-                self.attn_tp_cpu_group,
                 server_args.kv_transfer_config.kv_cache_size_factor,
             )
             t = threading.Thread(target=self.kv_transfer_agent.event_loop, daemon=True)
@@ -677,7 +676,7 @@ class Scheduler(
                         next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                     )
                     self.process_batch_result(tmp_batch, None)
-            
+
             if len(self.aborted_reqs) > 0:
                 self.process_aborted_requests()
 
@@ -1052,7 +1051,7 @@ class Scheduler(
             self.stats.avg_request_queue_latency = total_queue_latency / num_new_seq
 
             self.metrics_collector.log_stats(self.stats)
-    
+
     def log_recover_stats(
         self,
         adder: PrefillAdder,
@@ -1202,7 +1201,7 @@ class Scheduler(
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
                 self.running_batch = self.last_batch
-            
+
             if self.server_args.kv_transfer_config.role == "decode":
                 ret = self.recover_new_prefilled_batch()
                 if not self.running_batch.is_empty():
@@ -1216,12 +1215,12 @@ class Scheduler(
                     ret = None
             else:
                 ret = self.get_new_batch_prefill()
-            
+
             if self.server_args.enable_dp_attention or self.server_args.enable_sp_layernorm:
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
-        
+
         # Merge the prefill batch into the running batch
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.chunked_req:
@@ -1264,13 +1263,13 @@ class Scheduler(
             ret, _ = self.prepare_dp_attn_batch(ret)
 
         return ret
-    
+
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
             return None
-        
+
         running_bs = len(self.running_batch.reqs) if self.running_batch else 0
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
@@ -1299,7 +1298,7 @@ class Scheduler(
         # Get requests from the waiting queue to a new batch
         for req in self.waiting_queue:
             origin_output_ids[req.rid] = req.output_ids
-            
+
             if (
                 self.lora_paths
                 and len(
@@ -1319,7 +1318,7 @@ class Scheduler(
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
                 self.running_batch.batch_is_full = True
                 break
-            
+
             req.output_ids = [] # clear output_ids
             req.init_next_round_input(
                 None if prefix_computed else self.tree_cache,
@@ -1350,7 +1349,7 @@ class Scheduler(
                 req.output_ids = origin_output_ids[req.rid]
         if len(can_run_list) == 0:
             return None
-        
+
         kv_cache_restored_reqs = []
         can_run_list = [req for req in can_run_list if not req.kv_cache_restored]
         kv_buffer = self.kv_transfer_agent.get_kv_buffer(can_run_list)
@@ -1529,7 +1528,7 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
-    
+
         return new_batch
 
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:
@@ -1636,7 +1635,7 @@ class Scheduler(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
         return ret
-    
+
     def process_aborted_requests(self):
         if self.kv_transfer_agent.role != "decode":
             return
