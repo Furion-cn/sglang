@@ -215,116 +215,6 @@ class MoEGate(nn.Module):
         return logits
 
 
-class DeepseekV2TwoMicroBatchesDeepEPMoE(nn.Module):
-    """
-    note:
-    1. MoE consists of MoEGate, MLP and DeepEP Dispatcher
-    2. constraints: only support DeepEP
-    """
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_shared_experts = config.n_shared_experts
-        self.n_share_experts_fusion = (
-            global_server_args_dict["n_share_experts_fusion"]
-            if global_server_args_dict["n_share_experts_fusion"] is not None
-            else 0
-        )
-
-        self.routed_scaling_factor = config.routed_scaling_factor
-        if self.tp_size > config.n_routed_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.n_routed_experts}."
-            )
-
-        if config.hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. "
-                "Only silu is supported for now."
-            )
-
-        self.gate = MoEGate(config=config, prefix=add_prefix("gate", prefix))
-
-        self.experts = DeepEPMoE(
-            num_experts=config.n_routed_experts + self.n_share_experts_fusion,
-            top_k=config.num_experts_per_tok + min(self.n_share_experts_fusion, 1),
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=config.n_group,
-            topk_group=config.topk_group,
-            correction_bias=self.gate.e_score_correction_bias,
-            prefix=add_prefix("experts", prefix),
-            **(
-                dict(deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
-                if global_server_args_dict["enable_deepep_moe"]
-                else {}
-            ),
-        )
-
-        if config.n_shared_experts is not None and self.n_share_experts_fusion == 0:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-            self.shared_experts = DeepseekV2MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=False,
-                prefix=add_prefix("shared_experts", prefix),
-                tp_rank=0,
-                tp_size=1,
-            )
-
-        self.ep_size = get_tensor_model_parallel_world_size()
-        self.num_experts = config.n_routed_experts
-        self.top_k = config.num_experts_per_tok
-        self.renormalize = config.norm_topk_prob
-        self.topk_group = config.topk_group
-        self.num_expert_group = config.n_group
-        self.correction_bias = (
-            self.gate.e_score_correction_bias.data
-            if self.gate.e_score_correction_bias is not None
-            else None
-        )
-
-        # DeepEPDispatcher
-        common_kwargs = dict(
-            group=parallel_state.get_tp_group().device_group,
-            router_topk=self.top_k,
-            permute_fusion=True,
-            num_experts=config.n_routed_experts,
-            num_local_experts=config.n_routed_experts // self.tp_size,
-            hidden_size=config.hidden_size,
-            params_dtype=config.torch_dtype,
-        )
-
-        if self.deepep_mode.enable_normal():
-            self.deep_ep_dispatcher_normal = DeepEPDispatcherImplNormal(
-                async_finish=True,
-                **common_kwargs,
-            )
-        if self.deepep_mode.enable_low_latency():
-            self.deep_ep_dispatcher_ll = DeepEPDispatcherImplLowLatency(
-                return_recv_hook=True,
-                **common_kwargs,
-            )
-
-    def forward(
-        self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
-    ) -> torch.Tensor:
-        raise f"not implemented, because we implement them in individual parts forward"
-
-
 class DeepseekV2MoE(nn.Module):
 
     def __init__(
@@ -422,30 +312,58 @@ class DeepseekV2MoE(nn.Module):
 
             if global_server_args_dict["enable_micro_batch_overlap"]:
                 self.deepep_dispatchers = {
-                    0: DeepEPDispatcher(
-                        group=parallel_state.get_tp_group().device_group,
-                        router_topk=self.top_k,
-                        permute_fusion=True,
-                        num_experts=config.n_routed_experts,
-                        num_local_experts=config.n_routed_experts // self.tp_size,
-                        hidden_size=config.hidden_size,
-                        params_dtype=config.torch_dtype,
-                        deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
-                        async_finish=True,  # TODO
-                        return_recv_hook=True,
-                    ),
-                    1: DeepEPDispatcher(
-                        group=parallel_state.get_tp_group().device_group,
-                        router_topk=self.top_k,
-                        permute_fusion=True,
-                        num_experts=config.n_routed_experts,
-                        num_local_experts=config.n_routed_experts // self.tp_size,
-                        hidden_size=config.hidden_size,
-                        params_dtype=config.torch_dtype,
-                        deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
-                        async_finish=True,  # TODO
-                        return_recv_hook=True,
-                    ),
+                    "prefill": {
+                        0: DeepEPDispatcher(
+                            group=parallel_state.get_tp_group().device_group,
+                            router_topk=self.top_k,
+                            permute_fusion=True,
+                            num_experts=config.n_routed_experts,
+                            num_local_experts=config.n_routed_experts // self.tp_size,
+                            hidden_size=config.hidden_size,
+                            params_dtype=config.torch_dtype,
+                            deepep_mode=DeepEPMode.normal,
+                            async_finish=True,  # TODO
+                            return_recv_hook=True,
+                        ),
+                        1: DeepEPDispatcher(
+                            group=parallel_state.get_tp_group().device_group,
+                            router_topk=self.top_k,
+                            permute_fusion=True,
+                            num_experts=config.n_routed_experts,
+                            num_local_experts=config.n_routed_experts // self.tp_size,
+                            hidden_size=config.hidden_size,
+                            params_dtype=config.torch_dtype,
+                            deepep_mode=DeepEPMode.normal,
+                            async_finish=True,  # TODO
+                            return_recv_hook=True,
+                        ),
+                    },
+                    "decode": {
+                        0: DeepEPDispatcher(
+                            group=parallel_state.get_tp_group().device_group,
+                            router_topk=self.top_k,
+                            permute_fusion=True,
+                            num_experts=config.n_routed_experts,
+                            num_local_experts=config.n_routed_experts // self.tp_size,
+                            hidden_size=config.hidden_size,
+                            params_dtype=config.torch_dtype,
+                            deepep_mode=DeepEPMode.low_latency,
+                            async_finish=True,  # TODO
+                            return_recv_hook=True,
+                        ),
+                        1: DeepEPDispatcher(
+                            group=parallel_state.get_tp_group().device_group,
+                            router_topk=self.top_k,
+                            permute_fusion=True,
+                            num_experts=config.n_routed_experts,
+                            num_local_experts=config.n_routed_experts // self.tp_size,
+                            hidden_size=config.hidden_size,
+                            params_dtype=config.torch_dtype,
+                            deepep_mode=DeepEPMode.low_latency,
+                            async_finish=True,  # TODO
+                            return_recv_hook=True,
+                        ),
+                    },
                 }
             self.deepep_dispatcher = DeepEPDispatcher(
                 group=parallel_state.get_tp_group().device_group,
@@ -1388,54 +1306,67 @@ class DeepseekV2DecoderLayer(nn.Module):
             else:
                 hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        if self.attn_tp_size != 1 and self.input_is_scattered:
+            hidden_states, local_hidden_states = (
+                forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
+                hidden_states,
+            )
+            logger.debug(
+                f"layer[{self.layer_id}], before tp_all_gather in forward_decode_attn_0, hidden_states: {hidden_states.shape}")
+            tp_all_gather(
+                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+            )
+            logger.debug(
+                f"layer[{self.layer_id}], after tp_all_gather in forward_decode_attn_0, hidden_states: {hidden_states.shape}")
+
         if hidden_states.shape[0] == 0:
             assert (
-                not self.o_proj.reduce_results
+                not self.self_attn.o_proj.reduce_results
             ), "short-circuiting allreduce will lead to hangs"
             return hidden_states, residual, extra_args if extra_args else {}
 
         # cuda(not hip) && absorb
         q_len = hidden_states.shape[0]
         q_input = hidden_states.new_empty(
-            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+            q_len, self.self_attn.num_local_heads, self.self_attn.kv_lora_rank + self.self_attn.qk_rope_head_dim
         )
-        if self.q_lora_rank is not None:
-            q = self.q_a_proj(hidden_states)[0]
-            q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        if self.self_attn.q_lora_rank is not None:
+            q = self.self_attn.q_a_proj(hidden_states)[0]
+            q = self.self_attn.q_a_layernorm(q)
+            q = self.self_attn.q_b_proj(q)[0].view(-1, self.self_attn.num_local_heads, self.self_attn.qk_head_dim)
         else:
-            q = self.q_proj(hidden_states)[0].view(
-                -1, self.num_local_heads, self.qk_head_dim
+            q = self.self_attn.q_proj(hidden_states)[0].view(
+                -1, self.self_attn.num_local_heads, self.self_attn.qk_head_dim
             )
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope, q_pe = q.split([self.self_attn.qk_nope_head_dim, self.self_attn.qk_rope_head_dim], dim=-1)
 
-        if self.w_kc.dtype == torch.float8_e4m3fnuz:
+        if self.self_attn.w_kc.dtype == torch.float8_e4m3fnuz:
             # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
             q_nope_out = torch.bmm(
                 q_nope.to(torch.bfloat16).transpose(0, 1),  # [bs,128,128/attn_tp_size]
-                self.w_kc.to(torch.bfloat16) * self.w_scale,  #
+                self.self_attn.w_kc.to(torch.bfloat16) * self.self_attn.w_scale,  #
             )
-        elif self.w_kc.dtype == torch.float8_e4m3fn:
+        elif self.self_attn.w_kc.dtype == torch.float8_e4m3fn:
             q_nope_val, q_nope_scale = input_to_float8(
                 q_nope.transpose(0, 1), torch.float8_e4m3fn
             )
             q_nope_out = bmm_fp8(
-                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+                q_nope_val, self.self_attn.w_kc, q_nope_scale, self.self_attn.w_scale, torch.bfloat16
             )
         else:
-            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
-        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.self_attn.w_kc)
+        q_input[..., : self.self_attn.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        v_input = latent_cache[..., : self.kv_lora_rank]
-        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        latent_cache = self.self_attn.kv_a_proj_with_mqa(hidden_states)[0]
+        v_input = latent_cache[..., : self.self_attn.kv_lora_rank]
+        v_input = self.self_attn.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
         k_input = latent_cache.unsqueeze(1)
-        k_input[..., : self.kv_lora_rank] = v_input
-        k_pe = k_input[..., self.kv_lora_rank:]
+        k_input[..., : self.self_attn.kv_lora_rank] = v_input
+        k_pe = k_input[..., self.self_attn.kv_lora_rank:]
 
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q_input[..., self.kv_lora_rank:] = q_pe
-        k_input[..., self.kv_lora_rank:] = k_pe
+        q_pe, k_pe = self.self_attn.rotary_emb(positions, q_pe, k_pe)
+        q_input[..., self.self_attn.kv_lora_rank:] = q_pe
+        k_input[..., self.self_attn.kv_lora_rank:] = k_pe
 
         # update extra_args
         extra_args.update(
@@ -1461,78 +1392,121 @@ class DeepseekV2DecoderLayer(nn.Module):
         1. core attention
         2. output projection
         3. MoE Gate routing
-
         """
+        if hidden_states.shape[0] == 0:
+            assert (
+                not self.self_attn.o_proj.reduce_results
+            ), "short-circuiting allreduce will lead to hangs"
+            return hidden_states, residual, extra_args if extra_args else {}
+
+        logger.debug(
+            f"layer[{self.layer_id}] in forward_decode_attn_1, hidden_states.shape:{hidden_states.shape}, extra_args: {extra_args.keys()}")
         # get q_input, k_input and v_input from extra_args
         assert (
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY in extra_args
-        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY} not in extra_args:{extra_args}"
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY} not in extra_args:{extra_args}, hidden_states: {hidden_states}"
         assert (
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY in extra_args
-        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY} not in extra_args:{extra_args}"
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY} not in extra_args:{extra_args}, hidden_states: {hidden_states}"
         assert (
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY in extra_args
-        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY} not in extra_args:{extra_args}"
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY} not in extra_args:{extra_args}, hidden_states: {hidden_states}"
         q_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
         k_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
         v_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
 
         # core attention calculation
-        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+        attn_output = self.self_attn.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.self_attn.num_local_heads, self.self_attn.kv_lora_rank)
 
         # del q_input,k_inpu,v_input
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
 
-        if self.w_vc.dtype == torch.float8_e4m3fnuz:
+        if self.self_attn.w_vc.dtype == torch.float8_e4m3fnuz:
             # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
             attn_bmm_output = torch.bmm(
                 attn_output.to(torch.bfloat16).transpose(0, 1),
-                self.w_vc.to(torch.bfloat16) * self.w_scale,
+                self.self_attn.w_vc.to(torch.bfloat16) * self.self_attn.w_scale,
             )
-        elif self.w_vc.dtype == torch.float8_e4m3fn:
+        elif self.self_attn.w_vc.dtype == torch.float8_e4m3fn:
             attn_output_val, attn_output_scale = input_to_float8(
                 attn_output.transpose(0, 1), torch.float8_e4m3fn
             )
             attn_bmm_output = bmm_fp8(
                 attn_output_val,
-                self.w_vc,
+                self.self_attn.w_vc,
                 attn_output_scale,
-                self.w_scale,
+                self.self_attn.w_scale,
                 torch.bfloat16,
             )
         else:
-            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.self_attn.w_vc)
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
         # output projection
-        output, _ = self.o_proj(attn_output)
+        logger.debug(f"layer[{self.layer_id}] o_proj before, attn_output.shape: {attn_output.shape}")
+        hidden_states, _ = self.self_attn.o_proj(attn_output)
+        logger.debug(f"layer[{self.layer_id}] o_proj after, attn_output.shape: {hidden_states.shape}")
         # post attention layernorm
-        if output.shape[0] != 0:
-            output, residual = self.post_attention_layernorm(output, residual)
+        if self.attn_tp_size != 1:
+            if self.input_is_scattered:
+                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                logger.debug(
+                    f"layer[{self.layer_id}] after tensor_split & input_is_scatter, hidden_states.shape:{hidden_states.shape}")
+                hidden_states = tensor_list[self.attn_tp_rank]
+                logger.debug(
+                    f"layer[{self.layer_id}] after tensor_list & input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}, tensor_list: {[t.shape for t in tensor_list]}")
+                tp_reduce_scatter(hidden_states, tensor_list)
+                logger.debug(
+                    f"layer[{self.layer_id}] after tp_reduce_scatter & input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                if hidden_states.shape[0] != 0:
+                    hidden_states, residual = self.post_attention_layernorm(
+                        hidden_states, residual
+                    )
+            else:
+                if self.attn_tp_rank == 0:
+                    hidden_states += residual
+                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                logger.debug(
+                    f"layer[{self.layer_id}] after tensor_split & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                hidden_states = tensor_list[self.attn_tp_rank]
+                logger.debug(
+                    f"layer[{self.layer_id}] after tensor_list & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                tp_reduce_scatter(hidden_states, tensor_list)
+                logger.debug(
+                    f"layer[{self.layer_id}] after tp_reduce_scatter & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                residual = hidden_states
+                if hidden_states.shape[0] != 0:
+                    hidden_states = self.post_attention_layernorm(hidden_states)
+        else:
+            if hidden_states.shape[0] != 0:
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual
+                )
+        logger.debug(f"layer[{self.layer_id}] before MoE gate, hidden_states.shape:{hidden_states.shape}")
 
         # MoE Gate routing
-        assert isinstance(self.mlp, DeepseekV2TwoMicroBatchesDeepEPMoE)
         topk_idx = torch.full(
-            (0, self.top_k), -1, dtype=torch.int, device=output.device
+            (0, self.mlp.top_k), -1, dtype=torch.int, device=hidden_states.device
         )
         topk_weights = torch.empty(
-            (0, self.top_k), dtype=torch.float32, device=output.device
+            (0, self.mlp.top_k), dtype=torch.float32, device=hidden_states.device
         )
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.mlp.gate(output)
+            router_logits = self.mlp.gate(hidden_states)
             topk_weights, topk_idx = select_experts(
-                hidden_states=output,
+                hidden_states=hidden_states,
                 router_logits=router_logits,
-                top_k=self.top_k,
+                top_k=self.mlp.top_k,
                 use_grouped_topk=True,
-                renormalize=self.renormalize,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                correction_bias=self.correction_bias,
+                renormalize=self.mlp.renormalize,
+                topk_group=self.mlp.topk_group,
+                num_expert_group=self.mlp.num_expert_group,
+                correction_bias=self.mlp.correction_bias,
             )
+        logger.debug(f"layer[{self.layer_id}] after select_experts, hidden_states.shape:{hidden_states.shape}")
 
         # update extra_args
         extra_args.update(
@@ -1542,7 +1516,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             }
         )
 
-        return output, residual, extra_args
+        return hidden_states, residual, extra_args
 
     def forward_mlp(
         self,
@@ -1573,6 +1547,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         masked_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY]
         expected_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY]
 
+        self.mlp.experts.deepep_mode = DeepEPMode.normal if forward_batch.forward_mode.is_extend() else DeepEPMode.low_latency
         final_hidden_states = (
             self.mlp.experts(
                 hidden_states=hidden_states,
@@ -1610,17 +1585,21 @@ class DeepseekV2DecoderLayer(nn.Module):
         ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
 
         topk_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY]
+        logger.debug(f"forward_decode_launch_dispatch_ll topk_idx.dtype: {topk_idx.dtype}")
         topk_weights = extra_args[
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY
         ]
+        micro_batch_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY]
 
-        dispatched_hidden_states = self.mlp.deepep_dispatcher.launch_dispatch(
+        dispatched_hidden_states = self.mlp.deepep_dispatchers[get_role(forward_batch)][
+            micro_batch_idx].launch_dispatch(
             hidden_states,
             topk_idx,
             topk_weights,
             self.mlp.num_experts,
             forward_mode=forward_batch.forward_mode,
         )
+        logger.debug(f"forward_decode_launch_dispatch_ll after dispatch topk_idx.dtype: {topk_idx.dtype}")
 
         # update extra_args
         extra_args.update(
@@ -1641,6 +1620,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        micro_batch_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY]
         (
             hidden_states,
             topk_idx,
@@ -1649,7 +1629,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             seg_indptr,
             masked_m,
             expected_m,
-        ) = self.mlp.deepep_dispatcher.wait_dispatch(forward_batch.forward_mode)
+        ) = self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].wait_dispatch(
+            forward_batch.forward_mode)
 
         # update extra_args
         extra_args.update(
@@ -1658,6 +1639,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY: seg_indptr,
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY: masked_m,
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY: expected_m,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY: topk_idx,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY: topk_weights,
             }
         )
 
@@ -1679,11 +1662,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
 
         topk_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY]
+        logger.debug(f"forward_decode_launch_combine_ll before launch_combine topk_idx.dtype: {topk_idx.dtype}")
         topk_weights = extra_args[
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY
         ]
+        micro_batch_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY]
 
-        self.mlp.deepep_dispatcher.launch_combine(
+        self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].launch_combine(
             hidden_states,
             topk_idx,
             topk_weights,
@@ -1700,7 +1685,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
-        hidden_states = self.mlp.deepep_dispatcher.wait_combine(
+        micro_batch_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY]
+        hidden_states = self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].wait_combine(
             forward_batch.forward_mode
         )
 
@@ -1742,7 +1728,9 @@ class DeepseekV2DecoderLayer(nn.Module):
             if self.input_is_scattered:
                 tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
                 hidden_states = tensor_list[self.attn_tp_rank]
+                # logger.debug(f"layer[{self.layer_id}] before tp_reduce_scatter & input_is_scatter & prefill, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 tp_reduce_scatter(hidden_states, tensor_list)
+                # logger.debug(f"layer[{self.layer_id}] after tp_reduce_scatter & input_is_scatter & prefill, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 if hidden_states.shape[0] != 0:
                     hidden_states, residual = self.post_attention_layernorm(
                         hidden_states, residual
@@ -1752,7 +1740,9 @@ class DeepseekV2DecoderLayer(nn.Module):
                     hidden_states += residual
                 tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
                 hidden_states = tensor_list[self.attn_tp_rank]
+                # logger.debug(f"layer[{self.layer_id}] before tp_reduce_scatter & not input_is_scatter & prefill, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 tp_reduce_scatter(hidden_states, tensor_list)
+                # logger.debug(f"layer[{self.layer_id}] after tp_reduce_scatter & not input_is_scatter & prefill, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 residual = hidden_states
                 if hidden_states.shape[0] != 0:
                     hidden_states = self.post_attention_layernorm(hidden_states)
@@ -1788,7 +1778,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             micro_batch_idx = extra_args[
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
             ]
-            self.mlp.deepep_dispatchers[micro_batch_idx].launch_dispatch(
+            self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].launch_dispatch(
                 hidden_states,
                 extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY),
                 extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY),
@@ -1821,7 +1811,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 seg_indptr,
                 masked_m,
                 expected_m,
-            ) = self.mlp.deepep_dispatchers[micro_batch_idx].wait_dispatch(
+            ) = self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].wait_dispatch(
                 forward_batch.forward_mode
             )
 
@@ -1863,7 +1853,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             micro_batch_idx = extra_args[
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
             ]
-            self.mlp.deepep_dispatchers[micro_batch_idx].launch_combine(
+            self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].launch_combine(
                 hidden_states,
                 extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY),
                 extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY),
@@ -1890,7 +1880,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             micro_batch_idx = extra_args[
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
             ]
-            hidden_states = self.mlp.deepep_dispatchers[micro_batch_idx].wait_combine(
+            hidden_states = self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].wait_combine(
                 forward_batch.forward_mode
             )
         return hidden_states, residual, extra_args
@@ -2151,9 +2141,11 @@ class DeepseekV2Model(nn.Module):
         if (
             forward_batch.batch_size == 1
             or not global_server_args_dict["enable_micro_batch_overlap"]
-            # or forward_batch.forward_mode == ForwardMode.DECODE
+            # or forward_batch.forward_mode.is_extend()
         ):
             for i in range(len(self.layers)):
+                logger.debug(
+                    f"layer[{i}], bs: {forward_batch.batch_size}, hiddens_states.shape: {hidden_states.shape}, hidden_states: {hidden_states}")
                 expert_distribution_recorder.set_current_layer(i)
                 layer = self.layers[i]
                 hidden_states, residual, _ = layer(
@@ -2183,7 +2175,7 @@ class DeepseekV2Model(nn.Module):
                     residual,
                 )
             else:
-                raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
+                raise ValueError(f"Unsupported forward mode: {forward_batch.forward_mode}")
 
         if not forward_batch.forward_mode.is_idle():
             if residual is None:
@@ -2488,7 +2480,8 @@ class DeepseekV2Model(nn.Module):
         mb1_positions = positions[bs_joint_batch_boundary:]
         mb0_residual = residual[0:bs_joint_batch_boundary]
         mb1_residual = residual[bs_joint_batch_boundary:]
-        mb0_extra_args, mb1_extra_args = {}, {}
+        mb0_extra_args, mb1_extra_args = {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY: 0}, {
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY: 1}
         l0, l1 = (
             self.config.first_k_dense_replace - 1,
             self.config.first_k_dense_replace,
@@ -2497,7 +2490,7 @@ class DeepseekV2Model(nn.Module):
         fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
         fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
 
-        for i in range(len(self.layers) + 1):
+        for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
             # pipeline two micro batches according to https://github.com/deepseek-ai/profile-data
             logger.debug(f'~~~~~~~~~~ begin to run decode layer[{i}], {hidden_states=}, {residual=}')
@@ -2512,6 +2505,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 LAUNCH_DISPATCH_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: shared_expert_output
             mb0_before_dispatch_hidden_states = mb0_extra_args.get(
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY,
@@ -2527,6 +2527,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.SHARED_EXPERTS,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 SHARED_EXPERTS: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
 
             # mb1: attn_0
             mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
@@ -2538,6 +2545,14 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
                 mb1_extra_args,
             )
+            # 不是所有 rank 都跑完了这个
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 DECODE_ATTN_0_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: wait_dispatch
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
                 l0,
@@ -2548,6 +2563,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 WAIT_DISPATCH_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states[0].shape if len(mb0_hidden_states) > 1 else mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: mlp
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
                 l0,
@@ -2558,6 +2580,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.MLP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 MLP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: launch_combine
             mb0_hidden_states, _, mb0_extra_args = self.forward_layer(
                 l0,
@@ -2568,6 +2597,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 LAUNCH_COMBINE_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: attn_1
             mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
                 l1,
@@ -2578,6 +2614,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 DECODE_ATTN_1_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: wait_combine
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
                 l0,
@@ -2588,9 +2631,17 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 WAIT_COMBINE_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
 
             # mb0: add shared_expert_output
             if (
+                l0 < len(self.layers) and
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
                 in mb0_extra_args
             ):
@@ -2606,6 +2657,13 @@ class DeepseekV2Model(nn.Module):
                 del mb0_extra_args[
                     MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
                 ]
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 add shared_expert_output: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             l0 += 1
 
             # mb1: launch_dispatch
@@ -2618,6 +2676,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 LAUNCH_DISPATCH_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: shared_expert
             mb1_before_dispatch_hidden_states = mb1_extra_args.get(
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY,
@@ -2632,6 +2697,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.SHARED_EXPERTS,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 SHARED_EXPERTS: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
 
             # mb0: attn_0
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
@@ -2643,6 +2715,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 DECODE_ATTN_0_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: wait_launch
             mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(
                 l1,
@@ -2653,6 +2732,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 WAIT_DISPATCH_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states[0].shape if len(mb1_hidden_states) > 1 else mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: mlp
             mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(
                 l1,
@@ -2663,6 +2749,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.MLP,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 MLP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: launch combine
             mb1_hidden_states, _, mb1_extra_args = self.forward_layer(
                 l1,
@@ -2673,6 +2766,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 LAUNCH_COMBINE_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: attn_1
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
                 l0,
@@ -2683,6 +2783,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
                 mb0_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 DECODE_ATTN_1_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: wait_combine
             mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
                 l1,
@@ -2693,8 +2800,16 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
                 mb1_extra_args,
             )
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 WAIT_COMBINE_LL_STEP: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: add shared_expert_output
             if (
+                l1 < len(self.layers) and
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
                 in mb1_extra_args
             ):
@@ -2710,6 +2825,13 @@ class DeepseekV2Model(nn.Module):
                 del mb1_extra_args[
                     MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
                 ]
+            if True or get_attention_tp_rank() in [0, 4]:
+                logger.debug(f" \
+                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 add shared_expert_output: \
+                             mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_extra_args: {mb0_extra_args.keys()} \
+                             mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_extra_args: {mb1_extra_args.keys()}")
             l1 += 1
 
         attn_tp_size = get_attention_tp_size()
@@ -2737,6 +2859,8 @@ class DeepseekV2Model(nn.Module):
         # note: keep same with python/sglang/srt/models/deepseek_v2.py:1247(official v0.4.5 implementation)
         # residual = torch.cat([mb0_residual, mb1_residual], dim=0)
         residual = None
+        logger.debug(
+            f'~~~~~~~~~~ decode finished,{hidden_states.shape=}, hidden_states: {hidden_states}')
 
         return hidden_states, residual
 
@@ -3058,30 +3182,32 @@ class DeepseekV2ForCausalLM(nn.Module):
 
 
 def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
-    if fwd_batch.forward_mode == ForwardMode.DECODE:
-        logger.debug(f"[token_balanced_batch_split] original forward batch: {fwd_batch}")
+    if fwd_batch.forward_mode.is_extend():
+        return split_extend_batch(fwd_batch)
+    elif fwd_batch.forward_mode.is_decode():
+        return split_decode_batch(fwd_batch)
+    else:
+        assert False, f"{fwd_batch.forward_mode} is not supported to split"
+
+
+def split_extend_batch(fwd_batch: Optional[ForwardBatch]):
     sub_fwd_batch0 = copy(fwd_batch)
     sub_fwd_batch1 = copy(fwd_batch)
     bs_joint_batch_boundary = 0
     batch_boundary = 0
-    if fwd_batch.forward_mode.is_extend():
-        all_tokens = sum(fwd_batch.extend_seq_lens)
-        batch_boundary = 0
-        for batch_tokens in fwd_batch.extend_seq_lens[:-1]:
-            bs_joint_batch_boundary += batch_tokens
-            batch_boundary += 1
-            if bs_joint_batch_boundary >= all_tokens // 2:
-                break
 
-    elif fwd_batch.forward_mode.is_decode():
-        bs_joint_batch_boundary = fwd_batch.batch_size // 2
-    else:
-        assert False
+    all_tokens = sum(fwd_batch.extend_seq_lens)
+    batch_boundary = 0
+    for batch_tokens in fwd_batch.extend_seq_lens[:-1]:
+        bs_joint_batch_boundary += batch_tokens
+        batch_boundary += 1
+        if bs_joint_batch_boundary >= all_tokens // 2:
+            break
+
     for key in [
         "req_pool_indices",
         "seq_lens",
         "seq_lens_cpu",  # Optional[torch.Tensor]
-        # "decode_seq_lens_cpu",
         "extend_seq_lens",
         "extend_prefix_lens",
         "extend_start_loc",
@@ -3090,14 +3216,10 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
         "extend_logprob_start_lens_cpu",
     ]:
         if getattr(fwd_batch, key) is not None:
-            # skip for decode mode
             setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:batch_boundary])
             setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[batch_boundary:])
 
-    if (
-        not fwd_batch.forward_mode.is_decode()
-        and getattr(fwd_batch, "extend_num_tokens") is not None
-    ):
+    if getattr(fwd_batch, "extend_num_tokens") is not None:
         sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary.item()
         sub_fwd_batch1.extend_num_tokens = (
             fwd_batch.extend_num_tokens - sub_fwd_batch0.extend_num_tokens
@@ -3134,6 +3256,70 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
     sub_fwd_batch1.batch_size = fwd_batch.batch_size - sub_fwd_batch0.batch_size
 
     return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
+
+
+def split_decode_batch(fwd_batch: Optional[ForwardBatch]):
+    if fwd_batch.forward_mode == ForwardMode.DECODE:
+        logger.debug(f"[token_balanced_batch_split] original forward batch: {fwd_batch}")
+    sub_fwd_batch0 = copy(fwd_batch)
+    sub_fwd_batch1 = copy(fwd_batch)
+    batch_boundary = fwd_batch.batch_size // 2
+
+    # set attributes
+    for key in [
+        "input_ids",
+        "req_pool_indices",
+        "seq_lens",
+        "out_cache_loc",
+        "seq_lens_cpu",
+        "positions",
+    ]:
+        setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:batch_boundary])
+        setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[batch_boundary:])
+
+    # batch_size, global_num_tokens_cpu, global_num_tokens_gpu, global_num_tokens_for_logprob_cpu, global_num_tokens_for_logprob_gpu
+    sub_fwd_batch0.batch_size = batch_boundary
+    sub_fwd_batch1.batch_size = fwd_batch.batch_size - batch_boundary
+    sub_fwd_batch0.global_num_tokens_cpu = [batch_boundary]
+    sub_fwd_batch1.global_num_tokens_cpu = [fwd_batch.batch_size - batch_boundary]
+    sub_fwd_batch0.global_num_tokens_gpu = torch.tensor([batch_boundary],
+                                                        device=f'cuda:{str(sub_fwd_batch0.global_num_tokens_gpu.get_device())}')
+    sub_fwd_batch1.global_num_tokens_gpu = torch.tensor([fwd_batch.batch_size - batch_boundary],
+                                                        device=f'cuda:{str(sub_fwd_batch1.global_num_tokens_gpu.get_device())}')
+    sub_fwd_batch0.global_num_tokens_for_logprob_cpu = [batch_boundary]
+    sub_fwd_batch1.global_num_tokens_for_logprob_cpu = [fwd_batch.batch_size - batch_boundary]
+    sub_fwd_batch0.global_num_tokens_for_logprob_gpu = torch.tensor([batch_boundary],
+                                                                    device=f'cuda:{str(sub_fwd_batch0.global_num_tokens_gpu.get_device())}')
+    sub_fwd_batch1.global_num_tokens_for_logprob_gpu = torch.tensor([fwd_batch.batch_size - batch_boundary],
+                                                                    device=f'cuda:{str(sub_fwd_batch1.global_num_tokens_gpu.get_device())}')
+
+    # seq_lens_sum
+    sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
+    sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
+
+    # sampling_info
+    # for key in [
+    #     "temperatures",
+    #     "top_ps",
+    #     "top_ks",
+    #     "min_ps"
+    # ]:
+    #     setattr(sub_fwd_batch0.sampling_info, key, getattr(fwd_batch.sampling_info, key)[:batch_boundary])
+    #     setattr(sub_fwd_batch1.sampling_info, key, getattr(fwd_batch.sampling_info, key)[batch_boundary:])
+
+    # dp_local_start_pos, dp_local_num_tokens, gathered_buffer, to support when enable-dp-size
+
+    return batch_boundary, sub_fwd_batch0, sub_fwd_batch1
+
+
+def get_role(forward_batch: ForwardBatch) -> str:
+    role = None
+    if forward_batch.forward_mode.is_extend():
+        role = "prefill"
+    elif forward_batch.forward_mode.is_decode():
+        role = "decode"
+    assert role is not None, f"{forward_batch.forward_mode} is not supported for role"
+    return role
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):

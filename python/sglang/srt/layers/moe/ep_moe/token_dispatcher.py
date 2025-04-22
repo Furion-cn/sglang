@@ -30,6 +30,72 @@ class DeepEPDispatchMode(IntEnum):
     LOW_LATENCY = auto()
 
 
+class DeepEPBufferFurion(Buffer):
+    def __init__(
+        self,
+        group: dist.ProcessGroup,
+        hidden_size: int,
+        param_bytes: int,
+        deepep_mode: DeepEPMode,
+        num_max_dispatch_tokens_per_rank: int = None,
+        num_experts: int = None,
+    ):
+        """
+        note: it is same to get_deepep_buffer
+        """
+        num_nvl_bytes, num_rdma_bytes = 0, 0
+        if deepep_mode.enable_normal():
+            hidden_bytes = hidden_size * param_bytes
+            for config in (
+                Buffer.get_dispatch_config(group.size()),
+                Buffer.get_combine_config(group.size()),
+            ):
+                num_nvl_bytes = max(
+                    config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
+                    num_nvl_bytes,
+                )
+                num_rdma_bytes = max(
+                    config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                    num_rdma_bytes,
+                )
+        if deepep_mode.enable_low_latency():
+            assert num_max_dispatch_tokens_per_rank is not None
+            assert num_experts is not None and num_experts % group.size() == 0
+            num_rdma_bytes = max(
+                Buffer.get_low_latency_rdma_size_hint(
+                    num_max_dispatch_tokens_per_rank,
+                    hidden_size,
+                    group.size(),
+                    num_experts,
+                ),
+                num_rdma_bytes,
+            )
+
+        super().__init__(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            low_latency_mode=deepep_mode.enable_low_latency(),
+            num_qps_per_rank=(
+                num_experts // group.size() if deepep_mode.enable_low_latency() else 1
+            ),
+        )
+
+        self._dispatch_mode = DeepEPDispatchMode.NORMAL if deepep_mode.enable_normal else DeepEPDispatchMode.LOW_LATENCY
+        self._hidden_size = hidden_size
+        self._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
+        self._num_experts = num_experts
+
+    def clean_buffer(self):
+        if not self.low_latency_mode:
+            return
+        self.clean_low_latency_buffer(
+            self._num_max_dispatch_tokens_per_rank,
+            self._hidden_size,
+            self._num_experts,
+        )
+
+
 class DeepEPBuffer:
     _buffer = None
     _dispatch_mode: Optional[DeepEPDispatchMode] = None
@@ -146,6 +212,8 @@ class _DeepEPDispatcherImplBase:
 
         self.handle = None
         self.event = None
+
+        self._buffer = None
 
     def launch_dispatch(
         self,
@@ -480,8 +548,9 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return combined_x, event
 
     def _get_buffer(self):
-        DeepEPBuffer.set_dispatch_mode_as_normal()
-        return DeepEPBuffer.get_deepep_buffer(
+        if self._buffer is not None:
+            return self._buffer
+        self._buffer = DeepEPBufferFurion(
             self.group,
             self.hidden_size,
             self.params_bytes,
@@ -489,6 +558,16 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
         )
+        return self._buffer
+        # DeepEPBuffer.set_dispatch_mode_as_normal()
+        # return DeepEPBuffer.get_deepep_buffer(
+        #     self.group,
+        #     self.hidden_size,
+        #     self.params_bytes,
+        #     self.deepep_mode,
+        #     self.num_max_dispatch_tokens_per_rank,
+        #     self.num_experts,
+        # )
 
 
 class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
@@ -687,8 +766,10 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         return combined_hidden_states, event, hook
 
     def _get_buffer(self):
-        DeepEPBuffer.set_dispatch_mode_as_low_latency()
-        return DeepEPBuffer.get_deepep_buffer(
+        if self._buffer is not None:
+            self._buffer.clean_buffer()
+            return self._buffer
+        self._buffer = DeepEPBufferFurion(
             self.group,
             self.hidden_size,
             self.params_bytes,
@@ -696,6 +777,16 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
         )
+        return self._buffer
+        # DeepEPBuffer.set_dispatch_mode_as_low_latency()
+        # return DeepEPBuffer.get_deepep_buffer(
+        #     self.group,
+        #     self.hidden_size,
+        #     self.params_bytes,
+        #     self.deepep_mode,
+        #     self.num_max_dispatch_tokens_per_rank,
+        #     self.num_experts,
+        # )
 
 
 class DeepEPDispatcher:
