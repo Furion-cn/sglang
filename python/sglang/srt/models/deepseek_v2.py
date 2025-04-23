@@ -767,34 +767,40 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        with torch.cuda.nvtx.range("deepseek v2 attention mla"):
+        with torch.cuda.nvtx.range("attention_mla_forward"):
             if hidden_states.shape[0] == 0:
                 assert (
                     not self.o_proj.reduce_results
                 ), "short-circuiting allreduce will lead to hangs"
                 return hidden_states
 
-            attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
+            with torch.cuda.nvtx.range("dispatch_attn_method"):
+                attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
 
             if attn_forward_method == AttnForwardMethod.MHA:
-                return self.forward_normal(positions, hidden_states, forward_batch)
+                with torch.cuda.nvtx.range("forward_normal"):
+                    return self.forward_normal(positions, hidden_states, forward_batch)
             elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
-                return self.forward_normal_chunked_kv(
-                    positions, hidden_states, forward_batch
-                )
+                with torch.cuda.nvtx.range("forward_normal_chunked_kv"):
+                    return self.forward_normal_chunked_kv(
+                        positions, hidden_states, forward_batch
+                    )
             else:
                 if _is_hip:
                     if (
                         self.rocm_fused_decode_mla
                         and forward_batch.forward_mode.is_decode()
                     ):
-                        return self.forward_absorb_fused_mla_rope(
-                            positions, hidden_states, forward_batch
-                        )
+                        with torch.cuda.nvtx.range("forward_absorb_fused_mla_rope"):
+                            return self.forward_absorb_fused_mla_rope(
+                                positions, hidden_states, forward_batch
+                            )
                     else:
-                        return self.forward_absorb(positions, hidden_states, forward_batch)
+                        with torch.cuda.nvtx.range("forward_absorb"):
+                            return self.forward_absorb(positions, hidden_states, forward_batch)
                 else:
-                    return self.forward_absorb(positions, hidden_states, forward_batch)
+                    with torch.cuda.nvtx.range("forward_absorb"):
+                        return self.forward_absorb(positions, hidden_states, forward_batch)
 
     def forward_normal(
         self,
@@ -844,74 +850,81 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        q_len = hidden_states.shape[0]
-        q_input = hidden_states.new_empty(
-            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
-        )
-        if self.q_lora_rank is not None:
-            q = self.q_a_proj(hidden_states)[0]
-            q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-        else:
-            q = self.q_proj(hidden_states)[0].view(
-                -1, self.num_local_heads, self.qk_head_dim
+        with torch.cuda.nvtx.range("absorb_forward"):
+            q_len = hidden_states.shape[0]
+            q_input = hidden_states.new_empty(
+                q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
             )
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            
+            with torch.cuda.nvtx.range("q_projection"):
+                if self.q_lora_rank is not None:
+                    q = self.q_a_proj(hidden_states)[0]
+                    q = self.q_a_layernorm(q)
+                    q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+                else:
+                    q = self.q_proj(hidden_states)[0].view(
+                        -1, self.num_local_heads, self.qk_head_dim
+                    )
+                q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        if self.w_kc.dtype == torch.float8_e4m3fnuz:
-            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
-            q_nope_out = torch.bmm(
-                q_nope.to(torch.bfloat16).transpose(0, 1),
-                self.w_kc.to(torch.bfloat16) * self.w_scale,
-            )
-        elif self.w_kc.dtype == torch.float8_e4m3fn:
-            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
-                q_nope.transpose(0, 1),
-            )
-            q_nope_out = bmm_fp8(
-                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
-            )
-        else:
-            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
-        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+            with torch.cuda.nvtx.range("w_kc_ops"):
+                if self.w_kc.dtype == torch.float8_e4m3fnuz:
+                    q_nope_out = torch.bmm(
+                        q_nope.to(torch.bfloat16).transpose(0, 1),
+                        self.w_kc.to(torch.bfloat16) * self.w_scale,
+                    )
+                elif self.w_kc.dtype == torch.float8_e4m3fn:
+                    q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                        q_nope.transpose(0, 1),
+                    )
+                    q_nope_out = bmm_fp8(
+                        q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+                    )
+                else:
+                    q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+                q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        v_input = latent_cache[..., : self.kv_lora_rank]
-        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
-        k_input = latent_cache.unsqueeze(1)
-        k_input[..., : self.kv_lora_rank] = v_input
-        k_pe = k_input[..., self.kv_lora_rank :]
+            with torch.cuda.nvtx.range("kv_projection"):
+                latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+                v_input = latent_cache[..., : self.kv_lora_rank]
+                v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+                k_input = latent_cache.unsqueeze(1)
+                k_input[..., : self.kv_lora_rank] = v_input
+                k_pe = k_input[..., self.kv_lora_rank :]
 
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q_input[..., self.kv_lora_rank :] = q_pe
-        k_input[..., self.kv_lora_rank :] = k_pe
+            with torch.cuda.nvtx.range("rope"):
+                q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+                q_input[..., self.kv_lora_rank :] = q_pe
+                k_input[..., self.kv_lora_rank :] = k_pe
 
-        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+            with torch.cuda.nvtx.range("attention"):
+                attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+                attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
-        if self.w_vc.dtype == torch.float8_e4m3fnuz:
-            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
-            attn_bmm_output = torch.bmm(
-                attn_output.to(torch.bfloat16).transpose(0, 1),
-                self.w_vc.to(torch.bfloat16) * self.w_scale,
-            )
-        elif self.w_vc.dtype == torch.float8_e4m3fn:
-            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
-                attn_output.transpose(0, 1),
-            )
-            attn_bmm_output = bmm_fp8(
-                attn_output_val,
-                self.w_vc,
-                attn_output_scale,
-                self.w_scale,
-                torch.bfloat16,
-            )
-        else:
-            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
-        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-        output, _ = self.o_proj(attn_output)
+            with torch.cuda.nvtx.range("w_vc_ops"):
+                if self.w_vc.dtype == torch.float8_e4m3fnuz:
+                    attn_bmm_output = torch.bmm(
+                        attn_output.to(torch.bfloat16).transpose(0, 1),
+                        self.w_vc.to(torch.bfloat16) * self.w_scale,
+                    )
+                elif self.w_vc.dtype == torch.float8_e4m3fn:
+                    attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                        attn_output.transpose(0, 1), dtype=torch.float8_e4m3fn
+                    )
+                    attn_bmm_output = bmm_fp8(
+                        attn_output_val,
+                        self.w_vc,
+                        attn_output_scale,
+                        self.w_scale,
+                        torch.bfloat16,
+                    )
+                else:
+                    attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+                attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
 
-        return output
+            with torch.cuda.nvtx.range("output_projection"):
+                output, _ = self.o_proj(attn_output)
+                return output
 
     def forward_absorb_fused_mla_rope(
         self,
@@ -1286,13 +1299,15 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         if global_server_args_dict["enable_deepep_moe"] and self.is_sparse:
-            return self.forward_deepep(
-                positions, hidden_states, forward_batch, residual
+            with torch.cuda.nvtx.range("decode_layer_forward_deepep"):
+                return self.forward_deepep(
+                    positions, hidden_states, forward_batch, residual
             )
         else:
-            return self.forward_normal(
-                positions, hidden_states, forward_batch, residual
-            )
+            with torch.cuda.nvtx.range("decode_layer_forward_normal"):
+                return self.forward_normal(
+                    positions, hidden_states, forward_batch, residual
+                )
 
     def forward_normal(
         self,
@@ -1385,71 +1400,95 @@ class DeepseekV2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-
         if hidden_states.shape[0] == 0:
             residual = hidden_states
         else:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            with torch.cuda.nvtx.range("layer_norm"):
+                if residual is None:
+                    residual = hidden_states
+                    hidden_states = self.input_layernorm(hidden_states)
+                else:
+                    hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if self.attn_tp_size != 1 and self.input_is_scattered:
             hidden_states, local_hidden_states = (
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
                 hidden_states,
             )
-            tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+            with torch.cuda.nvtx.range("all_gather"):
+                tp_all_gather(
+                    list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                )
+        with torch.cuda.nvtx.range("self_attention"):
+            # Self Attention
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
             )
 
-        # Self Attention
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-        )
-
-        if self.attn_tp_size != 1:
-            if self.input_is_scattered:
-                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                hidden_states = tensor_list[self.attn_tp_rank]
-                tp_reduce_scatter(hidden_states, tensor_list)
-                if hidden_states.shape[0] != 0:
-                    hidden_states, residual = self.post_attention_layernorm(
-                        hidden_states, residual
-                    )
-            else:
-                if self.attn_tp_rank == 0:
-                    hidden_states += residual
-                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                hidden_states = tensor_list[self.attn_tp_rank]
-                tp_reduce_scatter(hidden_states, tensor_list)
-                residual = hidden_states
-                if hidden_states.shape[0] != 0:
-                    hidden_states = self.post_attention_layernorm(hidden_states)
-        else:
-            if hidden_states.shape[0] != 0:
-                hidden_states, residual = self.post_attention_layernorm(
-                    hidden_states, residual
-                )
-
-        # dummy_tensor = torch.ones(1, device=hidden_states.device)
-        # torch.distributed.all_reduce(dummy_tensor, group=get_world_group().device_group)
-
-        hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
-
-        if self.is_last_layer and self.attn_tp_size != 1:
-            hidden_states += residual
-            residual = None
+        if self.attn_tp_size != 1 and self.input_is_scattered:
             hidden_states, local_hidden_states = (
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
                 hidden_states,
             )
-            tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+            with torch.cuda.nvtx.range("all_gather"):
+                tp_all_gather(
+                    list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                )
+
+        with torch.cuda.nvtx.range("self_attention"):
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
             )
+
+        if self.attn_tp_size != 1:
+            if self.input_is_scattered:
+                with torch.cuda.nvtx.range("reduce_scatter"):
+                    tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                    hidden_states = tensor_list[self.attn_tp_rank]
+                    tp_reduce_scatter(hidden_states, tensor_list)
+                if hidden_states.shape[0] != 0:
+                    with torch.cuda.nvtx.range("post_attn_norm"):
+                        hidden_states, residual = self.post_attention_layernorm(
+                            hidden_states, residual
+                        )
+            else:
+                if self.attn_tp_rank == 0:
+                    with torch.cuda.nvtx.range("add_residual"):
+                        hidden_states += residual
+                with torch.cuda.nvtx.range("reduce_scatter"):
+                    tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                    hidden_states = tensor_list[self.attn_tp_rank]
+                    tp_reduce_scatter(hidden_states, tensor_list)
+                residual = hidden_states
+                if hidden_states.shape[0] != 0:
+                    with torch.cuda.nvtx.range("post_attn_norm"):
+                        hidden_states = self.post_attention_layernorm(hidden_states)
+        else:
+            if hidden_states.shape[0] != 0:
+                with torch.cuda.nvtx.range("post_attn_norm"):
+                    hidden_states, residual = self.post_attention_layernorm(
+                        hidden_states, residual
+                    )
+
+        with torch.cuda.nvtx.range("mlp"):
+            hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
+
+        if self.is_last_layer and self.attn_tp_size != 1:
+            with torch.cuda.nvtx.range("last_layer_ops"):
+                hidden_states += residual
+                residual = None
+                hidden_states, local_hidden_states = (
+                    forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
+                    hidden_states,
+                )
+                with torch.cuda.nvtx.range("final_all_gather"):
+                    tp_all_gather(
+                        list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                    )
 
         return hidden_states, residual
 
@@ -1496,21 +1535,21 @@ class DeepseekV2Model(nn.Module):
     ) -> torch.Tensor:
 
         if input_embeds is None:
-            with torch.cuda.nvtx.range("embedding"):
+            with torch.cuda.nvtx.range("embedding_tokens"):
                 hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
 
         residual = None
         for i in range(len(self.layers)):
-            with torch.cuda.nvtx.range("decoder layers"):
+            with torch.cuda.nvtx.range(f"decoder_layer_{i}"):
                 expert_distribution_recorder.set_current_layer(i)
                 layer = self.layers[i]
                 hidden_states, residual = layer(
                     positions, hidden_states, forward_batch, residual
                 )
         if not forward_batch.forward_mode.is_idle():
-            with torch.cuda.nvtx.range("deepseek v2 model norm"):
+            with torch.cuda.nvtx.range("norm"):
                 if residual is None:
                     hidden_states = self.norm(hidden_states)
                 else:
