@@ -239,23 +239,23 @@ class DeepseekV2MoE(nn.Module):
             # disable tp for shared experts when enable deepep moe
             if not global_server_args_dict["enable_deepep_moe"]:
                 self.shared_experts = DeepseekV2MLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    reduce_results=False,
-                    prefix=add_prefix("shared_experts", prefix),
+                        hidden_size=config.hidden_size,
+                        intermediate_size=intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        reduce_results=False,
+                        prefix=add_prefix("shared_experts", prefix),
                 )
             else:
                 self.shared_experts = DeepseekV2MLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    reduce_results=False,
-                    prefix=add_prefix("shared_experts", prefix),
-                    tp_rank=0,
-                    tp_size=1,
+                        hidden_size=config.hidden_size,
+                        intermediate_size=intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        reduce_results=False,
+                        prefix=add_prefix("shared_experts", prefix),
+                        tp_rank=0,
+                        tp_size=1,
                 )
 
         if global_server_args_dict["enable_deepep_moe"]:
@@ -289,9 +289,11 @@ class DeepseekV2MoE(nn.Module):
         self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
     ) -> torch.Tensor:
         if not global_server_args_dict["enable_deepep_moe"]:
-            return self.forward_normal(hidden_states)
+            with torch.cuda.nvtx.range("deepseek v2 moe without deepep_moe"):
+                return self.forward_normal(hidden_states)
         else:
-            return self.forward_deepep(hidden_states, forward_mode)
+            with torch.cuda.nvtx.range("deepseek v2 moe with deepep_moe"):
+                return self.forward_deepep(hidden_states, forward_mode)
 
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shared_output = self._forward_shared_experts(hidden_states)
@@ -530,35 +532,36 @@ class DeepseekV2Attention(nn.Module):
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
-        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        latent_cache = latent_cache.unsqueeze(1)
-        kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        kv = self.kv_b_proj(kv_a)[0]
-        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = latent_cache[:, :, self.kv_lora_rank :]
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q[..., self.qk_nope_head_dim :] = q_pe
-        k = torch.empty_like(q)
-        k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
-        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(
-            -1, self.num_local_heads * 256
-        )
-        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(
-            -1, self.num_local_heads * 256
-        )
-        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(
-            -1, self.num_local_heads * 256
-        )
-        attn_output = self.attn(q, k, v, forward_batch)
-        attn_output = attn_output.view(-1, self.num_local_heads, 256)[
-            ..., : self.v_head_dim
-        ].reshape(-1, self.num_local_heads * self.v_head_dim)
-        output, _ = self.o_proj(attn_output)
-        return output
+        with torch.cuda.nvtx.range("deepseek v2 attention forward"):
+            _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+            kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            latent_cache = latent_cache.unsqueeze(1)
+            kv_a = self.kv_a_layernorm(kv_a.contiguous())
+            kv = self.kv_b_proj(kv_a)[0]
+            kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_pe = latent_cache[:, :, self.kv_lora_rank :]
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q[..., self.qk_nope_head_dim :] = q_pe
+            k = torch.empty_like(q)
+            k[..., : self.qk_nope_head_dim] = k_nope
+            k[..., self.qk_nope_head_dim :] = k_pe
+            q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(
+                -1, self.num_local_heads * 256
+            )
+            k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(
+                -1, self.num_local_heads * 256
+            )
+            v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(
+                -1, self.num_local_heads * 256
+            )
+            attn_output = self.attn(q, k, v, forward_batch)
+            attn_output = attn_output.view(-1, self.num_local_heads, 256)[
+                ..., : self.v_head_dim
+            ].reshape(-1, self.num_local_heads * self.v_head_dim)
+            output, _ = self.o_proj(attn_output)
+            return output
 
 
 class DeepseekV2AttentionMLA(nn.Module):
@@ -764,33 +767,34 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        if hidden_states.shape[0] == 0:
-            assert (
-                not self.o_proj.reduce_results
-            ), "short-circuiting allreduce will lead to hangs"
-            return hidden_states
+        with torch.cuda.nvtx.range("deepseek v2 attention mla"):
+            if hidden_states.shape[0] == 0:
+                assert (
+                    not self.o_proj.reduce_results
+                ), "short-circuiting allreduce will lead to hangs"
+                return hidden_states
 
-        attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
+            attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
 
-        if attn_forward_method == AttnForwardMethod.MHA:
-            return self.forward_normal(positions, hidden_states, forward_batch)
-        elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
-            return self.forward_normal_chunked_kv(
-                positions, hidden_states, forward_batch
-            )
-        else:
-            if _is_hip:
-                if (
-                    self.rocm_fused_decode_mla
-                    and forward_batch.forward_mode.is_decode()
-                ):
-                    return self.forward_absorb_fused_mla_rope(
-                        positions, hidden_states, forward_batch
-                    )
+            if attn_forward_method == AttnForwardMethod.MHA:
+                return self.forward_normal(positions, hidden_states, forward_batch)
+            elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
+                return self.forward_normal_chunked_kv(
+                    positions, hidden_states, forward_batch
+                )
+            else:
+                if _is_hip:
+                    if (
+                        self.rocm_fused_decode_mla
+                        and forward_batch.forward_mode.is_decode()
+                    ):
+                        return self.forward_absorb_fused_mla_rope(
+                            positions, hidden_states, forward_batch
+                        )
+                    else:
+                        return self.forward_absorb(positions, hidden_states, forward_batch)
                 else:
                     return self.forward_absorb(positions, hidden_states, forward_batch)
-            else:
-                return self.forward_absorb(positions, hidden_states, forward_batch)
 
     def forward_normal(
         self,
@@ -1492,22 +1496,25 @@ class DeepseekV2Model(nn.Module):
     ) -> torch.Tensor:
 
         if input_embeds is None:
-            hidden_states = self.embed_tokens(input_ids)
+            with torch.cuda.nvtx.range("embedding"):
+                hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
 
         residual = None
         for i in range(len(self.layers)):
-            expert_distribution_recorder.set_current_layer(i)
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions, hidden_states, forward_batch, residual
-            )
+            with torch.cuda.nvtx.range("decoder layers"):
+                expert_distribution_recorder.set_current_layer(i)
+                layer = self.layers[i]
+                hidden_states, residual = layer(
+                    positions, hidden_states, forward_batch, residual
+                )
         if not forward_batch.forward_mode.is_idle():
-            if residual is None:
-                hidden_states = self.norm(hidden_states)
-            else:
-                hidden_states, _ = self.norm(hidden_states, residual)
+            with torch.cuda.nvtx.range("deepseek v2 model norm"):
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
+                else:
+                    hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -1566,7 +1573,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        
+
         hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
 
         return self.logits_processor(

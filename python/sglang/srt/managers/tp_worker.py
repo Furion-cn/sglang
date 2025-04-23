@@ -17,6 +17,7 @@ import logging
 import threading
 from typing import Optional, Tuple
 
+import nvtx
 import torch
 
 from sglang.srt.configs.model_config import ModelConfig
@@ -179,7 +180,9 @@ class TpModelWorker:
         skip_sample: bool = False,
     ) -> Tuple[LogitsProcessorOutput, Optional[torch.Tensor]]:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
+        nvtx.push_range("model_runner.forward")
         logits_output = self.model_runner.forward(forward_batch)
+        nvtx.pop_range()
         if launch_done:
             launch_done.set()
 
