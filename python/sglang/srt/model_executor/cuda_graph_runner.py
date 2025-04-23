@@ -181,6 +181,7 @@ class CudaGraphRunner:
         self.is_encoder_decoder = model_runner.model_config.is_encoder_decoder
         self.enable_dp_attention = model_runner.server_args.enable_dp_attention
         self.enable_sp_layernorm = model_runner.server_args.enable_sp_layernorm
+        self.enable_deepep_moe = model_runner.server_args.enable_deepep_moe
         self.speculative_algorithm = model_runner.server_args.speculative_algorithm
         self.tp_size = model_runner.server_args.tp_size
         self.dp_size = model_runner.server_args.dp_size
@@ -295,7 +296,7 @@ class CudaGraphRunner:
             self.model_runner.token_to_kv_pool.capture_mode = False
 
     def can_run(self, forward_batch: ForwardBatch):
-        if self.enable_dp_attention or self.enable_sp_layernorm:
+        if (self.enable_dp_attention or self.enable_sp_layernorm) and not self.enable_deepep_moe:
             total_global_tokens = sum(forward_batch.global_num_tokens_cpu)
 
             is_bs_supported = forward_batch.can_run_dp_cuda_graph and (

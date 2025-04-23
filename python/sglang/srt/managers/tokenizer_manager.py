@@ -93,6 +93,8 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqOutput,
     UpdateWeightsFromTensorReqInput,
     UpdateWeightsFromTensorReqOutput,
+    ExpertDistributionReqOutput,
+    ExpertDistributionReqType,
 )
 from sglang.srt.managers.multimodal_processor import (
     get_dummy_processor,
@@ -672,14 +674,17 @@ class TokenizerManager:
         req = ProfileReq(type=ProfileReqType.STOP_PROFILE)
         self.send_to_scheduler.send_pyobj(req)
 
-    async def start_expert_distribution_record(self):
-        await self.expert_distribution_communicator(ExpertDistributionReq.START_RECORD)
+    async def start_expert_distribution_record(self, num_steps: Optional[int] = None, output_dir: Optional[str] = None):
+        req = ExpertDistributionReq(
+            type=ExpertDistributionReqType.START_RECORD, 
+            num_steps=num_steps,
+            output_dir=output_dir
+        )
+        await self.expert_distribution_communicator(req)
 
     async def stop_expert_distribution_record(self):
-        await self.expert_distribution_communicator(ExpertDistributionReq.STOP_RECORD)
-
-    async def dump_expert_distribution_record(self):
-        await self.expert_distribution_communicator(ExpertDistributionReq.DUMP_RECORD)
+        req = ExpertDistributionReq(type=ExpertDistributionReqType.STOP_RECORD)
+        await self.expert_distribution_communicator(req)
 
     async def update_weights_from_disk(
         self,

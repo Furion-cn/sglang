@@ -9,6 +9,9 @@ except ImportError:
 
 from enum import IntEnum, auto
 from typing import Optional, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 import torch
 import torch.distributed as dist
@@ -388,17 +391,20 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
+        # logger.info(f"dispatch_a_begin {hidden_states.shape}, group_size={self.group.size()}, rank={self.group.rank()}, hidden_size={self.hidden_size}, device={hidden_states.device}")
         buffer = self._get_buffer()
         topk_idx = topk_idx.to(torch.int64)
         expected_m = (
             hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1]
             + self.num_experts
         ) // self.num_experts
+        # logger.info(f"dispatch_a {hidden_states.shape}")
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_idx,
             use_fp8=True,
         )
+        # logger.info(f"dispatch_a_end")
         return (
             hidden_states,
             topk_idx,

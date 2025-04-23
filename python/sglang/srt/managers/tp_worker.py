@@ -157,8 +157,14 @@ class TpModelWorker:
     def get_tp_cpu_group(self):
         return self.model_runner.tp_group.cpu_group
 
+    def get_tp_device_group(self):
+        return self.model_runner.tp_group.device_group
+
     def get_attention_tp_cpu_group(self):
         return self.model_runner.attention_tp_group.cpu_group
+
+    def get_attention_tp_device_group(self):
+        return self.model_runner.attention_tp_group.device_group
 
     def get_memory_pool(self):
         return (

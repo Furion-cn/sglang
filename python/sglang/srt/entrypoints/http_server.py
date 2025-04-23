@@ -65,6 +65,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
     VertexGenerateReqInput,
+    ExpertDistributionReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.metrics.func_timer import enable_func_timer
@@ -344,9 +345,11 @@ async def stop_profile_async():
 
 
 @app.api_route("/start_expert_distribution_record", methods=["GET", "POST"])
-async def start_expert_distribution_record_async():
+async def start_expert_distribution_record_async(obj: Optional[ExpertDistributionReqInput] = None):
     """Start recording the expert distribution. Clear the previous record if any."""
-    await _global_state.tokenizer_manager.start_expert_distribution_record()
+    if obj is None:
+        obj = ExpertDistributionReqInput()
+    await _global_state.tokenizer_manager.start_expert_distribution_record(obj.num_steps, obj.output_dir)
     return Response(
         content="Start recording the expert distribution.\n",
         status_code=200,
@@ -361,17 +364,6 @@ async def stop_expert_distribution_record_async():
         content="Stop recording the expert distribution.\n",
         status_code=200,
     )
-
-
-@app.api_route("/dump_expert_distribution_record", methods=["GET", "POST"])
-async def dump_expert_distribution_record_async():
-    """Dump expert distribution record."""
-    await _global_state.tokenizer_manager.dump_expert_distribution_record()
-    return Response(
-        content="Dump expert distribution record.\n",
-        status_code=200,
-    )
-
 
 @app.post("/update_weights_from_disk")
 async def update_weights_from_disk(obj: UpdateWeightFromDiskReqInput, request: Request):

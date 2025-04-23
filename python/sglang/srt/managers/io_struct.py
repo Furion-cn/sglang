@@ -817,18 +817,6 @@ class ProfileReqType(Enum):
     START_PROFILE = 1
     STOP_PROFILE = 2
 
-
-class ExpertDistributionReq(Enum):
-    START_RECORD = 1
-    STOP_RECORD = 2
-    DUMP_RECORD = 3
-
-
-@dataclass
-class ExpertDistributionReqOutput:
-    pass
-
-
 @dataclass
 class ProfileReq:
     type: ProfileReqType
@@ -844,12 +832,29 @@ class ProfileReqOutput:
     success: bool
     message: str
 
+class ExpertDistributionReqType(Enum):
+    START_RECORD = 1
+    STOP_RECORD = 2
+
+@dataclass
+class ExpertDistributionReqInput:
+    num_steps: Optional[int] = None
+    output_dir: Optional[str] = None
+    
+@dataclass
+class ExpertDistributionReq:
+    type: ExpertDistributionReqType
+    num_steps: Optional[int] = None
+    output_dir: Optional[str] = None
+
+@dataclass
+class ExpertDistributionReqOutput:
+    pass
 
 @dataclass
 class PrefilledReqInput(TokenizedGenerateReqInput):
     kv_transfer_src_addr: Optional[str] = None
     kv_transfer_src_rank: Optional[int] = None
-    kv_cache_length: Optional[int] = None
     output_ids: Optional[List[int]] = None
 
 
@@ -857,8 +862,6 @@ class PrefilledReqInput(TokenizedGenerateReqInput):
 class KVTransferFetch:
     # the request ids
     rids: Optional[List[str]] = None      
-    # the hash of the requests
-    reqs_hash: Optional[str] = None
     # the number of requests
     fetch_ct: Optional[int] = None
     # the address of the prefill node which has the kv cache
@@ -870,22 +873,18 @@ class KVTransferFetch:
     # the rank of the decode node which needs the kv cache
     dst_rank: Optional[int] = None
     # the pointer to the buffer of the decode node which needs the kv cache
-    dst_ptr: Optional[int] = None
+    dst_ptrs: Optional[List[int]] = None
 
 @dataclass
 class KVTransferAck:
     # the request ids
-    rid: Optional[str] = None
-    # the hash of the requests
-    reqs_hash: Optional[str] = None
+    rids: Optional[List[str]] = None
     # the address of the decode node which needs the kv cache
     dst_addr: Optional[str] = None
     # the rank of the decode node which needs the kv cache
     dst_rank: Optional[int] = None
     # the error message, None means success
     error_message: Optional[str] = None
-    # the length of the kv cache
-    kv_cache_length: Optional[int] = None
 
 
 @dataclass
