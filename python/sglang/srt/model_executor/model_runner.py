@@ -983,10 +983,10 @@ class ModelRunner:
         tensor_parallel(self.model, device_mesh)
 
     def forward_decode(self, forward_batch: ForwardBatch):
-        with torch.cuda.nvtx.range("attn_backend.init_forward_metadata"):
-            self.attn_backend.init_forward_metadata(forward_batch)
-        with torch.cuda.nvtx.range("self.model.forward"):
-            return self.model.forward(
+        torch.cuda.nvtx.range_push("attn_backend.init_forward_metadata")
+        self.attn_backend.init_forward_metadata(forward_batch)
+        torch.cuda.nvtx.range_pop()
+        return self.model.forward(
                 forward_batch.input_ids, forward_batch.positions, forward_batch
             )
 
@@ -1035,16 +1035,13 @@ class ModelRunner:
             )
 
         if forward_batch.forward_mode.is_decode():
-            with torch.cuda.nvtx.range("forward_decode"):
-                return self.forward_decode(forward_batch)
+            return self.forward_decode(forward_batch)
         elif forward_batch.forward_mode.is_extend():
-            with torch.cuda.nvtx.range("forward_extend"):
-                return self.forward_extend(
+            return self.forward_extend(
                     forward_batch, skip_attn_backend_init=skip_attn_backend_init
                 )
         elif forward_batch.forward_mode.is_idle():
-            with torch.cuda.nvtx.range("forward_idle"):
-                return self.forward_idle(forward_batch)
+            return self.forward_idle(forward_batch)
         else:
             raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 
