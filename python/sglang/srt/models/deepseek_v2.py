@@ -97,7 +97,6 @@ logger = logging.getLogger(__name__)
 
 
 class AttnForwardMethod(IntEnum):
-
     # Use multi-head attention
     MHA = auto()
 
@@ -239,23 +238,23 @@ class DeepseekV2MoE(nn.Module):
             # disable tp for shared experts when enable deepep moe
             if not global_server_args_dict["enable_deepep_moe"]:
                 self.shared_experts = DeepseekV2MLP(
-                        hidden_size=config.hidden_size,
-                        intermediate_size=intermediate_size,
-                        hidden_act=config.hidden_act,
-                        quant_config=quant_config,
-                        reduce_results=False,
-                        prefix=add_prefix("shared_experts", prefix),
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    reduce_results=False,
+                    prefix=add_prefix("shared_experts", prefix),
                 )
             else:
                 self.shared_experts = DeepseekV2MLP(
-                        hidden_size=config.hidden_size,
-                        intermediate_size=intermediate_size,
-                        hidden_act=config.hidden_act,
-                        quant_config=quant_config,
-                        reduce_results=False,
-                        prefix=add_prefix("shared_experts", prefix),
-                        tp_rank=0,
-                        tp_size=1,
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    reduce_results=False,
+                    prefix=add_prefix("shared_experts", prefix),
+                    tp_rank=0,
+                    tp_size=1,
                 )
 
         if global_server_args_dict["enable_deepep_moe"]:
@@ -289,30 +288,28 @@ class DeepseekV2MoE(nn.Module):
         self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
     ) -> torch.Tensor:
         if not global_server_args_dict["enable_deepep_moe"]:
-            return self.forward_normal(hidden_states)
+            with torch.cuda.nvtx.range("deepseek v2 moe without deepep_moe"):
+                return self.forward_normal(hidden_states)
         else:
-            return self.forward_deepep(hidden_states, forward_mode)
+            with torch.cuda.nvtx.range("deepseek v2 moe with deepep_moe"):
+                return self.forward_deepep(hidden_states, forward_mode)
 
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        torch.cuda.nvtx.range_push("forward_normal _forward_shared_experts")
-        shared_output = self._forward_shared_experts(hidden_states)
-        torch.cuda.nvtx.range_pop()
+        with torch.cuda.nvtx.range("forward_normal _forward_shared_experts"):
+            shared_output = self._forward_shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        torch.cuda.nvtx.range_push("forward_normal gate")
-        router_logits = self.gate(hidden_states)
-        torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("forward_normal router_logits")
-        final_hidden_states = (
+        with torch.cuda.nvtx.range("forward_normal gate"):
+            router_logits = self.gate(hidden_states)
+        with torch.cuda.nvtx.range("forward_normal self experts"):
+            final_hidden_states = (
                 self.experts(hidden_states=hidden_states, router_logits=router_logits)
                 * self.routed_scaling_factor
             )
-        torch.cuda.nvtx.range_pop()
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            torch.cuda.nvtx.range_push("tensor_model_parallel_all_reduce")
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-            torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("tensor_model_parallel_all_reduce"):
+                final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states
 
     def forward_deepep(
@@ -330,13 +327,11 @@ class DeepseekV2MoE(nn.Module):
             and not forward_mode.is_idle()
             and hidden_states.shape[0] > 0
         ):
-            torch.cuda.nvtx.range_push("forward_deepep gate")
-            # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states)
-            torch.cuda.nvtx.range_pop()
-            torch.cuda.nvtx.range_push("forward_deepep _forward_shared_experts")
-            shared_output = self._forward_shared_experts(hidden_states)
-            torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("forward_deepep gate"):
+                # router_logits: (num_tokens, n_experts)
+                router_logits = self.gate(hidden_states)
+            with torch.cuda.nvtx.range("forward_deepep _forward_shared_experts"):
+                shared_output = self._forward_shared_experts(hidden_states)
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -348,25 +343,24 @@ class DeepseekV2MoE(nn.Module):
                 correction_bias=self.correction_bias,
             )
         if self.ep_size > 1:
-            torch.cuda.nvtx.range_push("dispatch")
-            # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
-            (
-                hidden_states,
-                topk_idx,
-                topk_weights,
-                reorder_topk_ids,
-                seg_indptr,
-                masked_m,
-                expected_m,
-            ) = self.deepep_dispatcher.dispatch(
+            with torch.cuda.nvtx.range("dispatch"):
+                # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
+                (
+                    hidden_states,
+                    topk_idx,
+                    topk_weights,
+                    reorder_topk_ids,
+                    seg_indptr,
+                    masked_m,
+                    expected_m,
+                ) = self.deepep_dispatcher.dispatch(
                     hidden_states,
                     topk_idx,
                     topk_weights,
                     forward_mode=forward_mode,
                 )
-            torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range("experts_foward")
-        final_hidden_states = self.experts(
+        with torch.cuda.nvtx.range("experts_foward"):
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 reorder_topk_ids=reorder_topk_ids,
                 seg_indptr=seg_indptr,
@@ -374,16 +368,14 @@ class DeepseekV2MoE(nn.Module):
                 expected_m=expected_m,
                 forward_mode=forward_mode,
             )
-        torch.cuda.nvtx.range_pop()
         if self.ep_size > 1:
-            torch.cuda.nvtx.range_push("combine")
-            final_hidden_states = self.deepep_dispatcher.combine(
+            with torch.cuda.nvtx.range("combine"):
+                final_hidden_states = self.deepep_dispatcher.combine(
                     final_hidden_states,
                     topk_idx,
                     topk_weights,
                     forward_mode,
                 )
-            torch.cuda.nvtx.range_pop()
         final_hidden_states *= self.routed_scaling_factor
 
         if shared_output is not None:
@@ -443,7 +435,7 @@ class DeepseekV2Attention(nn.Module):
         self.num_heads = num_heads
         assert num_heads % attn_tp_size == 0
         self.num_local_heads = num_heads // attn_tp_size
-        self.scaling = self.qk_head_dim**-0.5
+        self.scaling = self.qk_head_dim ** -0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -548,37 +540,36 @@ class DeepseekV2Attention(nn.Module):
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
-        torch.cuda.nvtx.range_push("deepseek v2 attention forward")
-        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        latent_cache = latent_cache.unsqueeze(1)
-        kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        kv = self.kv_b_proj(kv_a)[0]
-        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = latent_cache[:, :, self.kv_lora_rank :]
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q[..., self.qk_nope_head_dim :] = q_pe
-        k = torch.empty_like(q)
-        k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
-        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(
-            -1, self.num_local_heads * 256
-        )
-        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(
-            -1, self.num_local_heads * 256
-        )
-        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(
-            -1, self.num_local_heads * 256
-        )
-        attn_output = self.attn(q, k, v, forward_batch)
-        attn_output = attn_output.view(-1, self.num_local_heads, 256)[
-            ..., : self.v_head_dim
-        ].reshape(-1, self.num_local_heads * self.v_head_dim)
-        output, _ = self.o_proj(attn_output)
-        torch.cuda.nvtx.range_pop()
-        return output
+        with torch.cuda.nvtx.range("deepseek v2 attention forward"):
+            _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+            kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            latent_cache = latent_cache.unsqueeze(1)
+            kv_a = self.kv_a_layernorm(kv_a.contiguous())
+            kv = self.kv_b_proj(kv_a)[0]
+            kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_pe = latent_cache[:, :, self.kv_lora_rank:]
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q[..., self.qk_nope_head_dim:] = q_pe
+            k = torch.empty_like(q)
+            k[..., : self.qk_nope_head_dim] = k_nope
+            k[..., self.qk_nope_head_dim:] = k_pe
+            q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(
+                -1, self.num_local_heads * 256
+            )
+            k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(
+                -1, self.num_local_heads * 256
+            )
+            v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(
+                -1, self.num_local_heads * 256
+            )
+            attn_output = self.attn(q, k, v, forward_batch)
+            attn_output = attn_output.view(-1, self.num_local_heads, 256)[
+                          ..., : self.v_head_dim
+                          ].reshape(-1, self.num_local_heads * self.v_head_dim)
+            output, _ = self.o_proj(attn_output)
+            return output
 
 
 class DeepseekV2AttentionMLA(nn.Module):
@@ -617,7 +608,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.num_heads = num_heads
         assert num_heads % attn_tp_size == 0
         self.num_local_heads = num_heads // attn_tp_size
-        self.scaling = self.qk_head_dim**-0.5
+        self.scaling = self.qk_head_dim ** -0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -784,34 +775,40 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        if hidden_states.shape[0] == 0:
-            assert (
-                not self.o_proj.reduce_results
-            ), "short-circuiting allreduce will lead to hangs"
-            return hidden_states
+        with torch.cuda.nvtx.range("attention_mla_forward"):
+            if hidden_states.shape[0] == 0:
+                assert (
+                    not self.o_proj.reduce_results
+                ), "short-circuiting allreduce will lead to hangs"
+                return hidden_states
 
-        torch.cuda.nvtx.range_push("dispatch_attn_method")
-        attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
-        torch.cuda.nvtx.range_pop()
-        if attn_forward_method == AttnForwardMethod.MHA:
-            return self.forward_normal(positions, hidden_states, forward_batch)
-        elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
-            return self.forward_normal_chunked_kv(
-                    positions, hidden_states, forward_batch
-                )
-        else:
-            if _is_hip:
-                if (
-                    self.rocm_fused_decode_mla
-                    and forward_batch.forward_mode.is_decode()
-                ):
-                    return self.forward_absorb_fused_mla_rope(
+            with torch.cuda.nvtx.range("dispatch_attn_method"):
+                attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
+
+            if attn_forward_method == AttnForwardMethod.MHA:
+                with torch.cuda.nvtx.range("forward_normal"):
+                    return self.forward_normal(positions, hidden_states, forward_batch)
+            elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
+                with torch.cuda.nvtx.range("forward_normal_chunked_kv"):
+                    return self.forward_normal_chunked_kv(
                         positions, hidden_states, forward_batch
                     )
-                else:
-                    return self.forward_absorb(positions, hidden_states, forward_batch)
             else:
-                return self.forward_absorb(positions, hidden_states, forward_batch)
+                if _is_hip:
+                    if (
+                        self.rocm_fused_decode_mla
+                        and forward_batch.forward_mode.is_decode()
+                    ):
+                        with torch.cuda.nvtx.range("forward_absorb_fused_mla_rope"):
+                            return self.forward_absorb_fused_mla_rope(
+                                positions, hidden_states, forward_batch
+                            )
+                    else:
+                        with torch.cuda.nvtx.range("forward_absorb"):
+                            return self.forward_absorb(positions, hidden_states, forward_batch)
+                else:
+                    with torch.cuda.nvtx.range("forward_absorb"):
+                        return self.forward_absorb(positions, hidden_states, forward_batch)
 
     def forward_normal(
         self,
@@ -835,16 +832,16 @@ class DeepseekV2AttentionMLA(nn.Module):
         kv = self.kv_b_proj(kv_a)[0]
         kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[..., : self.qk_nope_head_dim]
-        v = kv[..., self.qk_nope_head_dim :]
-        k_pe = latent_cache[:, :, self.kv_lora_rank :]
+        v = kv[..., self.qk_nope_head_dim:]
+        k_pe = latent_cache[:, :, self.kv_lora_rank:]
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q[..., self.qk_nope_head_dim :] = q_pe
+        q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
         k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
+        k[..., self.qk_nope_head_dim:] = k_pe
 
         latent_cache[:, :, : self.kv_lora_rank] = kv_a.unsqueeze(1)
-        latent_cache[:, :, self.kv_lora_rank :] = k_pe
+        latent_cache[:, :, self.kv_lora_rank:] = k_pe
 
         # Save latent cache
         forward_batch.token_to_kv_pool.set_kv_buffer(
@@ -861,81 +858,81 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        q_len = hidden_states.shape[0]
-        q_input = hidden_states.new_empty(
-            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
-        )
+        with torch.cuda.nvtx.range("absorb_forward"):
+            q_len = hidden_states.shape[0]
+            q_input = hidden_states.new_empty(
+                q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+            )
 
-        torch.cuda.nvtx.range_push("q_projection")
-        if self.q_lora_rank is not None:
-            q = self.q_a_proj(hidden_states)[0]
-            q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-        else:
-            q = self.q_proj(hidden_states)[0].view(
-                -1, self.num_local_heads, self.qk_head_dim
-            )
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("w_kc_ops")
-        if self.w_kc.dtype == torch.float8_e4m3fnuz:
-            q_nope_out = torch.bmm(
-                q_nope.to(torch.bfloat16).transpose(0, 1),
-                self.w_kc.to(torch.bfloat16) * self.w_scale,
-            )
-        elif self.w_kc.dtype == torch.float8_e4m3fn:
-            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
-                q_nope.transpose(0, 1),
-            )
-            q_nope_out = bmm_fp8(
-                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
-            )
-        else:
-            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
-        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
-        torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("kv_projection")
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        v_input = latent_cache[..., : self.kv_lora_rank]
-        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
-        k_input = latent_cache.unsqueeze(1)
-        k_input[..., : self.kv_lora_rank] = v_input
-        k_pe = k_input[..., self.kv_lora_rank :]
-        torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("q_projection"):
+                if self.q_lora_rank is not None:
+                    q = self.q_a_proj(hidden_states)[0]
+                    q = self.q_a_layernorm(q)
+                    q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+                else:
+                    q = self.q_proj(hidden_states)[0].view(
+                        -1, self.num_local_heads, self.qk_head_dim
+                    )
+                q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        torch.cuda.nvtx.range_push("rope")
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q_input[..., self.kv_lora_rank :] = q_pe
-        k_input[..., self.kv_lora_rank :] = k_pe
-        torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("w_kc_ops"):
+                if self.w_kc.dtype == torch.float8_e4m3fnuz:
+                    q_nope_out = torch.bmm(
+                        q_nope.to(torch.bfloat16).transpose(0, 1),
+                        self.w_kc.to(torch.bfloat16) * self.w_scale,
+                    )
+                elif self.w_kc.dtype == torch.float8_e4m3fn:
+                    q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                        q_nope.transpose(0, 1),
+                    )
+                    q_nope_out = bmm_fp8(
+                        q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+                    )
+                else:
+                    q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+                q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
-        torch.cuda.nvtx.range_push("attention")
-        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
-        torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("w_vc_ops")
-        if self.w_vc.dtype == torch.float8_e4m3fnuz:
-            attn_bmm_output = torch.bmm(
-                attn_output.to(torch.bfloat16).transpose(0, 1),
-                self.w_vc.to(torch.bfloat16) * self.w_scale,
-            )
-        elif self.w_vc.dtype == torch.float8_e4m3fn:
-            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
-                attn_output.transpose(0, 1), dtype=torch.float8_e4m3fn
-            )
-            attn_bmm_output = bmm_fp8(
-                attn_output_val,
-                self.w_vc,
-                attn_output_scale,
-                self.w_scale,
-                torch.bfloat16,
-            )
-        else:
-            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
-        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-        torch.cuda.nvtx.range_pop()
-        output, _ = self.o_proj(attn_output)
-        return output
+            with torch.cuda.nvtx.range("kv_projection"):
+                latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+                v_input = latent_cache[..., : self.kv_lora_rank]
+                v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+                k_input = latent_cache.unsqueeze(1)
+                k_input[..., : self.kv_lora_rank] = v_input
+                k_pe = k_input[..., self.kv_lora_rank:]
+
+            with torch.cuda.nvtx.range("rope"):
+                q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+                q_input[..., self.kv_lora_rank:] = q_pe
+                k_input[..., self.kv_lora_rank:] = k_pe
+
+            with torch.cuda.nvtx.range("attention"):
+                attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+                attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+            with torch.cuda.nvtx.range("w_vc_ops"):
+                if self.w_vc.dtype == torch.float8_e4m3fnuz:
+                    attn_bmm_output = torch.bmm(
+                        attn_output.to(torch.bfloat16).transpose(0, 1),
+                        self.w_vc.to(torch.bfloat16) * self.w_scale,
+                    )
+                elif self.w_vc.dtype == torch.float8_e4m3fn:
+                    attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                        attn_output.transpose(0, 1),
+                    )
+                    attn_bmm_output = bmm_fp8(
+                        attn_output_val,
+                        self.w_vc,
+                        attn_output_scale,
+                        self.w_scale,
+                        torch.bfloat16,
+                    )
+                else:
+                    attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+                attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+
+            with torch.cuda.nvtx.range("output_projection"):
+                output, _ = self.o_proj(attn_output)
+                return output
 
     def forward_absorb_fused_mla_rope(
         self,
@@ -984,15 +981,15 @@ class DeepseekV2AttentionMLA(nn.Module):
         k_input[..., : self.kv_lora_rank] = v_input
 
         if not enable_rope_fusion:
-            k_pe = k_input[..., self.kv_lora_rank :]
+            k_pe = k_input[..., self.kv_lora_rank:]
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-            q_input[..., self.kv_lora_rank :] = q_pe
-            k_input[..., self.kv_lora_rank :] = k_pe
+            q_input[..., self.kv_lora_rank:] = q_pe
+            k_input[..., self.kv_lora_rank:] = k_pe
             k_pe_output = None
         else:
-            k_pe_output = torch.empty_like(k_input[..., self.kv_lora_rank :])
+            k_pe_output = torch.empty_like(k_input[..., self.kv_lora_rank:])
 
-        q_input[..., self.kv_lora_rank :] = q_pe
+        q_input[..., self.kv_lora_rank:] = q_pe
 
         # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
         # Use Fused ROPE with use_rope=OFF.
@@ -1049,7 +1046,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         )
 
         if enable_rope_fusion:
-            k_input[..., self.kv_lora_rank :] = k_pe_output
+            k_input[..., self.kv_lora_rank:] = k_pe_output
             forward_batch.token_to_kv_pool.set_kv_buffer(
                 self.attn_mqa, forward_batch.out_cache_loc, k_input, None
             )
@@ -1108,7 +1105,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             kv = kv.view(
                 -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            v = kv[..., self.qk_nope_head_dim :]
+            v = kv[..., self.qk_nope_head_dim:]
             k_nope = kv[..., : self.qk_nope_head_dim]
 
             k = torch.empty(
@@ -1121,7 +1118,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 device=v.device,
             )
             k[..., : self.qk_nope_head_dim] = k_nope
-            k[..., self.qk_nope_head_dim :] = k_pe
+            k[..., self.qk_nope_head_dim:] = k_pe
 
             output, lse = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
             lse = torch.transpose(lse, 0, 1).contiguous()
@@ -1161,17 +1158,17 @@ class DeepseekV2AttentionMLA(nn.Module):
         kv = self.kv_b_proj(kv_a)[0]
         kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[..., : self.qk_nope_head_dim]
-        v = kv[..., self.qk_nope_head_dim :]
-        k_pe = latent_cache[:, :, self.kv_lora_rank :]
+        v = kv[..., self.qk_nope_head_dim:]
+        k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        q[..., self.qk_nope_head_dim :] = q_pe
+        q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
         k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
+        k[..., self.qk_nope_head_dim:] = k_pe
 
         latent_cache[:, :, : self.kv_lora_rank] = kv_a.unsqueeze(1)
-        latent_cache[:, :, self.kv_lora_rank :] = k_pe
+        latent_cache[:, :, self.kv_lora_rank:] = k_pe
 
         # Save latent cache
         forward_batch.token_to_kv_pool.set_kv_buffer(
@@ -1310,13 +1307,15 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         if global_server_args_dict["enable_deepep_moe"] and self.is_sparse:
-            return self.forward_deepep(
-                positions, hidden_states, forward_batch, residual
-            )
+            with torch.cuda.nvtx.range("decode_layer_forward_deepep"):
+                return self.forward_deepep(
+                    positions, hidden_states, forward_batch, residual
+                )
         else:
-            return self.forward_normal(
-                positions, hidden_states, forward_batch, residual
-            )
+            with torch.cuda.nvtx.range("decode_layer_forward_normal"):
+                return self.forward_normal(
+                    positions, hidden_states, forward_batch, residual
+                )
 
     def forward_normal(
         self,
@@ -1412,101 +1411,75 @@ class DeepseekV2DecoderLayer(nn.Module):
         if hidden_states.shape[0] == 0:
             residual = hidden_states
         else:
-            torch.cuda.nvtx.range_push("layer_norm")
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
-            torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("layer_norm"):
+                if residual is None:
+                    residual = hidden_states
+                    hidden_states = self.input_layernorm(hidden_states)
+                else:
+                    hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
         if self.attn_tp_size != 1 and self.input_is_scattered:
             hidden_states, local_hidden_states = (
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
                 hidden_states,
             )
-            torch.cuda.nvtx.range_push("tp_all_gather")
-            tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
-            )
-            torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("self_attention")
+            with torch.cuda.nvtx.range("all_gather"):
+                tp_all_gather(
+                    list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                )
+        with torch.cuda.nvtx.range("self_attention"):
             # Self Attention
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-        )
-        torch.cuda.nvtx.range_pop()
-        if self.attn_tp_size != 1 and self.input_is_scattered:
-            hidden_states, local_hidden_states = (
-                forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-                hidden_states,
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
             )
-            torch.cuda.nvtx.range_push("tp_all_gather")
-            tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
-            )
-            torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("self_attention")
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-        )
-        torch.cuda.nvtx.range_pop()
 
         if self.attn_tp_size != 1:
             if self.input_is_scattered:
-                torch.cuda.nvtx.range_push("reduce_scatter")
-                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                hidden_states = tensor_list[self.attn_tp_rank]
-                tp_reduce_scatter(hidden_states, tensor_list)
-                torch.cuda.nvtx.range_pop()
+                with torch.cuda.nvtx.range("reduce_scatter"):
+                    tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                    hidden_states = tensor_list[self.attn_tp_rank]
+                    tp_reduce_scatter(hidden_states, tensor_list)
                 if hidden_states.shape[0] != 0:
-                    torch.cuda.nvtx.range_push("post_attn_norm")
+                    with torch.cuda.nvtx.range("post_attn_norm"):
+                        hidden_states, residual = self.post_attention_layernorm(
+                            hidden_states, residual
+                        )
+            else:
+                if self.attn_tp_rank == 0:
+                    with torch.cuda.nvtx.range("add_residual"):
+                        hidden_states += residual
+                with torch.cuda.nvtx.range("reduce_scatter"):
+                    tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                    hidden_states = tensor_list[self.attn_tp_rank]
+                    tp_reduce_scatter(hidden_states, tensor_list)
+                residual = hidden_states
+                if hidden_states.shape[0] != 0:
+                    with torch.cuda.nvtx.range("post_attn_norm"):
+                        hidden_states = self.post_attention_layernorm(hidden_states)
+        else:
+            if hidden_states.shape[0] != 0:
+                with torch.cuda.nvtx.range("post_attn_norm"):
                     hidden_states, residual = self.post_attention_layernorm(
                         hidden_states, residual
                     )
-                    torch.cuda.nvtx.range_pop()
 
-            else:
-                if self.attn_tp_rank == 0:
-                    hidden_states += residual
-                torch.cuda.nvtx.range_push("reduce_scatter")
-                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                hidden_states = tensor_list[self.attn_tp_rank]
-                tp_reduce_scatter(hidden_states, tensor_list)
-                torch.cuda.nvtx.range_pop()
-                residual = hidden_states
-                if hidden_states.shape[0] != 0:
-                    torch.cuda.nvtx.range_push("post_layer_norm")
-                    hidden_states = self.post_attention_layernorm(hidden_states)
-                    torch.cuda.nvtx.range_pop()
-
-        else:
-            if hidden_states.shape[0] != 0:
-                torch.cuda.nvtx.range_push("post_attn_norm")
-                hidden_states, residual = self.post_attention_layernorm(
-                    hidden_states, residual
-                )
-                torch.cuda.nvtx.range_pop()
-
-
-        torch.cuda.nvtx.range_push("mlp")
-        hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
-        torch.cuda.nvtx.range_pop()
+        with torch.cuda.nvtx.range("mlp"):
+            hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
 
         if self.is_last_layer and self.attn_tp_size != 1:
-            hidden_states += residual
-            residual = None
-            hidden_states, local_hidden_states = (
-                forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-                hidden_states,
-            )
-
-            tp_all_gather(
-                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
-            )
+            with torch.cuda.nvtx.range("last_layer_ops"):
+                hidden_states += residual
+                residual = None
+                hidden_states, local_hidden_states = (
+                    forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
+                    hidden_states,
+                )
+                with torch.cuda.nvtx.range("final_all_gather"):
+                    tp_all_gather(
+                        list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+                    )
 
         return hidden_states, residual
 
@@ -1553,28 +1526,25 @@ class DeepseekV2Model(nn.Module):
     ) -> torch.Tensor:
 
         if input_embeds is None:
-            torch.cuda.nvtx.range_push("input_embeds")
-            hidden_states = self.embed_tokens(input_ids)
-            torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("embedding_tokens"):
+                hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
 
         residual = None
         for i in range(len(self.layers)):
-            torch.cuda.nvtx.range_push(f"decoder_layer_{i}")
-            expert_distribution_recorder.set_current_layer(i)
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions, hidden_states, forward_batch, residual
-            )
-            torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range(f"decoder_layer_{i}"):
+                expert_distribution_recorder.set_current_layer(i)
+                layer = self.layers[i]
+                hidden_states, residual = layer(
+                    positions, hidden_states, forward_batch, residual
+                )
         if not forward_batch.forward_mode.is_idle():
-            torch.cuda.nvtx.range("norm")
-            if residual is None:
-                hidden_states = self.norm(hidden_states)
-            else:
-                hidden_states, _ = self.norm(hidden_states, residual)
-            torch.cuda.nvtx.range_pop()
+            with torch.cuda.nvtx.range("norm"):
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
+                else:
+                    hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -1760,7 +1730,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     self.config.moe_layer_freq,
                 ),
                 desc=f"Cloning {self.n_share_experts_fusion} "
-                "replicas of the shared expert into MoE",
+                     "replicas of the shared expert into MoE",
             ):
                 for num_repeat in range(self.n_share_experts_fusion):
                     for suffix in suffix_list:
@@ -1791,11 +1761,11 @@ class DeepseekV2ForCausalLM(nn.Module):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (
-                self.n_share_experts_fusion
-                if self.n_share_experts_fusion is not None
-                else 0
-            ),
+                        + (
+                            self.n_share_experts_fusion
+                            if self.n_share_experts_fusion is not None
+                            else 0
+                        ),
         )
 
         params_dict = dict(self.named_parameters())
@@ -1878,3 +1848,4 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 
 EntryClass = [DeepseekV2ForCausalLM, DeepseekV3ForCausalLM]
+
