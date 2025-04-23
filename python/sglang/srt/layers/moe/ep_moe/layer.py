@@ -96,19 +96,20 @@ class GroupedGemmRunner(torch.nn.Module):
             )
         else:
             assert weight_column_major == True
-            c = grouped_gemm_triton(
-                a,
-                b,
-                c,
-                batch_size,
-                weight_column_major,
-                seg_indptr,
-                weight_indices,
-                use_fp8_w8a8,
-                scale_a,
-                scale_b,
-                block_shape=block_shape,
-            )
+            with torch.cuda.nvtx.range("GroupedGemmRunner forward grouped_gemm_triton"):
+                c = grouped_gemm_triton(
+                    a,
+                    b,
+                    c,
+                    batch_size,
+                    weight_column_major,
+                    seg_indptr,
+                    weight_indices,
+                    use_fp8_w8a8,
+                    scale_a,
+                    scale_b,
+                    block_shape=block_shape,
+                )
         return c
 
 
@@ -845,9 +846,11 @@ class DeepEPMoE(EPMoE):
     ):
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
         if resolved_deepep_mode == DeepEPMode.normal:
-            return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
+            with torch.cuda.nvtx.range("deepep moe normal"):
+                return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:
-            return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
+            with torch.cuda.nvtx.range("deepep moe low latency"):
+                return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
 
