@@ -430,7 +430,7 @@ class DeepseekV2MoE(nn.Module):
             )
         if self.ep_size > 1:
             # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
-            logger.debug(f'[forward_deepep] {hidden_states.shape=}')
+            logger.debug(f'[forward_deepep] {hidden_states.shape=}, forward_mode: {forward_mode}')
             (
                 hidden_states,
                 topk_idx,
@@ -1400,7 +1400,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             return hidden_states, residual, extra_args if extra_args else {}
 
         logger.debug(
-            f"layer[{self.layer_id}] in forward_decode_attn_1, hidden_states.shape:{hidden_states.shape}, extra_args: {extra_args.keys()}")
+            f"layer[{self.layer_id}] in forward_decode_attn_1, hidden_states.shape:{hidden_states.shape}, residual: {residual.shape}, extra_args: {extra_args.keys()}")
         # get q_input, k_input and v_input from extra_args
         assert (
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY in extra_args
@@ -1415,9 +1415,22 @@ class DeepseekV2DecoderLayer(nn.Module):
         k_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
         v_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
 
+        def print_gpu_mem():
+            # 检查 sglang 是否使用了 GPU
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                free_memory = torch.cuda.get_device_properties(device).total_memory - torch.cuda.memory_allocated(
+                    device)
+                logger.debug(f"layer[{self.layer_id}], left gpu memory: {free_memory / 1024 ** 2:.2f} MB")
+
+        print_gpu_mem()
+
+        logger.debug(
+            f"layer[{self.layer_id}], before self.self_attn.attn_mqa, q_input: {q_input.shape}, k_input: {k_input.shape}, v_input: {v_input.shape}")
         # core attention calculation
         attn_output = self.self_attn.attn_mqa(q_input, k_input, v_input, forward_batch)
         attn_output = attn_output.view(-1, self.self_attn.num_local_heads, self.self_attn.kv_lora_rank)
+        logger.debug(f"layer[{self.layer_id}], after self.self_attn.attn_mqa")
 
         # del q_input,k_inpu,v_input
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
@@ -1447,19 +1460,19 @@ class DeepseekV2DecoderLayer(nn.Module):
         # output projection
         logger.debug(f"layer[{self.layer_id}] o_proj before, attn_output.shape: {attn_output.shape}")
         hidden_states, _ = self.self_attn.o_proj(attn_output)
-        logger.debug(f"layer[{self.layer_id}] o_proj after, attn_output.shape: {hidden_states.shape}")
+        logger.debug(f"layer[{self.layer_id}] o_proj after, hidden_states.shape: {hidden_states.shape}")
         # post attention layernorm
         if self.attn_tp_size != 1:
             if self.input_is_scattered:
                 tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                logger.debug(
-                    f"layer[{self.layer_id}] after tensor_split & input_is_scatter, hidden_states.shape:{hidden_states.shape}")
+                # logger.debug(
+                #    f"layer[{self.layer_id}] after tensor_split & input_is_scatter, hidden_states.shape:{hidden_states.shape}")
                 hidden_states = tensor_list[self.attn_tp_rank]
-                logger.debug(
-                    f"layer[{self.layer_id}] after tensor_list & input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}, tensor_list: {[t.shape for t in tensor_list]}")
+                # logger.debug(
+                #    f"layer[{self.layer_id}] after tensor_list & input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}, tensor_list: {[t.shape for t in tensor_list]}")
                 tp_reduce_scatter(hidden_states, tensor_list)
-                logger.debug(
-                    f"layer[{self.layer_id}] after tp_reduce_scatter & input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                # logger.debug(
+                #    f"layer[{self.layer_id}] after tp_reduce_scatter & input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 if hidden_states.shape[0] != 0:
                     hidden_states, residual = self.post_attention_layernorm(
                         hidden_states, residual
@@ -1468,14 +1481,14 @@ class DeepseekV2DecoderLayer(nn.Module):
                 if self.attn_tp_rank == 0:
                     hidden_states += residual
                 tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                logger.debug(
-                    f"layer[{self.layer_id}] after tensor_split & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                # logger.debug(
+                #    f"layer[{self.layer_id}] after tensor_split & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 hidden_states = tensor_list[self.attn_tp_rank]
-                logger.debug(
-                    f"layer[{self.layer_id}] after tensor_list & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                # logger.debug(
+                #    f"layer[{self.layer_id}] after tensor_list & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 tp_reduce_scatter(hidden_states, tensor_list)
-                logger.debug(
-                    f"layer[{self.layer_id}] after tp_reduce_scatter & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
+                # logger.debug(
+                #    f"layer[{self.layer_id}] after tp_reduce_scatter & not input_is_scatter, hidden_states.shape:{hidden_states.shape}, tensor_list: {len(tensor_list)}")
                 residual = hidden_states
                 if hidden_states.shape[0] != 0:
                     hidden_states = self.post_attention_layernorm(hidden_states)
@@ -1547,7 +1560,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         masked_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY]
         expected_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY]
 
-        self.mlp.experts.deepep_mode = DeepEPMode.normal if forward_batch.forward_mode.is_extend() else DeepEPMode.low_latency
+        # self.mlp.experts.deepep_mode = DeepEPMode.normal if forward_batch.forward_mode.is_extend() else DeepEPMode.low_latency
         final_hidden_states = (
             self.mlp.experts(
                 hidden_states=hidden_states,
@@ -2067,6 +2080,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual
                 )
+        logger.debug(
+            f"layer[{self.layer_id}], forward_mode[{forward_batch.forward_mode}], hidden_states: {hidden_states.shape}")
         hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
 
         if self.is_last_layer and self.attn_tp_size != 1:
@@ -2081,6 +2096,13 @@ class DeepseekV2DecoderLayer(nn.Module):
             )
 
         return hidden_states, residual, None
+
+
+def not_match_mode(fwd_mode: ForwardMode, role: str) -> bool:
+    if fwd_mode.is_extend() and role == "decode":
+        return True
+    if fwd_mode.is_decode() and role == "prefill":
+        return True
 
 
 class DeepseekV2Model(nn.Module):
@@ -2141,7 +2163,8 @@ class DeepseekV2Model(nn.Module):
         if (
             forward_batch.batch_size == 1
             or not global_server_args_dict["enable_micro_batch_overlap"]
-            # or forward_batch.forward_mode.is_extend()
+            or forward_batch.forward_mode.is_extend()
+            # or not_match_mode(forward_batch.forward_mode,global_server_args_dict["role"])
         ):
             for i in range(len(self.layers)):
                 logger.debug(
@@ -2505,12 +2528,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 LAUNCH_DISPATCH_LL_STEP: \
+            if True or get_attention_tp_rank() in [0, 3, 4]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 LAUNCH_DISPATCH_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: shared_expert_output
             mb0_before_dispatch_hidden_states = mb0_extra_args.get(
@@ -2527,12 +2551,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.SHARED_EXPERTS,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 SHARED_EXPERTS: \
+            if True or get_attention_tp_rank() in [0, 3, 4]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 SHARED_EXPERTS: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
 
             # mb1: attn_0
@@ -2545,13 +2570,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
                 mb1_extra_args,
             )
-            # 不是所有 rank 都跑完了这个
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 DECODE_ATTN_0_STEP: \
+            if True or get_attention_tp_rank() in [0, 3, 4]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 DECODE_ATTN_0_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: wait_dispatch
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
@@ -2563,12 +2588,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 WAIT_DISPATCH_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 WAIT_DISPATCH_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states[0].shape if len(mb0_hidden_states) > 1 else mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: mlp
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
@@ -2580,12 +2606,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.MLP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 MLP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 MLP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: launch_combine
             mb0_hidden_states, _, mb0_extra_args = self.forward_layer(
@@ -2597,12 +2624,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 LAUNCH_COMBINE_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 LAUNCH_COMBINE_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: attn_1
             mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
@@ -2614,12 +2642,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 DECODE_ATTN_1_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 DECODE_ATTN_1_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: wait_combine
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
@@ -2631,12 +2660,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 WAIT_COMBINE_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 WAIT_COMBINE_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
 
             # mb0: add shared_expert_output
@@ -2657,12 +2687,13 @@ class DeepseekV2Model(nn.Module):
                 del mb0_extra_args[
                     MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
                 ]
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 add shared_expert_output: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 add shared_expert_output: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             l0 += 1
 
@@ -2676,12 +2707,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 LAUNCH_DISPATCH_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 LAUNCH_DISPATCH_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: shared_expert
             mb1_before_dispatch_hidden_states = mb1_extra_args.get(
@@ -2697,12 +2729,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.SHARED_EXPERTS,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 SHARED_EXPERTS: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 SHARED_EXPERTS: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
 
             # mb0: attn_0
@@ -2715,15 +2748,16 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 DECODE_ATTN_0_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 DECODE_ATTN_0_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: wait_launch
-            mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
                 l1,
                 mb1_positions,
                 mb1_hidden_states,
@@ -2732,15 +2766,16 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 WAIT_DISPATCH_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 WAIT_DISPATCH_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states[0].shape if len(mb1_hidden_states) > 1 else mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: mlp
-            mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
                 l1,
                 mb1_positions,
                 mb1_hidden_states,
@@ -2749,12 +2784,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.MLP,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 MLP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 MLP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: launch combine
             mb1_hidden_states, _, mb1_extra_args = self.forward_layer(
@@ -2766,12 +2802,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 LAUNCH_COMBINE_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 LAUNCH_COMBINE_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb0: attn_1
             mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
@@ -2783,12 +2820,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
                 mb0_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb0 DECODE_ATTN_1_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb0 DECODE_ATTN_1_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: wait_combine
             mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
@@ -2800,12 +2838,13 @@ class DeepseekV2Model(nn.Module):
                 MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
                 mb1_extra_args,
             )
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 WAIT_COMBINE_LL_STEP: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 WAIT_COMBINE_LL_STEP: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             # mb1: add shared_expert_output
             if (
@@ -2825,12 +2864,13 @@ class DeepseekV2Model(nn.Module):
                 del mb1_extra_args[
                     MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
                 ]
-            if True or get_attention_tp_rank() in [0, 4]:
-                logger.debug(f" \
-                             layer_id[{i}], l0[{l0}], l1[{l1}], after mb1 add shared_expert_output: \
+            if True or get_attention_tp_rank() in [0]:
+                logger.debug(f"layer[{i}], l0[{l0}], l1[{l1}], after mb1 add shared_expert_output: \
                              mb0_hidden_states.shape: {mb0_hidden_states.shape}, \
+                             mb0_residual: {mb0_residual.shape} \
                              mb0_extra_args: {mb0_extra_args.keys()} \
                              mb1_hidden_states.shape: {mb1_hidden_states.shape}, \
+                             mb1_residual: {mb1_residual.shape} \
                              mb1_extra_args: {mb1_extra_args.keys()}")
             l1 += 1
 
