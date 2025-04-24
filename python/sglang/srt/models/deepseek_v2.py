@@ -16,24 +16,45 @@
 # https://github.com/vllm-project/vllm/blob/fb6af8bc086328ca6659e72d11ffd4309ce4de22/vllm/model_executor/models/deepseek_v2.py
 """Inference-only DeepseekV2 model."""
 
-import logging
-import os
-from enum import IntEnum, auto
-from typing import Any, Dict, Iterable, Optional, Tuple
-
-import torch
-import nvtx
-import torch.nn.functional as F
-from torch import nn
-from tqdm import tqdm
-from transformers import PretrainedConfig
-
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_world_size,
-    parallel_state,
-    tensor_model_parallel_all_reduce,
+from sglang.srt.utils import DeepEPMode, add_prefix, is_cuda, is_hip
+from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.managers.expert_distribution import ExpertDistributionRecorder
+from sglang.srt.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
 )
-from sglang.srt.layers.activation import SiluAndMul
+from sglang.srt.layers.rotary_embedding import get_rope, get_rope_wrapper
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.quantization.int8_utils import (
+    block_dequant as int8_block_dequant,
+)
+from sglang.srt.layers.quantization.fp8_utils import (
+    block_quant_to_tensor_quant,
+    channel_quant_to_tensor_quant,
+    normalize_e4m3fn_to_e4m3fnuz,
+)
+from sglang.srt.layers.quantization.fp8_kernel import per_tensor_quant_mla_fp8
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.moe.topk import select_experts
+from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
+from sglang.srt.layers.moe.ep_moe.token_dispatcher import (
+    DeepEPDispatcher,
+    DeepEPDispatcherImplLowLatency,
+    DeepEPDispatcherImplNormal,
+)
+from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
+from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, EPMoE
+from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.distributed.parallel_state import get_world_group
 from sglang.srt.layers.dp_attention import (
     dp_gather_partial,
     dp_scatter,
@@ -44,40 +65,25 @@ from sglang.srt.layers.dp_attention import (
     tp_reduce_scatter,
     tp_all_reduce,
 )
-from sglang.srt.distributed.parallel_state import get_world_group
-from sglang.srt.layers.layernorm import RMSNorm
-from sglang.srt.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
+from sglang.srt.layers.activation import SiluAndMul
+from sglang.srt.distributed import (
+    get_tensor_model_parallel_world_size,
+    parallel_state,
+    tensor_model_parallel_all_reduce,
+    get_tensor_model_parallel_rank
 )
-from sglang.srt.layers.logits_processor import LogitsProcessor
-from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, EPMoE
-from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
-from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
-from sglang.srt.layers.moe.topk import select_experts
-from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.fp8_kernel import per_tensor_quant_mla_fp8
-from sglang.srt.layers.quantization.fp8_utils import (
-    block_quant_to_tensor_quant,
-    channel_quant_to_tensor_quant,
-    normalize_e4m3fn_to_e4m3fnuz,
-)
-from sglang.srt.layers.quantization.int8_utils import (
-    block_dequant as int8_block_dequant,
-)
-from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import get_rope, get_rope_wrapper
-from sglang.srt.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
-from sglang.srt.managers.expert_distribution import ExpertDistributionRecorder
-from sglang.srt.managers.schedule_batch import global_server_args_dict
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import DeepEPMode, add_prefix, is_cuda, is_hip
+from transformers import PretrainedConfig
+from tqdm import tqdm
+from torch import nn
+import torch.nn.functional as F
+import nvtx
+import torch
+from typing import Any, Dict, Iterable, Optional, Tuple
+from enum import Enum
+from copy import copy, deepcopy
+from enum import IntEnum, auto
+import logging
+import os
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -96,7 +102,6 @@ expert_distribution_recorder = ExpertDistributionRecorder()
 
 logger = logging.getLogger(__name__)
 
-
 class AttnForwardMethod(IntEnum):
     # Use multi-head attention
     MHA = auto()
@@ -107,6 +112,50 @@ class AttnForwardMethod(IntEnum):
     # Use multi-head attention, but with KV cache chunked.
     # This method can avoid OOM when prefix lengths are long.
     MHA_CHUNKED_KV = auto()
+
+class MicroBatchOverlapStep(Enum):
+    SHARED_EXPERTS = "shared_experts"
+    MLP = "mlp"
+    MOE_GATE = "moe_gate"
+    # prefill attn
+    PREFILL_ATTN = "prefill_attn"
+    # decode attn
+    DECODE_ATTN_0_STEP = "decode_attn_0"
+    DECODE_ATTN_1_STEP = "decode_attn_1"
+    # normal deepep
+    WAIT_DISPATCH_NORMAL = "wait_dispatch_normal"
+    WAIT_COMBINE_NORMAL = "wait_combine_normal"
+    LAUNCH_DISPATCH_NORMAL = "launch_dispatch_normal"
+    LAUNCH_COMBINE_NORMAL = "launch_combine_normal"
+    # low latency deepep
+    LAUNCH_DISPATCH_LL_STEP = "launch_dispatch_ll"
+    WAIT_DISPATCH_LL_STEP = "wait_dispatch_ll"
+    LAUNCH_COMBINE_LL_STEP = "launch_combine_ll"
+    WAIT_COMBINE_LL_STEP = "wait_combine_ll"
+
+
+class MicroBatchOverlapExtraArgs(Enum):
+    # common extra_args keys
+    EXTRA_ARGS_TOPK_IDX_KEY = "topk_idx"
+    EXTRA_ARGS_TOPK_WEIGHTS_KEY = "topk_weights"
+    EXTRA_ARGS_MICRO_BATCH_IDX_KEY = "micro_batch_idx"
+    EXTRA_ARGS_SHARED_EXPERT_OUTPUT_KEY = "shared_experts_output"
+    EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY = "before_dispatch_hidden_states"
+
+    EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY = "last_layer_shared_experts_output"
+    EXTRA_ARGS_ATTN_0_Q_INPUT_KEY = "attn_0_q_input"
+    EXTRA_ARGS_ATTN_0_K_INPUT_KEY = "attn_0_k_input"
+    EXTRA_ARGS_ATTN_0_V_INPUT_KEY = "attn_0_v_input"
+    EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY = "attn_1_topk_weights"
+    EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY = "attn_1_topk_idx"
+
+    # get reorder_topk_ids, seg_indptr, masked_m, expected_m from extra_args
+    EXTRA_ARGS_REORDER_TOPK_IDS_KEY = "reorder_topk_ids"
+    EXTRA_ARGS_SEG_INDPTR_KEY = "seg_indptr"
+    EXTRA_ARGS_MASKED_M_KEY = "masked_m"
+    EXTRA_ARGS_EXPECTED_M_KEY = "expected_m"
+    EXTRA_ARGS_EVENT_KEY = "event"
+    EXTRA_ARGS_HOOK_KEY = "hook"
 
 
 class DeepseekV2MLP(nn.Module):
@@ -181,7 +230,6 @@ class MoEGate(nn.Module):
             logits = F.linear(hidden_states, self.weight, None)
             return logits
 
-
 class DeepseekV2MoE(nn.Module):
 
     @nvtx.annotate(color="blue", category="deepseek_v2_moe")
@@ -223,7 +271,8 @@ class DeepseekV2MoE(nn.Module):
 
         self.experts = MoEImpl(
             num_experts=config.n_routed_experts + self.n_share_experts_fusion,
-            top_k=config.num_experts_per_tok + min(self.n_share_experts_fusion, 1),
+            top_k=config.num_experts_per_tok +
+                min(self.n_share_experts_fusion, 1),
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
@@ -234,7 +283,8 @@ class DeepseekV2MoE(nn.Module):
             correction_bias=self.gate.e_score_correction_bias,
             prefix=add_prefix("experts", prefix),
             **(
-                dict(deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
+                dict(
+                    deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
                 if global_server_args_dict["enable_deepep_moe"]
                 else {}
             ),
@@ -278,6 +328,33 @@ class DeepseekV2MoE(nn.Module):
                 else None
             )
 
+            if global_server_args_dict["enable_micro_batch_overlap"]:
+                self.deepep_dispatchers = {
+                    0: DeepEPDispatcher(
+                        group=parallel_state.get_tp_group().device_group,
+                        router_topk=self.top_k,
+                        permute_fusion=True,
+                        num_experts=config.n_routed_experts,
+                        num_local_experts=config.n_routed_experts // self.tp_size,
+                        hidden_size=config.hidden_size,
+                        params_dtype=config.torch_dtype,
+                        deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
+                        async_finish=True,  # TODO
+                        return_recv_hook=True,
+                    ),
+                    1: DeepEPDispatcher(
+                        group=parallel_state.get_tp_group().device_group,
+                        router_topk=self.top_k,
+                        permute_fusion=True,
+                        num_experts=config.n_routed_experts,
+                        num_local_experts=config.n_routed_experts // self.tp_size,
+                        hidden_size=config.hidden_size,
+                        params_dtype=config.torch_dtype,
+                        deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
+                        async_finish=True,  # TODO
+                        return_recv_hook=True,
+                    ),
+                }
             self.deepep_dispatcher = DeepEPDispatcher(
                 group=parallel_state.get_tp_group().device_group,
                 router_topk=self.top_k,
@@ -306,7 +383,8 @@ class DeepseekV2MoE(nn.Module):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
             final_hidden_states = (
-                self.experts(hidden_states=hidden_states, router_logits=router_logits)
+                self.experts(hidden_states=hidden_states,
+                             router_logits=router_logits)
                 * self.routed_scaling_factor
             )
             if shared_output is not None:
@@ -571,7 +649,6 @@ class DeepseekV2Attention(nn.Module):
                             ].reshape(-1, self.num_local_heads * self.v_head_dim)
             output, _ = self.o_proj(attn_output)
             return output
-
 
 class DeepseekV2AttentionMLA(nn.Module):
 
@@ -1229,6 +1306,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.dp_size = get_attention_dp_size()
         self.attn_tp_size = get_attention_tp_size()
         self.attn_tp_rank = get_attention_tp_rank()
+        self.num_local_heads = config.num_attention_heads
 
         if not global_server_args_dict["disable_mla"]:
             self.self_attn = DeepseekV2AttentionMLA(
@@ -1272,6 +1350,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             )
 
         if is_nextn or is_sparse_layer(layer_id):
+            # note: discussion, old one DeepseekV2MoE
             self.mlp = DeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
@@ -1301,17 +1380,646 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+    def forward_shared_experts(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        shared_output = None
+        if (
+            forward_batch.forward_mode is not None
+            and not forward_batch.forward_mode.is_idle()
+            and hidden_states.shape[0] > 0
+        ):
+            if self.mlp.n_shared_experts is not None:
+                shared_output = self.mlp.shared_experts(hidden_states)
+        extra_args.update(
+            {
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_SHARED_EXPERT_OUTPUT_KEY: shared_output,
+            }
+        )
+        return hidden_states, residual, extra_args
+
+    def forward_moe_gate(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        topk_idx = torch.full(
+            (0, self.mlp.top_k), -1, dtype=torch.int, device=hidden_states.device
+        )
+        topk_weights = torch.empty(
+            (0, self.mlp.top_k), dtype=torch.float32, device=hidden_states.device
+        )
+        if (
+            forward_batch.forward_mode is not None
+            and not forward_batch.forward_mode.is_idle()
+            and hidden_states.shape[0] > 0
+        ):
+            # router_logits: (num_tokens, n_experts)
+            router_logits = self.mlp.gate(hidden_states)
+            topk_weights, topk_idx = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=self.mlp.top_k,
+                use_grouped_topk=True,
+                renormalize=self.mlp.renormalize,
+                topk_group=self.mlp.topk_group,
+                num_expert_group=self.mlp.num_expert_group,
+                correction_bias=self.mlp.correction_bias,
+            )
+        extra_args.update(
+            {
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY: topk_idx,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY: topk_weights,
+            }
+        )
+        return hidden_states, residual, extra_args
+
+    def forward_decode_attn_0(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        """
+        note:
+        1. attn_0: add last layer's shared_experts_output
+        2. attn_0: MLA down/up projection
+        3. attn_0: only support absort implementation
+        """
+        # calculate residual
+        if hidden_states.shape[0] == 0:
+            residual = hidden_states
+        else:
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if hidden_states.shape[0] == 0:
+            assert (
+                not self.o_proj.reduce_results
+            ), "short-circuiting allreduce will lead to hangs"
+            return hidden_states, residual, extra_args if extra_args else {}
+
+        # cuda(not hip) && absorb
+        q_len = hidden_states.shape[0]
+        q_input = hidden_states.new_empty(
+            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+        )
+        if self.q_lora_rank is not None:
+            q = self.q_a_proj(hidden_states)[0]
+            q = self.q_a_layernorm(q)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        if self.w_kc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            q_nope_out = torch.bmm(
+                q_nope.to(torch.bfloat16).transpose(0, 1),  # [bs,128,128/attn_tp_size]
+                self.w_kc.to(torch.bfloat16) * self.w_scale,  #
+            )
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            q_nope_val, q_nope_scale = input_to_float8(
+                q_nope.transpose(0, 1), torch.float8_e4m3fn
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        v_input = latent_cache[..., : self.kv_lora_rank]
+        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        k_input = latent_cache.unsqueeze(1)
+        k_input[..., : self.kv_lora_rank] = v_input
+        k_pe = k_input[..., self.kv_lora_rank:]
+
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        q_input[..., self.kv_lora_rank:] = q_pe
+        k_input[..., self.kv_lora_rank:] = k_pe
+
+        # update extra_args
+        extra_args.update(
+            {
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY: q_input,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY: k_input,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY: v_input,
+            }
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_decode_attn_1(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        """
+        note:
+        1. core attention
+        2. output projection
+        3. MoE Gate routing
+
+        """
+        # get q_input, k_input and v_input from extra_args
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY} not in extra_args:{extra_args}"
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY} not in extra_args:{extra_args}"
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY} not in extra_args:{extra_args}"
+        q_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
+        k_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
+        v_input = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
+
+        # core attention calculation
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        # del q_input,k_inpu,v_input
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_Q_INPUT_KEY]
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_K_INPUT_KEY]
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_0_V_INPUT_KEY]
+
+        if self.w_vc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                self.w_vc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = input_to_float8(
+                attn_output.transpose(0, 1), torch.float8_e4m3fn
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+        else:
+            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        # output projection
+        output, _ = self.o_proj(attn_output)
+        # post attention layernorm
+        if output.shape[0] != 0:
+            output, residual = self.post_attention_layernorm(output, residual)
+
+        # MoE Gate routing
+        topk_idx = torch.full(
+            (0, self.top_k), -1, dtype=torch.int, device=output.device
+        )
+        topk_weights = torch.empty(
+            (0, self.top_k), dtype=torch.float32, device=output.device
+        )
+        if hidden_states.shape[0] > 0:
+            # router_logits: (num_tokens, n_experts)
+            router_logits = self.mlp.gate(output)
+            topk_weights, topk_idx = select_experts(
+                hidden_states=output,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=True,
+                renormalize=self.renormalize,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                correction_bias=self.correction_bias,
+            )
+
+        # update extra_args
+        extra_args.update(
+            {
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY: topk_weights,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY: topk_idx,
+            }
+        )
+
+        return output, residual, extra_args
+
+    def forward_mlp(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        # get reorder_topk_ids, seg_indptr, masked_m, expected_m from extra_args
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY} not in extra_args:{extra_args} "
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY} not in extra_args:{extra_args}"
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY} not in extra_args:{extra_args}"
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY} not in extra_args:{extra_args}"
+
+        reorder_topk_ids = extra_args[
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY
+        ]
+        seg_indptr = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY]
+        masked_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY]
+        expected_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY]
+
+        final_hidden_states = (
+            self.mlp.experts(
+                hidden_states=hidden_states,
+                reorder_topk_ids=reorder_topk_ids,
+                seg_indptr=seg_indptr,
+                masked_m=masked_m,
+                expected_m=expected_m,
+                forward_mode=forward_batch.forward_mode,
+            )
+            * self.mlp.routed_scaling_factor
+        )
+
+        # remove used args
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY]
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY]
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY]
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY]
+
+        return final_hidden_states, residual, extra_args
+
+    def forward_decode_launch_dispatch_ll(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        # get topk_ids and topk_weights
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY} not in extra_args:{extra_args} "
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
+
+        topk_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY]
+        topk_weights = extra_args[
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY
+        ]
+
+        dispatched_hidden_states = self.mlp.deepep_dispatcher.launch_dispatch(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            self.mlp.num_experts,
+            forward_mode=forward_batch.forward_mode,
+        )
+
+        # update extra_args
+        extra_args.update(
+            {
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY: topk_weights,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY: topk_idx,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY: hidden_states,
+            }
+        )
+
+        return dispatched_hidden_states, residual, extra_args
+
+    def forward_decode_wait_dispatch_ll(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        (
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            reorder_topk_ids,
+            seg_indptr,
+            masked_m,
+            expected_m,
+        ) = self.mlp.deepep_dispatcher.wait_dispatch(forward_batch.forward_mode)
+
+        # update extra_args
+        extra_args.update(
+            {
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY: reorder_topk_ids,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY: seg_indptr,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY: masked_m,
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY: expected_m,
+            }
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_decode_launch_combine_ll(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY} not in extra_args:{extra_args} "
+        assert (
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY in extra_args
+        ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
+
+        topk_idx = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_IDX_KEY]
+        topk_weights = extra_args[
+            MicroBatchOverlapExtraArgs.EXTRA_ARGS_ATTN_1_TOPK_WEIGHTS_KEY
+        ]
+
+        self.mlp.deepep_dispatcher.launch_combine(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            forward_mode=forward_batch.forward_mode,
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_decode_wait_combine_ll(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        hidden_states = self.mlp.deepep_dispatcher.wait_combine(
+            forward_batch.forward_mode
+        )
+
+        return hidden_states, residual, extra_args
+
+    def forward_prefill_self_attn(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if hidden_states.shape[0] == 0:
+            residual = hidden_states
+        else:
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if self.attn_tp_size != 1 and self.input_is_scattered:
+            hidden_states, local_hidden_states = (
+                forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
+                hidden_states,
+            )
+            tp_all_gather(
+                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+            )
+        # Self Attention
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+        )
+        # add residual
+        if self.attn_tp_size != 1:
+            if self.input_is_scattered:
+                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                hidden_states = tensor_list[self.attn_tp_rank]
+                tp_reduce_scatter(hidden_states, tensor_list)
+                if hidden_states.shape[0] != 0:
+                    hidden_states, residual = self.post_attention_layernorm(
+                        hidden_states, residual
+                    )
+            else:
+                if self.attn_tp_rank == 0:
+                    hidden_states += residual
+                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                hidden_states = tensor_list[self.attn_tp_rank]
+                tp_reduce_scatter(hidden_states, tensor_list)
+                residual = hidden_states
+                if hidden_states.shape[0] != 0:
+                    hidden_states = self.post_attention_layernorm(hidden_states)
+        else:
+            if hidden_states.shape[0] != 0:
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual
+                )
+        return hidden_states, residual, extra_args
+
+    def forward_launch_dispatch_normal(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if self.mlp.ep_size > 1:
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY in extra_args
+            ), f"[forward_launch_dispatch_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY} not in extra_args:{extra_args} "
+
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY in extra_args
+            ), f"[forward_launch_dispatch_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
+
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY in extra_args
+            ), f"[forward_launch_dispatch_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY} not in extra_args:{extra_args} "
+
+            # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
+            micro_batch_idx = extra_args[
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
+            ]
+            self.mlp.deepep_dispatchers[micro_batch_idx].launch_dispatch(
+                hidden_states,
+                extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY),
+                extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY),
+                self.mlp.num_experts,
+                forward_mode=forward_batch.forward_mode,
+            )
+
+        return hidden_states, residual, extra_args
+
+    def forward_wait_dispatch_normal(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if self.mlp.ep_size > 1:
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY in extra_args
+            ), f"[forward_launch_dispatch_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY} not in extra_args:{extra_args} "
+            micro_batch_idx = extra_args[
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
+            ]
+            (
+                after_dispatch_hidden_states,
+                topk_idx,
+                topk_weights,
+                reorder_topk_ids,
+                seg_indptr,
+                masked_m,
+                expected_m,
+            ) = self.mlp.deepep_dispatchers[micro_batch_idx].wait_dispatch(
+                forward_batch.forward_mode
+            )
+
+            # update extra_args
+            extra_args.update(
+                {
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY: topk_idx,
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY: topk_weights,
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY: reorder_topk_ids,
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY: seg_indptr,
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY: masked_m,
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY: expected_m,
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY: hidden_states,
+                }
+            )
+        return after_dispatch_hidden_states, residual, extra_args
+
+    def forward_launch_combine_normal(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if self.mlp.ep_size > 1:
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY in extra_args
+            ), f"[forward_launch_combine_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY} not in extra_args:{extra_args} "
+
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY in extra_args
+            ), f"[forward_launch_combine_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY} not in extra_args:{extra_args} "
+
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY in extra_args
+            ), f"[forward_launch_dispatch_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY} not in extra_args:{extra_args} "
+
+            micro_batch_idx = extra_args[
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
+            ]
+            self.mlp.deepep_dispatchers[micro_batch_idx].launch_combine(
+                hidden_states,
+                extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY),
+                extra_args.get(MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY),
+                forward_mode=forward_batch.forward_mode,
+            )
+        # every layer should remove topk_idx and topk_weights after combine
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY]
+        del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY]
+        return hidden_states, residual, extra_args
+
+    def forward_wait_combine_normal(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if self.mlp.ep_size > 1:
+            assert (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY in extra_args
+            ), f"[forward_launch_dispatch_normal] layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY} not in extra_args:{extra_args} "
+
+            micro_batch_idx = extra_args[
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
+            ]
+            hidden_states = self.mlp.deepep_dispatchers[micro_batch_idx].wait_combine(
+                forward_batch.forward_mode
+            )
+        return hidden_states, residual, extra_args
+
+    def forward_step(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        step: Optional[MicroBatchOverlapStep] = None,
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        step_to_func = {
+            MicroBatchOverlapStep.MOE_GATE: self.forward_moe_gate,
+            MicroBatchOverlapStep.SHARED_EXPERTS: self.forward_shared_experts,
+            MicroBatchOverlapStep.MLP: self.forward_mlp,
+            # prefill attn
+            MicroBatchOverlapStep.PREFILL_ATTN: self.forward_prefill_self_attn,
+            # decode attn
+            MicroBatchOverlapStep.DECODE_ATTN_0_STEP: self.forward_decode_attn_0,
+            MicroBatchOverlapStep.DECODE_ATTN_1_STEP: self.forward_decode_attn_1,
+            # normal deepep
+            MicroBatchOverlapStep.LAUNCH_DISPATCH_NORMAL: self.forward_launch_dispatch_normal,
+            MicroBatchOverlapStep.WAIT_DISPATCH_NORMAL: self.forward_wait_dispatch_normal,
+            MicroBatchOverlapStep.LAUNCH_COMBINE_NORMAL: self.forward_launch_combine_normal,
+            MicroBatchOverlapStep.WAIT_COMBINE_NORMAL: self.forward_wait_combine_normal,
+            # low latency deepep
+            MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP: self.forward_decode_launch_dispatch_ll,
+            MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP: self.forward_decode_wait_dispatch_ll,
+            MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP: self.forward_decode_launch_combine_ll,
+            MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP: self.forward_decode_wait_combine_ll,
+        }
+        if step not in step_to_func:
+            raise f"{step} func does not implemented"
+        return step_to_func[step](
+            positions, hidden_states, forward_batch, residual, extra_args
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+        step: Optional[str] = None,
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
         with nvtx.annotate(message="forward", color="lightcoral", category="deepseek_v2_decoder_layer"):
             if global_server_args_dict["enable_deepep_moe"] and self.is_sparse:
                 return self.forward_deepep(
-                    positions, hidden_states, forward_batch, residual
+                    positions, hidden_states, forward_batch, residual, step, extra_args
                 )
             else:
                 return self.forward_normal(
@@ -1393,7 +2101,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 )
                 dp_scatter(hidden_states, global_hidden_states, forward_batch)
 
-            return hidden_states, residual
+            return hidden_states, residual, None
 
     def forward_deepep(
         self,
@@ -1401,7 +2109,14 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+        step: Optional[str] = None,
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if step:
+            return self.forward_step(
+                positions, hidden_states, forward_batch, residual, step, extra_args
+            )
+
         with nvtx.annotate(message="forward_deepep", color="lightcoral", category="deepseek_v2_decoder_layer"):
             if hidden_states.shape[0] == 0:
                 residual = hidden_states
@@ -1464,7 +2179,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                     list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
                 )
 
-            return hidden_states, residual
+            return hidden_states, residual, None
 
 
 class DeepseekV2Model(nn.Module):
@@ -1500,6 +2215,7 @@ class DeepseekV2Model(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.dp_size = get_attention_dp_size()
+        self.config = config
 
     def forward(
         self,
@@ -1508,27 +2224,626 @@ class DeepseekV2Model(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        with nvtx.annotate(message="forward", color="cadetblue", category="deepseek_v2_model"):
+        with nvtx.annotate(message="forward", color="cadetblue", category="deepseek_v2_model"):            
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
             else:
                 hidden_states = input_embeds
-
             residual = None
-            for i in range(len(self.layers)):
-                rng = nvtx.start_range(message=f"decoder_layer_{i}", color="teal", category="deepseek_v2_model.forward")
-                expert_distribution_recorder.set_current_layer(i)
-                layer = self.layers[i]
-                hidden_states, residual = layer(
-                    positions, hidden_states, forward_batch, residual
-                )
-                nvtx.end_range(rng)
+            if (
+                forward_batch.batch_size == 1
+                or not global_server_args_dict["enable_micro_batch_overlap"]
+                # or forward_batch.forward_mode == ForwardMode.DECODE
+            ):
+                for i in range(len(self.layers)):
+                    rng = nvtx.start_range(message=f"decoder_layer_{i}", color="teal", category="deepseek_v2_model.forward")
+                    expert_distribution_recorder.set_current_layer(i)
+                    layer = self.layers[i]
+                    hidden_states, residual = layer(
+                        positions, hidden_states, forward_batch, residual
+                    )
+                    nvtx.end_range(rng)
+                if not forward_batch.forward_mode.is_idle():
+                    if residual is None:
+                        hidden_states = self.norm(hidden_states)
+                    else:
+                        hidden_states, _ = self.norm(hidden_states, residual)
+                return hidden_states
+            else:
+                # first k dense layers
+                for i in range(self.config.first_k_dense_replace):
+                    expert_distribution_recorder.set_current_layer(i)
+                    layer = self.layers[i]
+                    hidden_states, residual, _ = layer(
+                        positions, hidden_states, forward_batch, residual
+                    )
+
+                if forward_batch.forward_mode == ForwardMode.EXTEND:
+                    hidden_states, residual = self.forward_prefill(
+                        hidden_states,
+                        positions,
+                        forward_batch,
+                        residual,
+                    )
+                elif forward_batch.forward_mode == ForwardMode.DECODE:
+                    hidden_states, residual = self.forward_decode(
+                        hidden_states,
+                        positions,
+                        forward_batch,
+                        residual,
+                    )
+                else:
+                    raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
+
             if not forward_batch.forward_mode.is_idle():
                 if residual is None:
                     hidden_states = self.norm(hidden_states)
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
             return hidden_states
+
+    def forward_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        # prefill primary step
+        attn_step = "attn"
+        moe_gate_step = "moe_gate"
+        shared_experts_step = "shared_experts"
+        mlp_step = "mlp"
+        wait_normal_dispatch_step = "wait_normal_dispatch"
+        wait_normal_combine_step = "wait_normal_combine"
+        launch_normal_dispatch_step = "launch_normal_dispatch"
+        launch_normal_combine_step = "launch_normal_combine"
+        """
+
+        # split forward_batch into two micro-batches
+        bs_joint_batch_boundary, fwd_batch0, fwd_batch1 = token_balanced_batch_split(
+            forward_batch
+        )
+        hidden_states_0 = hidden_states[0:bs_joint_batch_boundary]
+        hidden_states_1 = hidden_states[bs_joint_batch_boundary:]
+        positions_0 = positions[0:bs_joint_batch_boundary]
+        positions_1 = positions[bs_joint_batch_boundary:]
+        residual_0 = residual[0:bs_joint_batch_boundary]
+        residual_1 = residual[bs_joint_batch_boundary:]
+        extra_args_0, extra_args_1 = {
+                                         MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY: 0
+                                     }, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY: 1}
+        l0, l1 = (
+            self.config.first_k_dense_replace - 1,
+            self.config.first_k_dense_replace,
+        )
+        # init attn_backend metadata again
+        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
+
+        if get_tensor_model_parallel_rank() == 0:
+            logger.debug(f'********* {forward_batch=}')
+            logger.debug(f'********* {fwd_batch0=}')
+            logger.debug(f'********* {fwd_batch1=}')
+        # last moe layer
+        for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
+            logger.debug(f'$$$$$$ {hidden_states_0.shape=}, {hidden_states_1.shape=}')
+            # overlap b1 attn and b0 shared_experts with b0 combine
+            hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.LAUNCH_COMBINE_NORMAL,
+                extra_args_0,
+            )
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.PREFILL_ATTN,
+                extra_args_1,
+            )
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.MOE_GATE,
+                extra_args_1,
+            )
+
+            after_dispatch_hidden_states_0 = extra_args_0.get(
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY
+            )
+
+            _, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                after_dispatch_hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.SHARED_EXPERTS,
+                extra_args_0,
+            )
+            hidden_states_0, residual_0, _ = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.WAIT_COMBINE_NORMAL,
+                extra_args_0,
+            )
+            # add shared experts
+            if l0 >= self.config.first_k_dense_replace:
+                shared_experts_output_0 = extra_args_0.get(
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_SHARED_EXPERT_OUTPUT_KEY
+                )
+                if shared_experts_output_0 is not None:
+                    hidden_states_0 += shared_experts_output_0
+                    del extra_args_0[
+                        MicroBatchOverlapExtraArgs.EXTRA_ARGS_SHARED_EXPERT_OUTPUT_KEY
+                    ]
+
+            l0 += 1
+            # overlap b0 dispatch with b1 attn
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.LAUNCH_DISPATCH_NORMAL,
+                extra_args_1,
+            )
+            hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.PREFILL_ATTN,
+                extra_args_0,
+            )
+
+            hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.MOE_GATE,
+                extra_args_0,
+            )
+            hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.LAUNCH_DISPATCH_NORMAL,
+                extra_args_0,
+            )
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.WAIT_DISPATCH_NORMAL,
+                extra_args_1,
+            )
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.MLP,
+                extra_args_1,
+            )
+
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.LAUNCH_COMBINE_NORMAL,
+                extra_args_1,
+            )
+            hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.WAIT_DISPATCH_NORMAL,
+                extra_args_0,
+            )
+            hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
+                l0,
+                positions_0,
+                hidden_states_0,
+                fwd_batch0,
+                residual_0,
+                MicroBatchOverlapStep.MLP,
+                extra_args_0,
+            )
+
+            after_dispatch_hidden_states_1 = extra_args_1.get(
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY
+            )
+
+            _, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                after_dispatch_hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.SHARED_EXPERTS,
+                extra_args_1,
+            )
+
+            hidden_states_1, residual_1, extra_args_1 = self.forward_layer(
+                l1,
+                positions_1,
+                hidden_states_1,
+                fwd_batch1,
+                residual_1,
+                MicroBatchOverlapStep.WAIT_COMBINE_NORMAL,
+                extra_args_1,
+            )
+
+            # add shared experts
+            if l1 < len(self.layers):
+                shared_experts_output_1 = extra_args_1.get(
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_SHARED_EXPERT_OUTPUT_KEY
+                )
+                if shared_experts_output_1 is not None:
+                    hidden_states_1 += shared_experts_output_1
+                    del extra_args_1[
+                        MicroBatchOverlapExtraArgs.EXTRA_ARGS_SHARED_EXPERT_OUTPUT_KEY
+                    ]
+            l1 += 1
+
+        # check last_layer
+        # logger.debug(f"~~~~~~~~~~ after self.forward_step, step: {step},batch_size: {forward_batch.batch_size},layer_id:{self.layer_id}")
+        # logger.debug(f'~~~~~~~~~~ after self.forward_step, hidden_states.shape: {hidden_states.shape}, \
+        #                  residual.shape:{residual.shape}')
+        # logger.debug(f'~~~~~~~~~~ after self.forward_step, hidden_states.shape: {hidden_states.shape}, \
+        #                  residual_after.shape:{residual_after.shape}')
+        attn_tp_size = get_attention_tp_size()
+        if attn_tp_size != 1:
+            hidden_states_0 += residual_0
+            # residual_after = None # note: never set None to residual, this is different to official
+            hidden_states_0, local_hidden_states_0 = (
+                fwd_batch0.gathered_buffer[: fwd_batch0.input_ids.shape[0]],
+                hidden_states_0,
+            )
+            tp_all_gather(
+                list(hidden_states_0.tensor_split(attn_tp_size)), local_hidden_states_0
+            )
+            hidden_states_1 += residual_1
+            # residual_after = None # note: never set None to residual, this is different to official
+            hidden_states_1, local_hidden_states_1 = (
+                fwd_batch1.gathered_buffer[: fwd_batch1.input_ids.shape[0]],
+                hidden_states_1,
+            )
+            tp_all_gather(
+                list(hidden_states_1.tensor_split(attn_tp_size)), local_hidden_states_1
+            )
+        logger.debug(
+            f'~~~~~~~~~~ before layers,{hidden_states_0.shape=},{hidden_states_1.shape=},{residual_0.shape=},{residual_1.shape=}')
+        hidden_states = torch.cat([hidden_states_0, hidden_states_1], dim=0)
+        # note: keep same with python/sglang/srt/models/deepseek_v2.py:1247(official v0.4.5 implementation)
+        # residual = torch.cat([residual_0, residual_1], dim=0)
+        residual = None
+        logger.debug(f'~~~~~~~~~~ after layers, {hidden_states.shape=}')
+
+        return hidden_states, residual
+
+    def forward_decode(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        # decode primary step
+        attn_0_step = "attn_0"
+        attn_1_step = "attn_1"
+        moe_gate_step = "moe_gate"
+        shared_experts_step = "shared_experts"
+        mlp_step = "mlp"
+        wait_ll_dispatch_step = "wait_ll_dispatch"
+        wait_ll_combine_step = "wait_ll_combine"
+        launch_ll_dispatch_step = "launch_ll_dispatch"
+        launch_ll_combine_step = "launch_ll_combine"
+        """
+        bs_joint_batch_boundary, fwd_batch0, fwd_batch1 = token_balanced_batch_split(
+            forward_batch
+        )
+        mb0_hidden_states = hidden_states[0:bs_joint_batch_boundary]
+        mb1_hidden_states = hidden_states[bs_joint_batch_boundary:]
+        mb0_positions = positions[0:bs_joint_batch_boundary]
+        mb1_positions = positions[bs_joint_batch_boundary:]
+        mb0_residual = residual[0:bs_joint_batch_boundary]
+        mb1_residual = residual[bs_joint_batch_boundary:]
+        mb0_extra_args, mb1_extra_args = {}, {}
+        l0, l1 = (
+            self.config.first_k_dense_replace - 1,
+            self.config.first_k_dense_replace,
+        )
+        # init attn_backend metadata again
+        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
+
+        for i in range(len(self.layers) + 1):
+            expert_distribution_recorder.set_current_layer(i)
+            # pipeline two micro batches according to https://github.com/deepseek-ai/profile-data
+            logger.debug(f'~~~~~~~~~~ begin to run decode layer[{i}], {hidden_states=}, {residual=}')
+
+            # mb0: launch_dispatch
+            mb0_hidden_states, _, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP,
+                mb0_extra_args,
+            )
+            # mb0: shared_expert_output
+            mb0_before_dispatch_hidden_states = mb0_extra_args.get(
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY,
+                None,
+            )
+            # note: use _ rather than mb0_before_dispatch_hidden_states due to shared_export layer will return mb0_before_dispatch_hidden_states
+            _, mb0_residual, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_before_dispatch_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.SHARED_EXPERTS,
+                mb0_extra_args,
+            )
+
+            # mb1: attn_0
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
+                mb1_extra_args,
+            )
+            # mb0: wait_dispatch
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
+                mb0_extra_args,
+            )
+            # mb0: mlp
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.MLP,
+                mb0_extra_args,
+            )
+            # mb0: launch_combine
+            mb0_hidden_states, _, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP,
+                mb0_extra_args,
+            )
+            # mb1: attn_1
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
+                mb1_extra_args,
+            )
+            # mb0: wait_combine
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
+                mb0_extra_args,
+            )
+
+            # mb0: add shared_expert_output
+            if (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                in mb0_extra_args
+            ):
+                if mb0_extra_args[
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                ]:
+                    mb0_hidden_states = (
+                        mb0_hidden_states
+                        + mb0_extra_args[
+                            MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                        ]
+                    )
+                del mb0_extra_args[
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                ]
+            l0 += 1
+
+            # mb1: launch_dispatch
+            mb1_hidden_states, _, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.LAUNCH_DISPATCH_LL_STEP,
+                mb1_extra_args,
+            )
+            # mb1: shared_expert
+            mb1_before_dispatch_hidden_states = mb1_extra_args.get(
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_BEFORE_DISPATCH_HIDDEN_STATES_KEY,
+                None,
+            )
+            _, mb1_residual, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_before_dispatch_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.SHARED_EXPERTS,
+                mb1_extra_args,
+            )
+
+            # mb0: attn_0
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.DECODE_ATTN_0_STEP,
+                mb0_extra_args,
+            )
+            # mb1: wait_launch
+            mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.WAIT_DISPATCH_LL_STEP,
+                mb1_extra_args,
+            )
+            # mb1: mlp
+            mb1_hidden_states, mb0_residual, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.MLP,
+                mb1_extra_args,
+            )
+            # mb1: launch combine
+            mb1_hidden_states, _, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.LAUNCH_COMBINE_LL_STEP,
+                mb1_extra_args,
+            )
+            # mb0: attn_1
+            mb0_hidden_states, mb0_residual, mb0_extra_args = self.forward_layer(
+                l0,
+                mb0_positions,
+                mb0_hidden_states,
+                fwd_batch0,
+                mb0_residual,
+                MicroBatchOverlapStep.DECODE_ATTN_1_STEP,
+                mb0_extra_args,
+            )
+            # mb1: wait_combine
+            mb1_hidden_states, mb1_residual, mb1_extra_args = self.forward_layer(
+                l1,
+                mb1_positions,
+                mb1_hidden_states,
+                fwd_batch1,
+                mb1_residual,
+                MicroBatchOverlapStep.WAIT_COMBINE_LL_STEP,
+                mb1_extra_args,
+            )
+            # mb1: add shared_expert_output
+            if (
+                MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                in mb1_extra_args
+            ):
+                if mb1_extra_args[
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                ]:
+                    mb1_hidden_states = (
+                        mb1_hidden_states
+                        + mb1_extra_args[
+                            MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                        ]
+                    )
+                del mb1_extra_args[
+                    MicroBatchOverlapExtraArgs.EXTRA_ARGS_LAST_LAYER_SHARED_EXPERT_OUTPUT_KEY
+                ]
+            l1 += 1
+
+        attn_tp_size = get_attention_tp_size()
+        if attn_tp_size != 1:
+            mb0_hidden_states += mb0_residual
+            # residual_after = None # note: never set None to residual, this is different to official
+            mb0_hidden_states, local_mb0_hidden_states = (
+                fwd_batch0.gathered_buffer[: fwd_batch0.input_ids.shape[0]],
+                mb0_hidden_states,
+            )
+            tp_all_gather(
+                list(mb0_hidden_states.tensor_split(attn_tp_size)), local_mb0_hidden_states
+            )
+            mb1_hidden_states += mb1_residual
+            # residual_after = None # note: never set None to residual, this is different to official
+            mb1_hidden_states, local_mb1_hidden_states = (
+                fwd_batch1.gathered_buffer[: fwd_batch1.input_ids.shape[0]],
+                mb1_hidden_states,
+            )
+            tp_all_gather(
+                list(mb1_hidden_states.tensor_split(attn_tp_size)), local_mb1_hidden_states
+            )
+
+        hidden_states = torch.cat([mb0_hidden_states, mb1_hidden_states], dim=0)
+        # note: keep same with python/sglang/srt/models/deepseek_v2.py:1247(official v0.4.5 implementation)
+        # residual = torch.cat([mb0_residual, mb1_residual], dim=0)
+        residual = None
+
+        return hidden_states, residual
+
+    def forward_layer(
+        self,
+        layer_id: int,  # start from 0
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        step: Optional[MicroBatchOverlapStep] = None,
+        extra_args: Optional[Dict[str, Any]] = {},
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        if layer_id >= len(self.layers) or layer_id < self.config.first_k_dense_replace:
+            return hidden_states, residual, extra_args
+        return self.layers[layer_id](
+            positions, hidden_states, forward_batch, residual, step, extra_args
+        )
 
 
 class DeepseekV2ForCausalLM(nn.Module):
@@ -1589,9 +2904,14 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
 
-        return self.logits_processor(
+        logits_output = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
+        logger.debug(
+            f'~~~~~~~~~~ after self.model, hidden_states.shape: {hidden_states.shape}, batch_size: {forward_batch.batch_size}')
+        logger.debug(
+            f'~~~~~~~~~~ after self.model, batch_size: {forward_batch.batch_size}, logits_output: {logits_output}')
+        return logits_output
 
     def post_load_weights(self):
 
@@ -1869,6 +3189,85 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.lm_head.weight = head
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+
+def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
+    if fwd_batch.forward_mode == ForwardMode.DECODE:
+        logger.debug(f"[token_balanced_batch_split] original forward batch: {fwd_batch}")
+    sub_fwd_batch0 = copy(fwd_batch)
+    sub_fwd_batch1 = copy(fwd_batch)
+    bs_joint_batch_boundary = 0
+    batch_boundary = 0
+    if fwd_batch.forward_mode.is_extend():
+        all_tokens = sum(fwd_batch.extend_seq_lens)
+        batch_boundary = 0
+        for batch_tokens in fwd_batch.extend_seq_lens[:-1]:
+            bs_joint_batch_boundary += batch_tokens
+            batch_boundary += 1
+            if bs_joint_batch_boundary >= all_tokens // 2:
+                break
+
+    elif fwd_batch.forward_mode.is_decode():
+        bs_joint_batch_boundary = fwd_batch.batch_size // 2
+    else:
+        assert False
+    for key in [
+        "req_pool_indices",
+        "seq_lens",
+        "seq_lens_cpu",  # Optional[torch.Tensor]
+        # "decode_seq_lens_cpu",
+        "extend_seq_lens",
+        "extend_prefix_lens",
+        "extend_start_loc",
+        "extend_prefix_lens_cpu",
+        "extend_seq_lens_cpu",  # Optional[List[int]]
+        "extend_logprob_start_lens_cpu",
+    ]:
+        if getattr(fwd_batch, key) is not None:
+            # skip for decode mode
+            setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:batch_boundary])
+            setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[batch_boundary:])
+
+    if (
+        not fwd_batch.forward_mode.is_decode()
+        and getattr(fwd_batch, "extend_num_tokens") is not None
+    ):
+        sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary.item()
+        sub_fwd_batch1.extend_num_tokens = (
+            fwd_batch.extend_num_tokens - sub_fwd_batch0.extend_num_tokens
+        )
+
+    for key in [
+        "input_ids",
+        "positions",
+        "out_cache_loc",
+    ]:
+        setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:bs_joint_batch_boundary])
+        setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[bs_joint_batch_boundary:])
+
+    if hasattr(fwd_batch, "extend_seq_lens_cpu") and hasattr(
+        fwd_batch, "global_num_tokens_cpu"
+    ):
+        sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
+        sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
+
+    if hasattr(fwd_batch, "extend_seq_lens") and hasattr(
+        fwd_batch, "global_num_tokens_gpu"
+    ):
+        sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(
+            0, keepdim=True
+        )
+        sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(
+            0, keepdim=True
+        )
+
+    sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
+    sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
+
+    sub_fwd_batch0.batch_size = batch_boundary
+    sub_fwd_batch1.batch_size = fwd_batch.batch_size - sub_fwd_batch0.batch_size
+
+    return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):

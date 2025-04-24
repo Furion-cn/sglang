@@ -169,6 +169,7 @@ class ModelRunner:
                 "disable_shared_experts_fusion": server_args.disable_shared_experts_fusion,
                 "disable_chunked_prefix_cache": server_args.disable_chunked_prefix_cache,
                 "use_mla_backend": self.use_mla_backend,
+                "enable_micro_batch_overlap": server_args.enable_micro_batch_overlap,
             }
         )
 
