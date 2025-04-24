@@ -117,11 +117,11 @@ class KVBuffer:
         largest_block = self.block_sizes[-1]
         return ((length + largest_block - 1) // largest_block) * largest_block
 
-    def set_item(self, item: torch.Tensor) -> int:
+    def set_item(self, item: torch.Tensor, non_blocking: bool = False) -> int:
         assert item.shape[1:] == self.cache.shape[1:], \
             f"item shape {item.shape} does not match cache shape {self.cache.shape}"
         offset = self.allocate(item.shape[0])
-        self.cache[offset:offset + item.shape[0]] = item
+        self.cache[offset:offset + item.shape[0]].copy_(item, non_blocking=non_blocking)
         return offset
 
     def get_item(self, offset: int) -> torch.Tensor:
@@ -138,7 +138,7 @@ class KVBuffer:
             offset = self._allocate(aligned_capacity, length)
         if offset < 0:
             raise Exception(
-                f"No enough free space for length {length} (aligned to {aligned_capacity})")
+                f"No enough free space for length {length} (aligned to {aligned_capacity}, stats: {self.stats()})")
         return offset
 
     def _allocate(self, capacity: int, length: int = None) -> int:

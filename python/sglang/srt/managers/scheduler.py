@@ -1016,7 +1016,6 @@ class Scheduler(
     ):
         gap_latency = time.time() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.time()
-        self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = 0
 
         num_used = self.max_total_num_tokens - (
@@ -1026,15 +1025,22 @@ class Scheduler(
         self._largest_prefill_len = max(
             self._largest_prefill_len, adder.log_input_tokens
         )
+        self.last_input_throughput = adder.log_input_tokens / gap_latency
 
         num_new_seq = len(can_run_list)
         f = (
             f"Prefill batch. "
             f"#new-seq: {num_new_seq}, "
             f"#new-token: {adder.log_input_tokens}, "
+            f"#rem-total-token: {adder.rem_total_tokens}, "
+            f"#rem-input-token: {adder.rem_input_tokens}, "
+            f"#rem-chunk-token: {adder.rem_chunk_tokens}, "
+            f"#cur-rem-token: {adder.cur_rem_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
             f"#running-req: {running_bs}, "
+            f"#prefill-len: {adder.log_input_tokens:.2f}, "
+            f"#gen-throughput: {self.last_input_throughput:.2f}, "
             f"#queue-req: {len(self.waiting_queue)}, "
         )
         logger.info(f)
@@ -1461,6 +1467,7 @@ class Scheduler(
                 req, self.chunked_req, self.enable_hierarchical_cache
             )
             if res != AddReqResult.CONTINUE:
+                logger.debug(f"add_one_req result: {res}, req_len: {len(req.origin_input_ids)}, req_prefix_len: {len(req.prefix_indices)}")
                 if res == AddReqResult.NO_TOKEN:
                     if self.enable_hierarchical_cache:
                         # Set batch_is_full after making sure there are requests that can be served
