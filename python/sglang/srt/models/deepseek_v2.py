@@ -859,13 +859,23 @@ class DeepseekV2AttentionMLA(nn.Module):
                 torch.cuda.nvtx.range_pop()
                 return result
             else:
-                if _is_hip and self.rocm_fused_decode_mla and forward_batch.forward_mode.is_decode():
-                    torch.cuda.nvtx.range_push("forward_absorb_fused_mla_rope")
-                    result = self.forward_absorb_fused_mla_rope(
-                        positions, hidden_states, forward_batch
-                    )
-                    torch.cuda.nvtx.range_pop()
-                    return result
+                if _is_hip: 
+                    if (
+                        self.rocm_fused_decode_mla
+                        and forward_batch.forward_mode.is_decode()
+                    ):
+                        torch.cuda.nvtx.range_push("forward_absorb_fused_mla_rope")
+                        result = self.forward_absorb_fused_mla_rope(
+                            positions, hidden_states, forward_batch
+                        )
+                        torch.cuda.nvtx.range_pop()
+                        return result
+                    else:
+                        with torch.cuda.nvtx.range("forward_absorb"):
+                            torch.cuda.nvtx.range_push("forward_absorb")
+                            result = self.forward_absorb(positions, hidden_states, forward_batch)
+                            torch.cuda.nvtx.range_pop()
+                            return result
                 else:
                     torch.cuda.nvtx.range_push("forward_absorb")
                     result = self.forward_absorb(positions, hidden_states, forward_batch)
@@ -1399,14 +1409,14 @@ class DeepseekV2DecoderLayer(nn.Module):
                     positions, hidden_states, forward_batch, residual
                 )
                 torch.cuda.nvtx.range_pop()
+                return result
             else:
                 torch.cuda.nvtx.range_push("forward_normal")
                 result = self.forward_normal(
                     positions, hidden_states, forward_batch, residual
                 )
                 torch.cuda.nvtx.range_pop()
-            
-            return result
+                return result
         finally:
             torch.cuda.nvtx.range_pop()  # decode_layer_forward
 
