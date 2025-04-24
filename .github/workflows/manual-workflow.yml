@@ -16,8 +16,6 @@ jobs:
   deploy:
     name: "Deploy to staging env to test"
     runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == true #合并PR时 取消注释
-    # if: true
     steps:
       - name: Configure SSH
         run: |
