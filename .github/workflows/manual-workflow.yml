@@ -6,7 +6,7 @@ on:
       concurrency:
         required: false
         default: "16"
-        description: "最大并发数设置, 多项用逗号分隔"
+        description: "最大并发数设置"
         type: string
 
 concurrency:
@@ -16,8 +16,6 @@ jobs:
   deploy:
     name: "Deploy to staging env to test"
     runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == true #合并PR时 取消注释
-    # if: true
     steps:
       - name: Configure SSH
         run: |
@@ -40,6 +38,10 @@ jobs:
 
       - name: Start the benchmark
         run: |
-          ssh staging "bash -c 'export MAX_CONCURRENCIES=${MAX_CONCURRENCIES}; cd /root/sglang-auto/benchmark/furion-cn && ./auto_benchmark.sh'"
+          ssh staging "bash -c 'export MAX_CONCURRENCIES=${{ github.event.inputs.concurrency }}; cd /root/sglang-auto/benchmark/furion-cn && ./auto_benchmark.sh'"
         env:
           MAX_CONCURRENCIES: ${{ github.event.inputs.concurrency }}
+
+      - name: Clean up
+        run: |
+          ssh staging "bash -c 'cd /root/sglang-auto/benchmark/furion-cn && ./clean_up.sh'"
