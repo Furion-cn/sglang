@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import torch
 
@@ -36,11 +36,11 @@ class ExpertDistributionRecorder:
         topk_ids_list = topk_ids.to("cpu", non_blocking=True).numpy().tolist()
         torch.cuda.synchronize()
         for i in topk_ids_list:
-            self._expert_distribution_record[self._current_layer_id].append(tuple(i))
+            self._expert_distribution_record[self._current_layer_id].append(
+                tuple(i))
 
     def reset(self):
         """Reset the expert distribution recorder."""
-        logger.info("Resetting expert distribution record...")
         self._record = False
         self._expert_distribution_record.clear()
         self._current_layer_id = "UNKNOWN"
@@ -62,8 +62,9 @@ class ExpertDistributionRecorder:
             )
         self._record = False
 
-    def dump_record(self):
+    def dump_record(self, output_dir: Optional[str] = None):
         """Dump the expert distribution record to a file. Reset the recorder after dumping."""
+        logger.info("Dumping expert distribution record...")
         results = {}
         for layer_idx, layer_record in self._expert_distribution_record.items():
             results[layer_idx] = defaultdict(int)
@@ -71,7 +72,7 @@ class ExpertDistributionRecorder:
                 for expert_idx in token_record:
                     results[layer_idx][expert_idx] += 1
         with open(
-            f"expert_distribution_rank{torch.distributed.get_rank()}_timestamp{time.time()}.csv",
+            f"{output_dir}/expert_distribution_rank{torch.distributed.get_rank()}_timestamp{time.time()}.csv",
             "w",
         ) as fd:
             fd.write("layer_id,expert_id,count\n")

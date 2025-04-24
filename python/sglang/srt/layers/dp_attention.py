@@ -248,6 +248,8 @@ def dp_scatter(
             local_tokens, global_tokens, 0, local_start_pos, local_num_tokens, True
         )
 
+def tp_all_reduce(input_: torch.Tensor):
+    return get_attention_tp_group().all_reduce(input_)
 
 def tp_reduce_scatter(
     output: torch.Tensor,

@@ -79,7 +79,7 @@ class SchedulerOutputProcessorMixin:
 
                     if req.pd_step == PDStep.PREFILL:
                         req.pd_step = PDStep.DISPATCHING
-                        req.kv_cache_length = self.kv_transfer_agent.set_kv_buffer(req)
+                        self.kv_transfer_agent.set_kv_buffer(req)
 
                     req.check_finished()
 

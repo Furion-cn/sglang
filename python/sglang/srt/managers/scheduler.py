@@ -61,6 +61,7 @@ from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
+    ExpertDistributionReqType,
     FlushCacheReq,
     GetInternalStateReq,
     GetInternalStateReqOutput,
@@ -303,6 +304,7 @@ class Scheduler(
             _,
             _,
         ) = self.tp_worker.get_worker_info()
+        self.tp_device_group = self.tp_worker.get_tp_device_group()
         self.tp_cpu_group = self.tp_worker.get_tp_cpu_group()
         self.attn_tp_cpu_group = self.tp_worker.get_attention_tp_cpu_group()
         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
@@ -401,7 +403,7 @@ class Scheduler(
                 self.token_to_kv_pool_allocator,
                 self.model_config.num_hidden_layers,
                 self.tp_rank,
-                server_args.kv_transfer_config.kv_cache_size_factor,
+                server_args.kv_transfer_config.kv_cache_capacity,
             )
             t = threading.Thread(target=self.kv_transfer_agent.event_loop, daemon=True)
             t.start()
@@ -416,6 +418,8 @@ class Scheduler(
         self.torch_profiler_output_dir: Optional[str] = None
         self.profiler_activities: Optional[List[str]] = None
         self.profiler_target_forward_ct: Optional[int] = None
+        self.record_expert_distribution_forward_ct: Optional[int] = None
+        self.record_expert_distribution_output_dir: Optional[str] = None
 
         # Init metrics stats
         self.init_metrics()
@@ -444,7 +448,7 @@ class Scheduler(
                 (GetInternalStateReq, self.get_internal_state),
                 (SetInternalStateReq, self.set_internal_state),
                 (RpcReqInput, self.handle_rpc_request),
-                (ExpertDistributionReq, self.expert_distribution_handle),
+                (ExpertDistributionReq, self.record_expert_distribution),
             ]
         )
 
@@ -828,11 +832,10 @@ class Scheduler(
             if isinstance(recv_req, PrefilledReqInput):
                 req.kv_transfer_src_addr = recv_req.kv_transfer_src_addr
                 req.kv_transfer_src_rank = recv_req.kv_transfer_src_rank
-                req.kv_cache_length = recv_req.kv_cache_length
                 req.output_ids = recv_req.output_ids
                 req.pd_step = PDStep.DECODE
 
-                logger.debug(f"[Scheduler] Prefilled request {req.rid} received, output_ids: {req.output_ids}")
+                logger.debug(f"[Scheduler] Prefilled request {req.rid} received")
 
             if (
                 recv_req.session_params is not None
@@ -1589,6 +1592,10 @@ class Scheduler(
         ):
             self.stop_profile()
 
+        # Check expert distribution recorder
+        if self.record_expert_distribution_forward_ct and self.record_expert_distribution_forward_ct <= self.forward_ct:
+            self.stop_expert_distribution_record()
+
         # Run forward
         if self.is_generation:
             if self.spec_algorithm.is_none():
@@ -1678,7 +1685,7 @@ class Scheduler(
             local_batch,
             dp_size=self.server_args.dp_size,
             attn_tp_size=self.attn_tp_size,
-            tp_cpu_group=self.tp_cpu_group,
+            tp_group=self.tp_cpu_group,
             get_idle_batch=self.get_idle_batch,
             disable_cuda_graph=self.server_args.disable_cuda_graph,
             spec_algorithm=self.spec_algorithm,
@@ -1690,7 +1697,7 @@ class Scheduler(
         local_batch: ScheduleBatch,
         dp_size,
         attn_tp_size: int,
-        tp_cpu_group,
+        tp_group,
         get_idle_batch,
         disable_cuda_graph: bool,
         spec_algorithm,
@@ -1746,7 +1753,7 @@ class Scheduler(
         torch.distributed.all_gather_into_tensor(
             global_info.flatten(),
             local_info,
-            group=tp_cpu_group,
+            group=tp_group,
         )
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
@@ -2149,16 +2156,28 @@ class Scheduler(
                 ProfileReqOutput(success=True, message="Succeeded.")
             )
 
-    def expert_distribution_handle(self, recv_req: ExpertDistributionReq):
-        if recv_req == ExpertDistributionReq.START_RECORD:
-            expert_distribution_recorder.start_record()
-        elif recv_req == ExpertDistributionReq.STOP_RECORD:
-            expert_distribution_recorder.stop_record()
-        elif recv_req == ExpertDistributionReq.DUMP_RECORD:
-            expert_distribution_recorder.dump_record()
+    def record_expert_distribution(self, recv_req: ExpertDistributionReq):
+        if recv_req.type == ExpertDistributionReqType.START_RECORD:
+            self.start_expert_distribution_record(recv_req.num_steps, recv_req.output_dir)
+        elif recv_req.type == ExpertDistributionReqType.STOP_RECORD:
+            self.stop_expert_distribution_record()
         else:
             raise ValueError("Unrecognized ExpertDistributionReq value")
-        return ExpertDistributionReqOutput()
+
+    def start_expert_distribution_record(self,
+                                         num_steps: Optional[int] = None,
+                                         output_dir: Optional[str] = None):
+        self.record_expert_distribution_forward_ct = self.forward_ct + num_steps
+        self.record_expert_distribution_output_dir = output_dir
+        expert_distribution_recorder.start_record()
+
+    def stop_expert_distribution_record(self):
+        expert_distribution_recorder.stop_record()
+        expert_distribution_recorder.dump_record(self.record_expert_distribution_output_dir)
+        self.send_to_tokenizer.send_pyobj(ExpertDistributionReqOutput())
+        logger.info("Expert distribution record stopped")
+        self.record_expert_distribution_forward_ct = None
+        self.record_expert_distribution_output_dir = None
 
     def open_session(self, recv_req: OpenSessionReqInput):
         # handle error

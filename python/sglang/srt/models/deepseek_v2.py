@@ -41,7 +41,9 @@ from sglang.srt.layers.dp_attention import (
     get_attention_tp_size,
     tp_all_gather,
     tp_reduce_scatter,
+    tp_all_reduce,
 )
+from sglang.srt.distributed.parallel_state import get_world_group
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -1256,6 +1258,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=add_prefix("mlp", prefix),
+                tp_rank=0,
+                tp_size=1,
             )
             self.is_sparse = False
 
@@ -1318,6 +1322,23 @@ class DeepseekV2DecoderLayer(nn.Module):
         if get_tensor_model_parallel_world_size() > 1:
             # all gather and all reduce
             if self.dp_size != 1:
+                # if not global_server_args_dict["enable_deepep_moe"]:
+                #     if self.attn_tp_rank == 0:
+                #         hidden_states += residual
+                #     hidden_states, local_hidden_states = (
+                #         forward_batch.gathered_buffer,
+                #         hidden_states,
+                #     )
+                #     dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
+                #     dp_scatter(residual, hidden_states, forward_batch)
+                #     hidden_states = self.post_attention_layernorm(hidden_states)
+                # else:
+                #     if self.attn_tp_size != 0:
+                #         hidden_states = tp_all_reduce(hidden_states)
+                #     if hidden_states.shape[0] != 0:
+                #         hidden_states, residual = self.post_attention_layernorm(
+                #             hidden_states, residual
+                #         )
                 if self.attn_tp_rank == 0:
                     hidden_states += residual
                 hidden_states, local_hidden_states = (
@@ -1409,6 +1430,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual
                 )
+
+        # dummy_tensor = torch.ones(1, device=hidden_states.device)
+        # torch.distributed.all_reduce(dummy_tensor, group=get_world_group().device_group)
+
         hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
 
         if self.is_last_layer and self.attn_tp_size != 1:
