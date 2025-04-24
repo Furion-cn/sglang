@@ -1,12 +1,10 @@
 name: Merge Test CI
 run-name: "Merge PR to staging env to test"
-on:
-  pull_request_target:
-    types:
-      # - closed # 关闭PR时触发, 合并pr时取消注释
-      - opened
-      - synchronize
-      - reopened
+on: [pull_request]
+  # pull_request_target:
+  #   types:
+  #     - closed # 关闭PR时触发, 合并pr时取消注释
+
 concurrency:
   group: "merge-pr-workflow"
   cancel-in-progress: false
