@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 import uuid
+import nvtx
 from typing import List, Dict
 from dataclasses import dataclass
 import bisect
@@ -116,11 +117,11 @@ class KVBuffer:
         largest_block = self.block_sizes[-1]
         return ((length + largest_block - 1) // largest_block) * largest_block
 
-    def set_item(self, item: torch.Tensor) -> int:
+    def set_item(self, item: torch.Tensor, non_blocking: bool = False) -> int:
         assert item.shape[1:] == self.cache.shape[1:], \
             f"item shape {item.shape} does not match cache shape {self.cache.shape}"
         offset = self.allocate(item.shape[0])
-        self.cache[offset:offset + item.shape[0]] = item
+        self.cache[offset:offset + item.shape[0]].copy_(item, non_blocking=non_blocking)
         return offset
 
     def get_item(self, offset: int) -> torch.Tensor:
@@ -137,7 +138,7 @@ class KVBuffer:
             offset = self._allocate(aligned_capacity, length)
         if offset < 0:
             raise Exception(
-                f"No enough free space for length {length} (aligned to {aligned_capacity})")
+                f"No enough free space for length {length} (aligned to {aligned_capacity}, stats: {self.stats()})")
         return offset
 
     def _allocate(self, capacity: int, length: int = None) -> int:
@@ -335,6 +336,7 @@ class KVTransferAgent:
             cache, block_sizes=[2**i for i in range(3, 14)])
         self.req_to_kv_buffer_offset = {}
 
+    @nvtx.annotate("KVTransferAgent.set_kv_buffer", color="red")
     def set_kv_buffer(self, req: Req):
         if self.attn_tp_rank != 0:
             return 0
@@ -342,11 +344,18 @@ class KVTransferAgent:
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
+        
+        nvtx.push_range("KVTransferAgent.set_kv_buffer.stack_and_permute")
         kv_cache = torch.stack(
             [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
              for i in range(self.layer_num)]
         ).permute(1, 0, 2, 3).contiguous().to(self.device, non_blocking=True)
-        offset = self.kv_buffer.set_item(kv_cache)
+        nvtx.pop_range()
+        
+        nvtx.push_range("KVTransferAgent.set_kv_buffer.set_item")
+        offset = self.kv_buffer.set_item(kv_cache, non_blocking=True)
+        nvtx.pop_range()
+        
         self.req_to_kv_buffer_offset[req.rid] = offset
 
     def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
