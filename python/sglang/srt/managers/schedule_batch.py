@@ -1004,7 +1004,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[dict, torch.Tensor]]):
+    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, Union[Dict[str, torch.Tensor], torch.Tensor]]):
         self.forward_mode = ForwardMode.DECODE
 
         bs = len(self.reqs)
@@ -1169,6 +1169,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Restore KV cache
         pt = 0
+        top_k = None
+        top_k_index = None
+        hidden_states = None
+        verified_id = None
         if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
             assert self.speculative_eagle_topk is not None,"speculative_eagle_topk is not setted correctly"
             top_k = torch.zeros(self.batch_size(),self.speculative_eagle_topk)
@@ -1179,13 +1183,16 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             tensor = kv_buffer[req.rid]
             if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
                 assert isinstance(tensor, dict) is True
-                top_k[i] = tensor["top_k"].to(self.device)
-                hidden_states[i] = tensor["hidden_states"].to(self.device)
-                verified_id[i] = tensor["verified_id"].to(self.device)
-                top_k_index[i] = tensor["top_k_index"].to(self.device)
+                flattened_spec_info = tensor["spec_info_cache"]
+                logger.debug(f"flattened_spec_info: shape {flattened_spec_info.shape} device {flattened_spec_info.device}")
+                split_spec_infos = torch.split(flattened_spec_info,[7168,self.speculative_eagle_topk, self.speculative_eagle_topk, 1])
+                hidden_states[i] = split_spec_infos[0].to(self.device)
+                top_k[i] = split_spec_infos[1].to(self.device)
+                top_k_index[i] = split_spec_infos[2].to(self.device)
+                verified_id[i] = split_spec_infos[3].to(self.device)
                 flattened_kv_buffer = tensor["kv_cache"].to(self.device)
             else:
-                flattened_kv_buffer = tensor.to(self.device)
+                flattened_kv_buffer = tensor["kv_cache"].to(self.device)
             layer_kv_buffers = torch.unbind(flattened_kv_buffer, dim=0)
             kv_cache_pool = self.token_to_kv_pool_allocator.get_kvcache()
             for layer_id, layer_kv_buffer in enumerate(layer_kv_buffers):
@@ -1198,7 +1205,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             req.kv_cache_restored = True
             pt += req.extend_input_len
         if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
-            logger.info(f"spec_info top_k {top_k.shape},{top_k.device}\n"
+            logger.debug(f"spec_info top_k {top_k.shape},{top_k.device}\n"
                         f"top_k_index {top_k_index.shape},{top_k_index.device}\n"
                         f"hidden_states {hidden_states.shape},{hidden_states.device}\n"
                         f"verified_id {verified_id.shape},{verified_id.device}\n")

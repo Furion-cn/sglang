@@ -333,6 +333,10 @@ class KVTransferAgent:
         self.engine.register_memory(cache.data_ptr(), cache.nbytes)
         self.kv_buffer = KVBuffer(
             cache, block_sizes=[2**i for i in range(3, 14)])
+        if server_args.speculative_algorithm is not None:
+            spec_info_cache = torch.zeros([server_args.max_running_requests,7168 + 2*server_args.speculative_eagle_topk + 1], dtype=torch.bfloat16, device=self.device)
+            self.spec_info_buffer = KVBuffer(
+                spec_info_cache, block_sizes=[7168 + 2*server_args.speculative_eagle_topk + 1])
         self.req_to_kv_buffer_offset = {}
 
     def set_kv_buffer(self, req: Req):
@@ -346,10 +350,21 @@ class KVTransferAgent:
             [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
              for i in range(self.layer_num)]
         ).permute(1, 0, 2, 3).contiguous().to(self.device, non_blocking=True)
-        offset = self.kv_buffer.set_item(kv_cache)
-        self.req_to_kv_buffer_offset[req.rid] = offset
+        kv_cache_offset = self.kv_buffer.set_item(kv_cache)
 
-    def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
+        if req.speculative_algorithm is not None and not req.speculative_algorithm.is_none():
+            hs_flatten = req.hidden_states_spec.flatten()
+            tk_flatten = req.top_k.flatten()
+            tki_flatten = req.top_k_index.flatten()
+            vi_flatten = req.verified_id.flatten()
+            spec_info_cache = torch.cat([hs_flatten, tk_flatten, tki_flatten, vi_flatten]).unsqueeze(0).to(self.device, non_blocking=True)
+            logger.debug(f"speculative_algorithm: {req.speculative_algorithm} spec_info_cache: {spec_info_cache} shape: {spec_info_cache.shape} device: {spec_info_cache.device}")
+            spec_info_offset = self.spec_info_buffer.set_item(spec_info_cache)
+            self.req_to_kv_buffer_offset[req.rid] = {"kv_cache": kv_cache_offset,"spec_info_cache": spec_info_offset}
+        else:
+            self.req_to_kv_buffer_offset[req.rid] = {"kv_cache": kv_cache_offset}
+
+    def get_kv_buffer(self, req_list: List[Req]) -> dict[str, Union[str, torch.Tensor]]:
         if not req_list:
             return {}
 
@@ -376,8 +391,13 @@ class KVTransferAgent:
             dst_ptrs = []
             for req in req_list:
                 offset = self.kv_buffer.allocate(len(req.origin_input_ids))
-                dst_ptrs.append(self.kv_buffer.data_ptr(offset))
-                offsets.append(offset)
+                if req.speculative_algorithm is not None and not req.speculative_algorithm.is_none():
+                    spec_info_offset = self.spec_info_buffer.allocate(1)
+                    dst_ptrs.append({"kv_cache": self.kv_buffer.data_ptr(offset), "spec_info_cache": self.spec_info_buffer.data_ptr(spec_info_offset)})
+                    offsets.append({"kv_cache": offset, "spec_info_cache": spec_info_offset})
+                else:
+                    dst_ptrs.append({"kv_cache": self.kv_buffer.data_ptr(offset)})
+                    offsets.append({"kv_cache": offset})
 
             allocated_time = time.time()
 
@@ -395,9 +415,11 @@ class KVTransferAgent:
             transfered_time = time.time()
             transfered_bytes = 0
             for i, req in enumerate(req_list):
-                res[req.rid] = self.kv_buffer.get_item(
-                    offsets[i]).permute(1, 0, 2, 3)
-                transfered_bytes += res[req.rid].nbytes
+                res[req.rid]["kv_cache"] = self.kv_buffer.get_item(offsets[i]["kv_cache"]).permute(1, 0, 2, 3)
+                transfered_bytes += res[req.rid]["kv_cache"].nbytes
+                if req.speculative_algorithm is not None and not req.speculative_algorithm.is_none():
+                    res[req.rid]["spec_info_cache"] = self.spec_info_buffer.get_item(offsets[i]["spec_info_cache"])
+                    transfered_bytes += res[req.rid]["spec_info_cache"].nbytes
 
             loaded_time = time.time()
 
@@ -420,7 +442,9 @@ class KVTransferAgent:
             return {}
         finally:
             for offset in offsets:
-                self.kv_buffer.free(offset)
+                self.kv_buffer.free(offset["kv_cache"])
+                if len(offset) > 1:
+                    self.spec_info_buffer.free(offset["spec_info_cache"])
             return res
 
     def _complete_kv_transfer(self, kv_transfer_fetch: KVTransferFetch, timeout: int = 60):
@@ -492,17 +516,24 @@ class KVTransferAgent:
             start_time = time.time()
 
             for i, rid in enumerate(req.rids):
-                offset = self.req_to_kv_buffer_offset[rid]
+                if len(self.req_to_kv_buffer_offset[rid]) > 1:
+                    spec_info_offset = self.req_to_kv_buffer_offset[rid]["spec_info_cache"]
+                    if spec_info_offset is None:
+                        raise Exception(
+                            f"KV transfer fetch spec_info_offset {rid} not found")
+                    spec_info_cache = self.spec_info_buffer.get_item(spec_info_offset)
+                    self.engine.transfer_sync(req.dst_addr, self.kv_buffer.data_ptr(spec_info_offset), req.dst_ptrs[i]["spec_info_cache"],spec_info_cache.nbytes)
+                    transfered_bytes += spec_info_cache.nbytes
+                offset = self.req_to_kv_buffer_offset[rid]["kv_cache"]
                 if offset is None:
                     raise Exception(
                         f"KV transfer fetch request {rid} not found")
-
                 if rid not in self.req_kv_transfer_ct:  # first time fetch
                     self.req_kv_transfer_ct[rid] = req.fetch_ct
 
                 kv_cache = self.kv_buffer.get_item(offset)
                 self.engine.transfer_sync(
-                    req.dst_addr, self.kv_buffer.data_ptr(offset), req.dst_ptrs[i], kv_cache.nbytes)
+                    req.dst_addr, self.kv_buffer.data_ptr(offset), req.dst_ptrs[i]["kv_cache"], kv_cache.nbytes)
 
                 self.req_kv_transfer_ct[rid] -= 1
 
@@ -526,7 +557,9 @@ class KVTransferAgent:
         for rid in req.rids:
             if self.req_kv_transfer_ct[rid] > 0:
                 return
-            self.kv_buffer.free(self.req_to_kv_buffer_offset[rid])
+            self.kv_buffer.free(self.req_to_kv_buffer_offset[rid]["kv_cache"])
+            if len(self.req_to_kv_buffer_offset[rid] > 1):
+                self.spec_info_buffer.free(self.req_to_kv_buffer_offset[rid]["spec_info_cache"])
             del self.req_to_kv_buffer_offset[rid]
 
     def _handle_kv_transfer_ack(self, kv_transfer_ack: KVTransferAck):
