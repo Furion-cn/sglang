@@ -86,7 +86,9 @@ global_server_args_dict = {
     "n_share_experts_fusion": ServerArgs.n_share_experts_fusion,
     "disable_shared_experts_fusion": ServerArgs.disable_shared_experts_fusion,
     "enable_micro_batch_overlap": ServerArgs.enable_micro_batch_overlap,
-    "role": ServerArgs.kv_transfer_config.role if ServerArgs.kv_transfer_config else None,
+    "role": (
+        ServerArgs.kv_transfer_config.role if ServerArgs.kv_transfer_config else None
+    ),
 }
 
 logger = logging.getLogger(__name__)
@@ -999,7 +1001,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-    def recover_for_decode(self, origin_output_ids: dict[str, List[int]], kv_buffer: Dict[str, torch.Tensor]):
+    def recover_for_decode(
+        self,
+        origin_output_ids: dict[str, List[int]],
+        kv_buffer: Dict[str, torch.Tensor],
+    ):
         self.forward_mode = ForwardMode.DECODE
 
         bs = len(self.reqs)
@@ -1020,8 +1026,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         for i, req in enumerate(reqs):
             req.req_pool_idx = req_pool_indices[i]
             req.output_ids = origin_output_ids[req.rid]
-            assert len(
-                req.output_ids) == 1, f"recover_for_decode: req({req.rid}).output_ids not equal one token: {req.output_ids}, origin_output_ids: {origin_output_ids}"
+            assert (
+                len(req.output_ids) == 1
+            ), f"recover_for_decode: req({req.rid}).output_ids not equal one token: {req.output_ids}, origin_output_ids: {origin_output_ids}"
             pre_len, seq_len = len(req.prefix_indices), len(req.fill_ids)
             seq_lens.append(seq_len)
             assert seq_len - pre_len == req.extend_input_len
@@ -1099,9 +1106,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32).to(
             self.device, non_blocking=True
         )
-        self.output_ids = torch.tensor(sum([req.output_ids for req in reqs], []), dtype=torch.int32).to(
-            self.device, non_blocking=True
-        )
+        self.output_ids = torch.tensor(
+            sum([req.output_ids for req in reqs], []), dtype=torch.int32
+        ).to(self.device, non_blocking=True)
         self.req_pool_indices = torch.tensor(req_pool_indices, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
@@ -1174,7 +1181,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     layer_id,
                     self.out_cache_loc[pt: pt + req.extend_input_len],
                     layer_kv_buffer[len(req.prefix_indices):],
-                    None
+                    None,
                 )
             req.kv_cache_restored = True
             pt += req.extend_input_len
@@ -1547,7 +1554,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Update fields
         assert self.batch_size() == len(
-            self.output_ids), f"Batch size {self.batch_size()} does not match output_ids length {len(self.output_ids)}, output_ids: {self.output_ids}"
+            self.output_ids
+        ), f"Batch size {self.batch_size()} does not match output_ids length {len(self.output_ids)}, output_ids: {self.output_ids}"
         self.input_ids = self.output_ids
         self.output_ids = None
 
@@ -1576,6 +1584,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 self.seq_lens, last_loc
             )
 
+        # logger.debug(f"self.req_pool_indices: {self.req_pool_indices.shape}, locs: {locs.shape}, self.out_cache_loc: {self.out_cache_loc.shape}")
         self.req_to_token_pool.write(
             (self.req_pool_indices, locs), self.out_cache_loc.to(torch.int32)
         )
@@ -1663,7 +1672,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.token_ids_logprobs = [None] * len(self.reqs) + other.token_ids_logprobs
         self.reqs.extend(other.reqs)
 
-        assert self.batch_size() == len(self.output_ids), f"Batch size {self.batch_size()} \
+        assert self.batch_size() == len(
+            self.output_ids
+        ), f"Batch size {self.batch_size()} \
             does not match output_ids length {len(self.output_ids)}, \
             original_output_ids: {original_output_ids}, \
             other.output_ids: {other.output_ids}, \

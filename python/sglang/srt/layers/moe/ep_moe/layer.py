@@ -859,8 +859,8 @@ class DeepEPMoE(EPMoE):
         forward_mode: ForwardMode,
     ):
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
-        logger.debug(
-            f"DeepEPMoE forward: deepep_mode: {self.deepep_mode}, forward_mode: {forward_mode}, resolved_deepep_mode: {resolved_deepep_mode}")
+        # logger.debug(
+        #     f"DeepEPMoE forward: deepep_mode: {self.deepep_mode}, forward_mode: {forward_mode}, resolved_deepep_mode: {resolved_deepep_mode}")
         if resolved_deepep_mode == DeepEPMode.normal:
             return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:

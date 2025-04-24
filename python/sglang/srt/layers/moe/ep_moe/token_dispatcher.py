@@ -81,7 +81,11 @@ class DeepEPBufferFurion(Buffer):
             ),
         )
 
-        self._dispatch_mode = DeepEPDispatchMode.NORMAL if deepep_mode.enable_normal else DeepEPDispatchMode.LOW_LATENCY
+        self._dispatch_mode = (
+            DeepEPDispatchMode.NORMAL
+            if deepep_mode.enable_normal
+            else DeepEPDispatchMode.LOW_LATENCY
+        )
         self._hidden_size = hidden_size
         self._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         self._num_experts = num_experts
@@ -287,9 +291,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             self.topk_idx,
             self.topk_weights,
             self.event,
-        ) = self._dispatch_core(
-            hidden_states, topk_idx, topk_weights, previous_event
-        )
+        ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
         return self.hidden_states
 
     def wait_dispatch(self):
@@ -596,7 +598,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.expected_m,
             self.event,
             self.hook,
-        ) = self.dispatch_a(hidden_states=hidden_states, topk_idx=topk_idx, topk_weights=topk_weights)
+        ) = self.dispatch_a(
+            hidden_states=hidden_states, topk_idx=topk_idx, topk_weights=topk_weights
+        )
         return hidden_states
 
     def wait_dispatch(self):
@@ -723,8 +727,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        self.hidden_states, self.event, self.hook = self.combine_a(hidden_states=hidden_states, topk_idx=topk_idx,
-                                                                   topk_weights=topk_weights)
+        self.hidden_states, self.event, self.hook = self.combine_a(
+            hidden_states=hidden_states, topk_idx=topk_idx, topk_weights=topk_weights
+        )
 
     def wait_combine(self):
         self.hook() if self.return_recv_hook else self.event.current_stream_wait()
@@ -834,10 +839,15 @@ class DeepEPDispatcher:
         topk_weights: torch.Tensor,
         num_experts: int,
         num_max_dispatch_tokens_per_rank: Optional[int] = 128,
-        forward_mode: Optional[ForwardMode] = None
+        forward_mode: Optional[ForwardMode] = None,
     ) -> torch.Tensor:
-        return self._get_impl(forward_mode).launch_dispatch(hidden_states, topk_idx, topk_weights, num_experts,
-                                                            num_max_dispatch_tokens_per_rank)
+        return self._get_impl(forward_mode).launch_dispatch(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            num_experts,
+            num_max_dispatch_tokens_per_rank,
+        )
 
     def wait_dispatch(self, forward_mode: ForwardMode = None) -> Tuple:
         return self._get_impl(forward_mode).wait_dispatch()
@@ -847,9 +857,11 @@ class DeepEPDispatcher:
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
-        forward_mode: ForwardMode = None
+        forward_mode: ForwardMode = None,
     ):
-        self._get_impl(forward_mode).launch_combine(hidden_states, topk_idx, topk_weights)
+        self._get_impl(forward_mode).launch_combine(
+            hidden_states, topk_idx, topk_weights
+        )
 
     def wait_combine(self, forward_mode: ForwardMode = None) -> Tuple:
         return self._get_impl(forward_mode).wait_combine()
@@ -902,8 +914,8 @@ class DeepEPDispatcher:
 
     def _get_impl(self, forward_mode: ForwardMode) -> _DeepEPDispatcherImplBase:
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
-        logger.debug(
-            f"_get_impl: deepep_mode: {self.deepep_mode}, forward_mode: {forward_mode}, resolved_deepep_mode: {resolved_deepep_mode}")
+        # logger.debug(
+        # f"_get_impl: deepep_mode: {self.deepep_mode}, forward_mode: {forward_mode}, resolved_deepep_mode: {resolved_deepep_mode}")
         if resolved_deepep_mode == DeepEPMode.normal:
             return self._normal_dispatcher
         elif resolved_deepep_mode == DeepEPMode.low_latency:

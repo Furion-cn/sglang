@@ -182,9 +182,9 @@ class TpModelWorker:
         else:
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
 
-        logger.debug(f'~~~~~~~~~~ forward_batch_generation, logits_output: {logits_output}, \
-                     next_token_ids: {next_token_ids}, \
-                     next_token_ids.shape:{next_token_ids.shape}')
+        # logger.debug(f'~~~~~~~~~~ forward_batch_generation, logits_output: {logits_output}, \
+        # next_token_ids: {next_token_ids}, \
+        # next_token_ids.shape:{next_token_ids.shape}')
 
         return logits_output, next_token_ids
 
