@@ -96,6 +96,7 @@ class GroupedGemmRunner(torch.nn.Module):
             )
         else:
             assert weight_column_major == True
+            torch.cuda.nvtx.range_push("GroupedGemmRunner forward grouped_gemm_triton")
             c = grouped_gemm_triton(
                 a,
                 b,
@@ -109,6 +110,7 @@ class GroupedGemmRunner(torch.nn.Module):
                 scale_b,
                 block_shape=block_shape,
             )
+            torch.cuda.nvtx.range_pop()
         return c
 
 

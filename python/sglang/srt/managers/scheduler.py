@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import psutil
 import setproctitle
 import torch
+import nvtx
 import zmq
 from torch.distributed import barrier
 
@@ -1598,17 +1599,21 @@ class Scheduler(
         if self.is_generation:
             if self.spec_algorithm.is_none():
                 model_worker_batch = batch.get_model_worker_batch()
+                nvtx.push_range("tp_worker.forward_batch_generation without spec_algor")
                 logits_output, next_token_ids = self.tp_worker.forward_batch_generation(
                     model_worker_batch
                 )
+                nvtx.pop_range()
                 bid = model_worker_batch.bid
             else:
+                nvtx.push_range("draft_worker.forward_batch_speculative_generation with spec_algor")
                 (
                     logits_output,
                     next_token_ids,
                     bid,
                     num_accepted_tokens,
                 ) = self.draft_worker.forward_batch_speculative_generation(batch)
+                nvtx.pop_range()
                 self.spec_num_total_accepted_tokens += (
                     num_accepted_tokens + batch.batch_size()
                 )
