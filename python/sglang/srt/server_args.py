@@ -51,7 +51,7 @@ class KVTransferConfig(BaseModel):
     transfer_engine_metadata_server: str = None
     transfer_engine_rdma_device: str = "mlx5_0"
 
-    kv_cache_capacity: int = 256 * 1024 # the max tokens number of kv cache
+    kv_cache_capacity: int = 512 * 1024 # the max tokens number of kv cache
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":

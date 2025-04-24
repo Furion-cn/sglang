@@ -1470,6 +1470,7 @@ class Scheduler(
                 req, self.chunked_req, self.enable_hierarchical_cache
             )
             if res != AddReqResult.CONTINUE:
+                logger.debug(f"add_one_req result: {res}, req_len: {len(req.origin_input_ids)}, req_prefix_len: {len(req.prefix_indices)}")
                 if res == AddReqResult.NO_TOKEN:
                     if self.enable_hierarchical_cache:
                         # Set batch_is_full after making sure there are requests that can be served
