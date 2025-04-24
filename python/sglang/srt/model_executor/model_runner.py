@@ -983,10 +983,12 @@ class ModelRunner:
         tensor_parallel(self.model, device_mesh)
 
     def forward_decode(self, forward_batch: ForwardBatch):
+        torch.cuda.nvtx.range_push("attn_backend.init_forward_metadata")
         self.attn_backend.init_forward_metadata(forward_batch)
+        torch.cuda.nvtx.range_pop()
         return self.model.forward(
-            forward_batch.input_ids, forward_batch.positions, forward_batch
-        )
+                forward_batch.input_ids, forward_batch.positions, forward_batch
+            )
 
     def forward_extend(
         self, forward_batch: ForwardBatch, skip_attn_backend_init: bool = False
@@ -1036,8 +1038,8 @@ class ModelRunner:
             return self.forward_decode(forward_batch)
         elif forward_batch.forward_mode.is_extend():
             return self.forward_extend(
-                forward_batch, skip_attn_backend_init=skip_attn_backend_init
-            )
+                    forward_batch, skip_attn_backend_init=skip_attn_backend_init
+                )
         elif forward_batch.forward_mode.is_idle():
             return self.forward_idle(forward_batch)
         else:

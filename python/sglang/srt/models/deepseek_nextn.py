@@ -13,8 +13,6 @@
 # ==============================================================================
 
 """Inference-only DeepSeek NextN Speculative Decoding."""
-import logging
-import time
 from typing import Iterable, Optional, Tuple
 
 import torch
