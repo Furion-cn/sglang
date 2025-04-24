@@ -558,7 +558,7 @@ class KVTransferAgent:
             if self.req_kv_transfer_ct[rid] > 0:
                 return
             self.kv_buffer.free(self.req_to_kv_buffer_offset[rid]["kv_cache"])
-            if len(self.req_to_kv_buffer_offset[rid] > 1):
+            if len(self.req_to_kv_buffer_offset[rid]) > 1:
                 self.spec_info_buffer.free(self.req_to_kv_buffer_offset[rid]["spec_info_cache"])
             del self.req_to_kv_buffer_offset[rid]
 
