@@ -1,9 +1,13 @@
-name: Merge Test CI
-run-name: "Merge PR to staging env to test"
-on: [pull_request]
-  pull_request_target:
-    types:
-      - closed # 关闭PR时触发, 合并pr时取消注释
+name: Manual Workflow for main code benchmark
+run-name: "Deploy main code to staging env to benchmark"
+on:
+  workflow_dispatch:  # 只允许手动触发
+    inputs:
+      concurrency:
+        required: false
+        default: "16"
+        description: "最大并发数设置, 多项用逗号分隔"
+        type: string
 
 concurrency:
   group: "merge-pr-workflow"
@@ -33,10 +37,9 @@ jobs:
           STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
           STAGING_SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
           STAGING_SSH_PORT: ${{ secrets.STAGING_SSH_PORT }}
-          MAX_CONCURRENCIES: 16 # 最大并发数
 
       - name: Start the benchmark
         run: |
           ssh staging "bash -c 'export MAX_CONCURRENCIES=${MAX_CONCURRENCIES}; cd /root/sglang-auto/benchmark/furion-cn && ./auto_benchmark.sh'"
         env:
-          MAX_CONCURRENCIES: 16
+          MAX_CONCURRENCIES: ${{ github.event.inputs.concurrency }}
