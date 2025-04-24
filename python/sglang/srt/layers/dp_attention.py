@@ -119,7 +119,7 @@ def disable_dp_size():
     finally:
         _DP_SIZE = old_dp_size
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def get_dp_local_info(forward_batch: ForwardBatch):
     dp_rank = get_attention_dp_rank()
 
@@ -138,6 +138,7 @@ def get_dp_local_info(forward_batch: ForwardBatch):
 
 
 @triton.jit
+@nvtx.annotate(color="gold", category="dp_attention")
 def memcpy_triton_kernel(
     dst_ptr,
     src_ptr,
@@ -162,11 +163,11 @@ def memcpy_triton_kernel(
         data = tl.load(src_ptr + start_index + offs, mask=mask)
         tl.store(dst_ptr + offset + start_index + offs, data, mask=mask)
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def prod(x):
     return functools.reduce(lambda a, b: a * b, x, 1)
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def memcpy_triton(dst, src, dim, offset, sz, offset_src):
     max_size = min(src.numel(), dst.numel())
     assert dim == 0, "dim != 0 unsupported"
@@ -177,7 +178,7 @@ def memcpy_triton(dst, src, dim, offset, sz, offset_src):
 
     memcpy_triton_kernel[grid](dst, src, offset, sz, offset_src, chunk_size, BLOCK_SIZE)
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def _dp_gather(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
@@ -211,7 +212,7 @@ def _dp_gather(
     else:
         global_tokens[:] = tensor_model_parallel_all_reduce(global_tokens)
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def dp_gather_partial(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
@@ -219,7 +220,7 @@ def dp_gather_partial(
 ):
     _dp_gather(global_tokens, local_tokens, forward_batch, is_partial=True)
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def dp_gather_replicate(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
@@ -227,7 +228,7 @@ def dp_gather_replicate(
 ):
     _dp_gather(global_tokens, local_tokens, forward_batch, is_partial=False)
 
-
+@nvtx.annotate(color="gold", category="dp_attention")
 def dp_scatter(
     local_tokens: torch.Tensor,  # output
     global_tokens: torch.Tensor,  # input
@@ -248,9 +249,11 @@ def dp_scatter(
             local_tokens, global_tokens, 0, local_start_pos, local_num_tokens, True
         )
 
+@nvtx.annotate(color="gold", category="dp_attention")
 def tp_all_reduce(input_: torch.Tensor):
     return get_attention_tp_group().all_reduce(input_)
 
+@nvtx.annotate(color="gold", category="dp_attention")
 def tp_reduce_scatter(
     output: torch.Tensor,
     input_list: List[torch.Tensor],
@@ -258,5 +261,6 @@ def tp_reduce_scatter(
     return get_attention_tp_group().reduce_scatter(output, input_list)
 
 
+@nvtx.annotate(color="gold", category="dp_attention")
 def tp_all_gather(output_list: List[torch.Tensor], input_: torch.Tensor):
     return get_attention_tp_group().all_gather(input_, tensor_list=output_list)

@@ -228,6 +228,7 @@ class ReplicatedLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
     """
 
+    @nvtx.annotate(color="violet", category="replicated_linear")
     def __init__(
         self,
         input_size: int,
@@ -273,6 +274,7 @@ class ReplicatedLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+    @nvtx.annotate(color="violet", category="replicated_linear")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # If the weight on disk does not have a shape, give it one
         # (such scales for AutoFp8).
@@ -282,6 +284,7 @@ class ReplicatedLinear(LinearBase):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight)
 
+    @nvtx.annotate(color="violet", category="replicated_linear")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
@@ -289,6 +292,7 @@ class ReplicatedLinear(LinearBase):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    @nvtx.annotate(color="violet", category="replicated_linear")
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size}"
@@ -320,6 +324,7 @@ class ColumnParallelLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
     """
 
+    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def __init__(
         self,
         input_size: int,
@@ -387,6 +392,7 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         output_dim = getattr(param, "output_dim", None)
 
@@ -419,6 +425,7 @@ class ColumnParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -437,6 +444,7 @@ class ColumnParallelLinear(LinearBase):
             # However, we should fix this and avoid the branching here.
             param.load_column_parallel_weight(loaded_weight)
 
+    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
 
@@ -451,6 +459,7 @@ class ColumnParallelLinear(LinearBase):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
@@ -1153,6 +1162,7 @@ class RowParallelLinear(LinearBase):
         quant_config: Quantization configure.
     """
 
+    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def __init__(
         self,
         input_size: int,
@@ -1216,6 +1226,7 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
@@ -1253,6 +1264,7 @@ class RowParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
 
         # Special case for loading scales off disk, which often do not
@@ -1274,6 +1286,7 @@ class RowParallelLinear(LinearBase):
             # It does not support additional parameters.
             param.load_row_parallel_weight(loaded_weight)
 
+    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def forward(self, input_):
         if self.input_is_parallel:
             input_parallel = input_
@@ -1298,6 +1311,7 @@ class RowParallelLinear(LinearBase):
 
         return output, output_bias
 
+    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def extra_repr(self) -> str:
         s = f"input_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"

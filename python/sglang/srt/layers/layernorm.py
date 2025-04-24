@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 
 class RMSNorm(CustomOp):
+
+    @nvtx.annotate(color="slateblue", category="rms_norm")
     def __init__(
         self,
         hidden_size: int,
@@ -46,6 +48,7 @@ class RMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
+    @nvtx.annotate(color="slateblue", category="rms_norm")
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -58,6 +61,7 @@ class RMSNorm(CustomOp):
         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
         return out
 
+    @nvtx.annotate(color="slateblue", category="rms_norm")
     def forward_native(
         self,
         x: torch.Tensor,
@@ -79,6 +83,8 @@ class RMSNorm(CustomOp):
 
 
 class GemmaRMSNorm(CustomOp):
+
+    @nvtx.annotate(color="darkslateblue", category="gemma_rms_norm")
     def __init__(
         self,
         hidden_size: int,
@@ -88,6 +94,7 @@ class GemmaRMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
+    @nvtx.annotate(color="darkslateblue", category="gemma_rms_norm")
     def forward_native(
         self,
         x: torch.Tensor,
@@ -105,6 +112,7 @@ class GemmaRMSNorm(CustomOp):
         x = x.to(orig_dtype)
         return x if residual is None else (x, residual)
 
+    @nvtx.annotate(color="darkslateblue", category="gemma_rms_norm")
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -120,14 +128,18 @@ class GemmaRMSNorm(CustomOp):
 
 
 class Gemma3RMSNorm(nn.Module):
+
+    @nvtx.annotate(color="darkslateblue", category="mediumpurple")
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.zeros(dim))
 
+    @nvtx.annotate(color="darkslateblue", category="mediumpurple")
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
+    @nvtx.annotate(color="darkslateblue", category="mediumpurple")
     def forward(self, x):
         output = self._norm(x.float())
         # Llama does x.to(float16) * w whilst Gemma3 is (x * w).to(float16)
@@ -135,6 +147,7 @@ class Gemma3RMSNorm(nn.Module):
         output = output * (1.0 + self.weight.float())
         return output.type_as(x)
 
+    @nvtx.annotate(color="darkslateblue", category="mediumpurple")
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.eps}"
 

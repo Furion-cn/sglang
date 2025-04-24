@@ -22,6 +22,7 @@ from enum import IntEnum, auto
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
+import nvtx
 import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
@@ -109,6 +110,8 @@ class AttnForwardMethod(IntEnum):
 
 
 class DeepseekV2MLP(nn.Module):
+
+    @nvtx.annotate(color="orange", category="deepseek_v2_mlp")
     def __init__(
         self,
         hidden_size: int,
@@ -147,6 +150,7 @@ class DeepseekV2MLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
+    @nvtx.annotate(color="orange", category="deepseek_v2_mlp")
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
@@ -155,6 +159,7 @@ class DeepseekV2MLP(nn.Module):
 
 
 class MoEGate(nn.Module):
+    @nvtx.annotate(color="skyblue", category="moe_gate")
     def __init__(
         self,
         config,
@@ -171,6 +176,7 @@ class MoEGate(nn.Module):
         else:
             self.e_score_correction_bias = None
 
+    @nvtx.annotate(color="skyblue", category="moe_gate")
     def forward(self, hidden_states):
         logits = F.linear(hidden_states, self.weight, None)
         return logits
@@ -178,6 +184,7 @@ class MoEGate(nn.Module):
 
 class DeepseekV2MoE(nn.Module):
 
+    @nvtx.annotate(color="blue", category="deepseek_v2_moe")
     def __init__(
         self,
         config: PretrainedConfig,
@@ -284,34 +291,31 @@ class DeepseekV2MoE(nn.Module):
                 return_recv_hook=True,
             )
 
+    @nvtx.annotate(color="blue", category="deepseek_v2_moe")
     def forward(
         self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
     ) -> torch.Tensor:
         if not global_server_args_dict["enable_deepep_moe"]:
-            with torch.cuda.nvtx.range("deepseek v2 moe without deepep_moe"):
-                return self.forward_normal(hidden_states)
+            return self.forward_normal(hidden_states)   
         else:
-            with torch.cuda.nvtx.range("deepseek v2 moe with deepep_moe"):
-                return self.forward_deepep(hidden_states, forward_mode)
+            return self.forward_deepep(hidden_states, forward_mode)
 
+    @nvtx.annotate(color="blue", category="deepseek_v2_moe")
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        with torch.cuda.nvtx.range("forward_normal _forward_shared_experts"):
-            shared_output = self._forward_shared_experts(hidden_states)
+        shared_output = self._forward_shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        with torch.cuda.nvtx.range("forward_normal gate"):
-            router_logits = self.gate(hidden_states)
-        with torch.cuda.nvtx.range("forward_normal self experts"):
-            final_hidden_states = (
-                self.experts(hidden_states=hidden_states, router_logits=router_logits)
-                * self.routed_scaling_factor
-            )
+        router_logits = self.gate(hidden_states)
+        final_hidden_states = (
+            self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            * self.routed_scaling_factor
+        )
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            with torch.cuda.nvtx.range("tensor_model_parallel_all_reduce"):
-                final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states
 
+    @nvtx.annotate(color="blue", category="deepseek_v2_moe")
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_mode: ForwardMode
     ) -> torch.Tensor:
@@ -327,11 +331,9 @@ class DeepseekV2MoE(nn.Module):
             and not forward_mode.is_idle()
             and hidden_states.shape[0] > 0
         ):
-            with torch.cuda.nvtx.range("forward_deepep gate"):
-                # router_logits: (num_tokens, n_experts)
-                router_logits = self.gate(hidden_states)
-            with torch.cuda.nvtx.range("forward_deepep _forward_shared_experts"):
-                shared_output = self._forward_shared_experts(hidden_states)
+            # router_logits: (num_tokens, n_experts)
+            router_logits = self.gate(hidden_states)
+            shared_output = self._forward_shared_experts(hidden_states)
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -343,39 +345,36 @@ class DeepseekV2MoE(nn.Module):
                 correction_bias=self.correction_bias,
             )
         if self.ep_size > 1:
-            with torch.cuda.nvtx.range("dispatch"):
-                # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
-                (
-                    hidden_states,
-                    topk_idx,
-                    topk_weights,
-                    reorder_topk_ids,
-                    seg_indptr,
-                    masked_m,
-                    expected_m,
-                ) = self.deepep_dispatcher.dispatch(
-                    hidden_states,
-                    topk_idx,
-                    topk_weights,
-                    forward_mode=forward_mode,
-                )
-        with torch.cuda.nvtx.range("experts_foward"):
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                reorder_topk_ids=reorder_topk_ids,
-                seg_indptr=seg_indptr,
-                masked_m=masked_m,
-                expected_m=expected_m,
+            # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
+            (
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                reorder_topk_ids,
+                seg_indptr,
+                masked_m,
+                expected_m,
+            ) = self.deepep_dispatcher.dispatch(
+                hidden_states,
+                topk_idx,
+                topk_weights,
                 forward_mode=forward_mode,
             )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            reorder_topk_ids=reorder_topk_ids,
+            seg_indptr=seg_indptr,
+            masked_m=masked_m,
+            expected_m=expected_m,
+            forward_mode=forward_mode,
+        )
         if self.ep_size > 1:
-            with torch.cuda.nvtx.range("combine"):
-                final_hidden_states = self.deepep_dispatcher.combine(
-                    final_hidden_states,
-                    topk_idx,
-                    topk_weights,
-                    forward_mode,
-                )
+            final_hidden_states = self.deepep_dispatcher.combine(
+                final_hidden_states,
+                topk_idx,
+                topk_weights,
+                forward_mode,
+            )
         final_hidden_states *= self.routed_scaling_factor
 
         if shared_output is not None:
@@ -383,6 +382,7 @@ class DeepseekV2MoE(nn.Module):
 
         return final_hidden_states
 
+    @nvtx.annotate(color="blue", category="deepseek_v2_moe")
     def _forward_shared_experts(self, hidden_states):
         if self.n_shared_experts is not None and self.n_share_experts_fusion == 0:
             return self.shared_experts(hidden_states)
@@ -400,6 +400,7 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 
 class DeepseekV2Attention(nn.Module):
 
+    @nvtx.annotate(color="red", category="deepseek_v2_attention")
     def __init__(
         self,
         config: PretrainedConfig,
@@ -520,6 +521,7 @@ class DeepseekV2Attention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
+    @nvtx.annotate(color="red", category="deepseek_v2_attention")
     def forward(
         self,
         positions: torch.Tensor,
@@ -540,40 +542,40 @@ class DeepseekV2Attention(nn.Module):
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
-        with torch.cuda.nvtx.range("deepseek v2 attention forward"):
-            _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-            kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            latent_cache = latent_cache.unsqueeze(1)
-            kv_a = self.kv_a_layernorm(kv_a.contiguous())
-            kv = self.kv_b_proj(kv_a)[0]
-            kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k_pe = latent_cache[:, :, self.kv_lora_rank:]
-            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-            q[..., self.qk_nope_head_dim:] = q_pe
-            k = torch.empty_like(q)
-            k[..., : self.qk_nope_head_dim] = k_nope
-            k[..., self.qk_nope_head_dim:] = k_pe
-            q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(
-                -1, self.num_local_heads * 256
-            )
-            k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(
-                -1, self.num_local_heads * 256
-            )
-            v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(
-                -1, self.num_local_heads * 256
-            )
-            attn_output = self.attn(q, k, v, forward_batch)
-            attn_output = attn_output.view(-1, self.num_local_heads, 256)[
-                          ..., : self.v_head_dim
-                          ].reshape(-1, self.num_local_heads * self.v_head_dim)
-            output, _ = self.o_proj(attn_output)
-            return output
+        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        latent_cache = latent_cache.unsqueeze(1)
+        kv_a = self.kv_a_layernorm(kv_a.contiguous())
+        kv = self.kv_b_proj(kv_a)[0]
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k_pe = latent_cache[:, :, self.kv_lora_rank:]
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        q[..., self.qk_nope_head_dim:] = q_pe
+        k = torch.empty_like(q)
+        k[..., : self.qk_nope_head_dim] = k_nope
+        k[..., self.qk_nope_head_dim:] = k_pe
+        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(
+            -1, self.num_local_heads * 256
+        )
+        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(
+            -1, self.num_local_heads * 256
+        )
+        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(
+            -1, self.num_local_heads * 256
+        )
+        attn_output = self.attn(q, k, v, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, 256)[
+                        ..., : self.v_head_dim
+                        ].reshape(-1, self.num_local_heads * self.v_head_dim)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class DeepseekV2AttentionMLA(nn.Module):
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def __init__(
         self,
         config: PretrainedConfig,
@@ -729,6 +731,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         # TODO: Design a finer way to determine the threshold
         self.chunked_prefix_cache_threshold = 8192
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def dispatch_attn_forward_method(
         self, forward_batch: ForwardBatch
     ) -> AttnForwardMethod:
@@ -769,47 +772,42 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 return AttnForwardMethod.MLA
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        with torch.cuda.nvtx.range("attention_mla_forward"):
-            if hidden_states.shape[0] == 0:
-                assert (
-                    not self.o_proj.reduce_results
-                ), "short-circuiting allreduce will lead to hangs"
-                return hidden_states
+        if hidden_states.shape[0] == 0:
+            assert (
+                not self.o_proj.reduce_results
+            ), "short-circuiting allreduce will lead to hangs"
+            return hidden_states
 
-            with torch.cuda.nvtx.range("dispatch_attn_method"):
-                attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
+        attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
 
-            if attn_forward_method == AttnForwardMethod.MHA:
-                with torch.cuda.nvtx.range("forward_normal"):
-                    return self.forward_normal(positions, hidden_states, forward_batch)
-            elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
-                with torch.cuda.nvtx.range("forward_normal_chunked_kv"):
-                    return self.forward_normal_chunked_kv(
+        if attn_forward_method == AttnForwardMethod.MHA:
+            return self.forward_normal(positions, hidden_states, forward_batch)
+        elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
+            return self.forward_normal_chunked_kv(
+                positions, hidden_states, forward_batch
+            )
+        else:
+            if _is_hip:
+                if (
+                    self.rocm_fused_decode_mla
+                    and forward_batch.forward_mode.is_decode()
+                ):
+                    return self.forward_absorb_fused_mla_rope(
                         positions, hidden_states, forward_batch
                     )
-            else:
-                if _is_hip:
-                    if (
-                        self.rocm_fused_decode_mla
-                        and forward_batch.forward_mode.is_decode()
-                    ):
-                        with torch.cuda.nvtx.range("forward_absorb_fused_mla_rope"):
-                            return self.forward_absorb_fused_mla_rope(
-                                positions, hidden_states, forward_batch
-                            )
-                    else:
-                        with torch.cuda.nvtx.range("forward_absorb"):
-                            return self.forward_absorb(positions, hidden_states, forward_batch)
                 else:
-                    with torch.cuda.nvtx.range("forward_absorb"):
-                        return self.forward_absorb(positions, hidden_states, forward_batch)
+                    return self.forward_absorb(positions, hidden_states, forward_batch)
+            else:
+                return self.forward_absorb(positions, hidden_states, forward_batch)
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def forward_normal(
         self,
         positions: torch.Tensor,
@@ -852,88 +850,82 @@ class DeepseekV2AttentionMLA(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def forward_absorb(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        with torch.cuda.nvtx.range("absorb_forward"):
-            q_len = hidden_states.shape[0]
-            q_input = hidden_states.new_empty(
-                q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+        q_len = hidden_states.shape[0]
+        q_input = hidden_states.new_empty(
+            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+        )
+
+        if self.q_lora_rank is not None:
+            q = self.q_a_proj(hidden_states)[0]
+            q = self.q_a_layernorm(q)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
             )
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-            with torch.cuda.nvtx.range("q_projection"):
-                if self.q_lora_rank is not None:
-                    q = self.q_a_proj(hidden_states)[0]
-                    q = self.q_a_layernorm(q)
-                    q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-                else:
-                    q = self.q_proj(hidden_states)[0].view(
-                        -1, self.num_local_heads, self.qk_head_dim
-                    )
-                q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        if self.w_kc.dtype == torch.float8_e4m3fnuz:
+            q_nope_out = torch.bmm(
+                q_nope.to(torch.bfloat16).transpose(0, 1),
+                self.w_kc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                q_nope.transpose(0, 1),
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
-            with torch.cuda.nvtx.range("w_kc_ops"):
-                if self.w_kc.dtype == torch.float8_e4m3fnuz:
-                    q_nope_out = torch.bmm(
-                        q_nope.to(torch.bfloat16).transpose(0, 1),
-                        self.w_kc.to(torch.bfloat16) * self.w_scale,
-                    )
-                elif self.w_kc.dtype == torch.float8_e4m3fn:
-                    q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
-                        q_nope.transpose(0, 1),
-                    )
-                    q_nope_out = bmm_fp8(
-                        q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
-                    )
-                else:
-                    q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
-                q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        v_input = latent_cache[..., : self.kv_lora_rank]
+        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        k_input = latent_cache.unsqueeze(1)
+        k_input[..., : self.kv_lora_rank] = v_input
+        k_pe = k_input[..., self.kv_lora_rank:]
 
-            with torch.cuda.nvtx.range("kv_projection"):
-                latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-                v_input = latent_cache[..., : self.kv_lora_rank]
-                v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
-                k_input = latent_cache.unsqueeze(1)
-                k_input[..., : self.kv_lora_rank] = v_input
-                k_pe = k_input[..., self.kv_lora_rank:]
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        q_input[..., self.kv_lora_rank:] = q_pe
+        k_input[..., self.kv_lora_rank:] = k_pe
 
-            with torch.cuda.nvtx.range("rope"):
-                q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-                q_input[..., self.kv_lora_rank:] = q_pe
-                k_input[..., self.kv_lora_rank:] = k_pe
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
-            with torch.cuda.nvtx.range("attention"):
-                attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-                attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+        if self.w_vc.dtype == torch.float8_e4m3fnuz:
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                self.w_vc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                attn_output.transpose(0, 1),
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+        else:
+            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
 
-            with torch.cuda.nvtx.range("w_vc_ops"):
-                if self.w_vc.dtype == torch.float8_e4m3fnuz:
-                    attn_bmm_output = torch.bmm(
-                        attn_output.to(torch.bfloat16).transpose(0, 1),
-                        self.w_vc.to(torch.bfloat16) * self.w_scale,
-                    )
-                elif self.w_vc.dtype == torch.float8_e4m3fn:
-                    attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
-                        attn_output.transpose(0, 1),
-                    )
-                    attn_bmm_output = bmm_fp8(
-                        attn_output_val,
-                        self.w_vc,
-                        attn_output_scale,
-                        self.w_scale,
-                        torch.bfloat16,
-                    )
-                else:
-                    attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
-                attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        output, _ = self.o_proj(attn_output)
+        return output
 
-            with torch.cuda.nvtx.range("output_projection"):
-                output, _ = self.o_proj(attn_output)
-                return output
-
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def forward_absorb_fused_mla_rope(
         self,
         positions: torch.Tensor,
@@ -1077,6 +1069,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         return output
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def _chunked_prefix_attn_mha(
         self,
         q: torch.Tensor,
@@ -1129,6 +1122,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         return accum_output
 
+    @nvtx.annotate(color="firebrick", category="deepseek_v2_attention_mla")
     def forward_normal_chunked_kv(
         self,
         positions: torch.Tensor,
@@ -1201,6 +1195,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
 class DeepseekV2DecoderLayer(nn.Module):
 
+    @nvtx.annotate(color="lightcoral", category="deepseek_v2_decoder_layer")
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1299,6 +1294,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+    @nvtx.annotate(color="lightcoral", category="deepseek_v2_decoder_layer")
     def forward(
         self,
         positions: torch.Tensor,
@@ -1307,16 +1303,15 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         if global_server_args_dict["enable_deepep_moe"] and self.is_sparse:
-            with torch.cuda.nvtx.range("decode_layer_forward_deepep"):
-                return self.forward_deepep(
-                    positions, hidden_states, forward_batch, residual
-                )
+            return self.forward_deepep(
+                positions, hidden_states, forward_batch, residual
+            )
         else:
-            with torch.cuda.nvtx.range("decode_layer_forward_normal"):
-                return self.forward_normal(
-                    positions, hidden_states, forward_batch, residual
-                )
+            return self.forward_normal(
+                positions, hidden_states, forward_batch, residual
+            )
 
+    @nvtx.annotate(color="lightcoral", category="deepseek_v2_decoder_layer")
     def forward_normal(
         self,
         positions: torch.Tensor,
@@ -1401,6 +1396,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual
 
+    @nvtx.annotate(color="lightcoral", category="deepseek_v2_decoder_layer")
     def forward_deepep(
         self,
         positions: torch.Tensor,
@@ -1411,75 +1407,63 @@ class DeepseekV2DecoderLayer(nn.Module):
         if hidden_states.shape[0] == 0:
             residual = hidden_states
         else:
-            with torch.cuda.nvtx.range("layer_norm"):
-                if residual is None:
-                    residual = hidden_states
-                    hidden_states = self.input_layernorm(hidden_states)
-                else:
-                    hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if self.attn_tp_size != 1 and self.input_is_scattered:
             hidden_states, local_hidden_states = (
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
                 hidden_states,
             )
-            with torch.cuda.nvtx.range("all_gather"):
-                tp_all_gather(
-                    list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
-                )
-        with torch.cuda.nvtx.range("self_attention"):
-            # Self Attention
-            hidden_states = self.self_attn(
-                positions=positions,
-                hidden_states=hidden_states,
-                forward_batch=forward_batch,
+            tp_all_gather(
+                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
             )
+        # Self Attention
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+        )
 
         if self.attn_tp_size != 1:
             if self.input_is_scattered:
-                with torch.cuda.nvtx.range("reduce_scatter"):
-                    tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                    hidden_states = tensor_list[self.attn_tp_rank]
-                    tp_reduce_scatter(hidden_states, tensor_list)
+                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                hidden_states = tensor_list[self.attn_tp_rank]
+                tp_reduce_scatter(hidden_states, tensor_list)
                 if hidden_states.shape[0] != 0:
-                    with torch.cuda.nvtx.range("post_attn_norm"):
-                        hidden_states, residual = self.post_attention_layernorm(
-                            hidden_states, residual
-                        )
-            else:
-                if self.attn_tp_rank == 0:
-                    with torch.cuda.nvtx.range("add_residual"):
-                        hidden_states += residual
-                with torch.cuda.nvtx.range("reduce_scatter"):
-                    tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
-                    hidden_states = tensor_list[self.attn_tp_rank]
-                    tp_reduce_scatter(hidden_states, tensor_list)
-                residual = hidden_states
-                if hidden_states.shape[0] != 0:
-                    with torch.cuda.nvtx.range("post_attn_norm"):
-                        hidden_states = self.post_attention_layernorm(hidden_states)
-        else:
-            if hidden_states.shape[0] != 0:
-                with torch.cuda.nvtx.range("post_attn_norm"):
                     hidden_states, residual = self.post_attention_layernorm(
                         hidden_states, residual
                     )
+            else:
+                if self.attn_tp_rank == 0:
+                    hidden_states += residual
+                tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
+                hidden_states = tensor_list[self.attn_tp_rank]
+                tp_reduce_scatter(hidden_states, tensor_list)
+                residual = hidden_states
+                if hidden_states.shape[0] != 0:
+                    hidden_states = self.post_attention_layernorm(hidden_states)
+        else:
+            if hidden_states.shape[0] != 0:
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual
+                )
 
-        with torch.cuda.nvtx.range("mlp"):
-            hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
+        hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
 
         if self.is_last_layer and self.attn_tp_size != 1:
-            with torch.cuda.nvtx.range("last_layer_ops"):
-                hidden_states += residual
-                residual = None
-                hidden_states, local_hidden_states = (
-                    forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-                    hidden_states,
-                )
-                with torch.cuda.nvtx.range("final_all_gather"):
-                    tp_all_gather(
-                        list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
-                    )
+            hidden_states += residual
+            residual = None
+            hidden_states, local_hidden_states = (
+                forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
+                hidden_states,
+            )
+            tp_all_gather(
+                list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
+            )
 
         return hidden_states, residual
 
@@ -1487,6 +1471,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
 
+    @nvtx.annotate(color="cadeblue", category="deepseek_v2_model")
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1517,6 +1502,7 @@ class DeepseekV2Model(nn.Module):
 
         self.dp_size = get_attention_dp_size()
 
+    @nvtx.annotate(color="cadeblue", category="deepseek_v2_model")
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1526,25 +1512,24 @@ class DeepseekV2Model(nn.Module):
     ) -> torch.Tensor:
 
         if input_embeds is None:
-            with torch.cuda.nvtx.range("embedding_tokens"):
-                hidden_states = self.embed_tokens(input_ids)
+            hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
 
         residual = None
         for i in range(len(self.layers)):
-            with torch.cuda.nvtx.range(f"decoder_layer_{i}"):
-                expert_distribution_recorder.set_current_layer(i)
-                layer = self.layers[i]
-                hidden_states, residual = layer(
-                    positions, hidden_states, forward_batch, residual
-                )
+            rng = nvtx.start_range(message=f"decoder_layer_{i}", color="teal", category="deepseek_v2_model.forward")
+            expert_distribution_recorder.set_current_layer(i)
+            layer = self.layers[i]
+            hidden_states, residual = layer(
+                positions, hidden_states, forward_batch, residual
+            )
+            nvtx.end_range(rng)
         if not forward_batch.forward_mode.is_idle():
-            with torch.cuda.nvtx.range("norm"):
-                if residual is None:
-                    hidden_states = self.norm(hidden_states)
-                else:
-                    hidden_states, _ = self.norm(hidden_states, residual)
+            if residual is None:
+                hidden_states = self.norm(hidden_states)
+            else:
+                hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 

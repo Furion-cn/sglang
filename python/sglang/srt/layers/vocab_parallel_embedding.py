@@ -210,6 +210,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         prefix: full name of the layer in the state dict
     """  # noqa: E501
 
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def __init__(
         self,
         num_embeddings: int,
@@ -312,6 +313,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         )
 
     @classmethod
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def _get_indices(
         cls,
         vocab_size_padded: int,
@@ -349,6 +351,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             added_vocab_end_index,
         )
 
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def get_sharded_to_full_mapping(self) -> Optional[List[int]]:
         """Get a mapping that can be used to reindex the gathered
         logits for sampling.
@@ -414,6 +417,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         assert len(ret) == self.num_embeddings_padded
         return ret
 
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
@@ -465,6 +469,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
@@ -489,6 +494,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             output = output_parallel
         return output
 
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"

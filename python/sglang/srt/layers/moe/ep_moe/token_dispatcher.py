@@ -539,6 +539,8 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
 
 class DeepEPDispatcher:
+
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def __init__(
         self,
         group: torch.distributed.ProcessGroup,
@@ -576,10 +578,12 @@ class DeepEPDispatcher:
                 **common_kwargs,
             )
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def dispatch(self, *args, **kwargs) -> Tuple:
         self.dispatch_a(*args, **kwargs)
         return self.dispatch_b()
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def dispatch_a(
         self,
         hidden_states: torch.Tensor,
@@ -594,15 +598,18 @@ class DeepEPDispatcher:
         )
         self._dispatch_intermediate_state = forward_mode, inner_state
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def dispatch_b(self):
         forward_mode, inner_state = self._dispatch_intermediate_state
         del self._dispatch_intermediate_state
         return self._get_impl(forward_mode).dispatch_b(*inner_state)
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def combine(self, *args, **kwargs) -> Tuple:
         self.combine_a(*args, **kwargs)
         return self.combine_b()
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -617,11 +624,13 @@ class DeepEPDispatcher:
         )
         self._combine_intermediate_state = forward_mode, inner_state
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def combine_b(self):
         forward_mode, inner_state = self._combine_intermediate_state
         del self._combine_intermediate_state
         return self._get_impl(forward_mode).combine_b(*inner_state)
 
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def _get_impl(self, forward_mode: ForwardMode) -> _DeepEPDispatcherImplBase:
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
         if resolved_deepep_mode == DeepEPMode.normal:

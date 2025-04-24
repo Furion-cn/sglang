@@ -262,6 +262,7 @@ class FusedMoE(torch.nn.Module):
         inplace: suggestion to compute inplace (modify input activation).
     """
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def __init__(
         self,
         num_experts: int,
@@ -332,6 +333,7 @@ class FusedMoE(torch.nn.Module):
             weight_loader=self.weight_loader,
         )
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_per_tensor_weight_scale(
         self,
         shard_id: str,
@@ -350,6 +352,7 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_model_weight_or_group_weight_scale(
         self,
         shard_dim: int,
@@ -377,6 +380,7 @@ class FusedMoE(torch.nn.Module):
                 tp_rank=tp_rank,
             )
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_per_channel_weight_scale(
         self,
         expert_data: torch.Tensor,
@@ -397,6 +401,7 @@ class FusedMoE(torch.nn.Module):
                 tp_rank=tp_rank,
             )
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_w13(
         self,
         expert_data: torch.Tensor,
@@ -425,6 +430,7 @@ class FusedMoE(torch.nn.Module):
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         expert_data.copy_(loaded_weight)
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_w2(
         self,
         expert_data: torch.Tensor,
@@ -447,6 +453,7 @@ class FusedMoE(torch.nn.Module):
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
     ):
@@ -455,6 +462,7 @@ class FusedMoE(torch.nn.Module):
         # Input scales can be loaded directly and should be equal.
         param_data[expert_id] = loaded_weight
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_g_idx(
         self,
         shard_id: str,
@@ -476,6 +484,7 @@ class FusedMoE(torch.nn.Module):
             assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def weight_loader(
         self,
         param: torch.nn.Parameter,
@@ -620,6 +629,7 @@ class FusedMoE(torch.nn.Module):
             )
             return
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         assert self.quant_method is not None
 
@@ -645,6 +655,7 @@ class FusedMoE(torch.nn.Module):
         return final_hidden_states
 
     @classmethod
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def make_expert_params_mapping(
         cls,
         ckpt_gate_proj_name: str,
@@ -673,6 +684,7 @@ class FusedMoE(torch.nn.Module):
             ]
         ]
 
+    @nvtx.annotate(color="steelblue", category="fused_moe")
     def _load_fp8_scale(
         self,
         param: torch.nn.Parameter,

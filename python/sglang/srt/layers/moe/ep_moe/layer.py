@@ -120,7 +120,7 @@ class EPMoE(torch.nn.Module):
 
 
     """
-
+    @nvtx.annotate(color="lightskyblue", category="ep_moe")
     def __init__(
         self,
         num_experts: int,
@@ -198,6 +198,7 @@ class EPMoE(torch.nn.Module):
 
         self.grouped_gemm_runner = None
 
+    @nvtx.annotate(color="lightskyblue", category="ep_moe")
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         assert self.quant_method is not None
 
@@ -371,6 +372,7 @@ class EPMoE(torch.nn.Module):
         return output
 
     @classmethod
+    @nvtx.annotate(color="lightskyblue", category="ep_moe")
     def make_expert_params_mapping(
         cls,
         ckpt_gate_proj_name: str,
@@ -398,6 +400,7 @@ class EPMoE(torch.nn.Module):
             ]
         ]
 
+    @nvtx.annotate(color="lightskyblue", category="ep_moe")
     def weight_loader(
         self,
         param: torch.nn.Parameter,
@@ -435,6 +438,7 @@ class EPMoE(torch.nn.Module):
         else:
             raise ValueError(f"Expected shard_id w1,w2 or w3 but got {shard_id}")
 
+    @nvtx.annotate(color="lightskyblue", category="ep_moe")
     def _load_fp8_scale(
         self,
         param: torch.nn.Parameter,
@@ -783,7 +787,7 @@ class DeepEPMoE(EPMoE):
     """
 
     _has_printed = False
-
+    @nvtx.annotate(color="deepskyblue", category="deepep_moe")
     def __init__(
         self,
         num_experts: int,
@@ -836,6 +840,7 @@ class DeepEPMoE(EPMoE):
             self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
         )
 
+    @nvtx.annotate(color="deepskyblue", category="deepep_moe")
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -853,6 +858,7 @@ class DeepEPMoE(EPMoE):
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
 
+    @nvtx.annotate(color="deepskyblue", category="deepep_moe")
     def forward_normal(
         self,
         hidden_states: torch.Tensor,
@@ -966,6 +972,7 @@ class DeepEPMoE(EPMoE):
             )
         return down_output
 
+    @nvtx.annotate(color="deepskyblue", category="deepep_moe")
     def forward_deepgemm_masked(
         self,
         hidden_states_fp8: Tuple[torch.Tensor, torch.Tensor],

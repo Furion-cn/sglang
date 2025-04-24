@@ -250,6 +250,7 @@ def biased_grouped_topk(
         )
 
 
+@nvtx.annotate(color="cyan", category="select_experts")
 def select_experts(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
