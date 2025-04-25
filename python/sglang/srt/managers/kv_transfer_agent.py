@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 import uuid
+import nvtx
 from typing import List, Dict
 from dataclasses import dataclass
 import bisect
@@ -336,7 +337,10 @@ class KVTransferAgent:
             cache, block_sizes=[2**i for i in range(3, 14)])
         self.req_to_kv_buffer_offset = {}
 
-    @nvtx.annotate(color="red", category="kv_transfer_agent")
+    def get_kv_buffer_stats(self):
+        return self.kv_buffer.stats()
+
+    @nvtx.annotate("KVTransferAgent.set_kv_buffer", color="red")
     def set_kv_buffer(self, req: Req):
         if self.attn_tp_rank != 0:
             return 0
@@ -369,6 +373,7 @@ class KVTransferAgent:
         results = {}
         for src_reqs in requests_by_src.values():
             results.update(self._get_kv_buffer_from_same_src(src_reqs))
+
         return results
 
     @nvtx.annotate("KVTransferAgent._get_kv_buffer_from_same_src", color="red")
