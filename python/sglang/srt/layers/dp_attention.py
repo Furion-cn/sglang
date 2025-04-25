@@ -137,7 +137,6 @@ def get_dp_local_info(forward_batch: ForwardBatch):
 
     return forward_batch.dp_local_start_pos, forward_batch.dp_local_num_tokens
 
-@nvtx.annotate(color="gold", category="dp_attention")
 @triton.jit
 def memcpy_triton_kernel(
     dst_ptr,
