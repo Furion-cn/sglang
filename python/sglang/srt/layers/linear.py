@@ -1354,7 +1354,7 @@ class RowParallelLinear(LinearBase):
         logger.info(f"RowParallelLinear forward output_parallel {output_parallel.shape}")
         if self.reduce_results and self.tp_size > 1:
             logger.info(f"reduce_results {output_parallel.shape}")
-            output = tensor_model_parallel_all_reduce(output_parallel)
+            output = tp_all_reduce(output_parallel)
         else:
             output = output_parallel
 
