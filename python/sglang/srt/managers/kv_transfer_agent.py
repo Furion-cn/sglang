@@ -358,6 +358,7 @@ class KVTransferAgent:
         
         self.req_to_kv_buffer_offset[req.rid] = offset
 
+    @nvtx.annotate("KVTransferAgent.get_kv_buffer", color="red")
     def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         if not req_list:
             return {}
@@ -372,9 +373,9 @@ class KVTransferAgent:
         results = {}
         for src_reqs in requests_by_src.values():
             results.update(self._get_kv_buffer_from_same_src(src_reqs))
-
         return results
 
+    @nvtx.annotate("KVTransferAgent._get_kv_buffer_from_same_src", color="red")
     def _get_kv_buffer_from_same_src(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         if len(req_list) == 0:
             return {}
@@ -432,6 +433,7 @@ class KVTransferAgent:
                 self.kv_buffer.free(offset)
             return res
 
+    @nvtx.annotate("KVTransferAgent._complete_kv_transfer", color="red")
     def _complete_kv_transfer(self, kv_transfer_fetch: KVTransferFetch, timeout: int = 60):
         """Complete kv transfer.
         If timeout, raise an exception. Default timeout is 60 seconds.

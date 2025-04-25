@@ -185,11 +185,13 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
+        logger.info(f"dispatch_a {hidden_states.shape}")
         topk_idx = topk_idx.to(torch.int64)
         previous_event = Buffer.capture() if self.async_finish else None
         return hidden_states, topk_idx, topk_weights, previous_event
 
     def dispatch_b(self, hidden_states, topk_idx, topk_weights, previous_event):
+        logger.info(f"dispatch_b start")
         (
             hidden_states,
             topk_idx,
@@ -197,6 +199,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             event,
         ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
         event.current_stream_wait() if self.async_finish else ()
+        logger.info(f"dispatch_b end")
         if hidden_states.shape[0] > 0:
             reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
                 hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
