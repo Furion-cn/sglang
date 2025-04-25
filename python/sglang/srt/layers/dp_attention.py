@@ -120,22 +120,22 @@ def disable_dp_size():
     finally:
         _DP_SIZE = old_dp_size
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def get_dp_local_info(forward_batch: ForwardBatch):
-    dp_rank = get_attention_dp_rank()
+    with nvtx.annotate(message="get_dp_local_info", color="gold", category="dp_attention"):
+        dp_rank = get_attention_dp_rank()
 
-    if forward_batch.dp_local_start_pos is None:
-        cumtokens = torch.cumsum(forward_batch.global_num_tokens_gpu, dim=0)
-        if dp_rank == 0:
-            local_start_pos = torch.zeros_like(cumtokens[0])
-        else:
-            local_start_pos = cumtokens[dp_rank - 1]
-        local_num_tokens = forward_batch.global_num_tokens_gpu[dp_rank]
+        if forward_batch.dp_local_start_pos is None:
+            cumtokens = torch.cumsum(forward_batch.global_num_tokens_gpu, dim=0)
+            if dp_rank == 0:
+                local_start_pos = torch.zeros_like(cumtokens[0])
+            else:
+                local_start_pos = cumtokens[dp_rank - 1]
+            local_num_tokens = forward_batch.global_num_tokens_gpu[dp_rank]
 
-        forward_batch.dp_local_start_pos = local_start_pos
-        forward_batch.dp_local_num_tokens = local_num_tokens
+            forward_batch.dp_local_start_pos = local_start_pos
+            forward_batch.dp_local_num_tokens = local_num_tokens
 
-    return forward_batch.dp_local_start_pos, forward_batch.dp_local_num_tokens
+        return forward_batch.dp_local_start_pos, forward_batch.dp_local_num_tokens
 
 @triton.jit
 def memcpy_triton_kernel(
@@ -162,104 +162,104 @@ def memcpy_triton_kernel(
         data = tl.load(src_ptr + start_index + offs, mask=mask)
         tl.store(dst_ptr + offset + start_index + offs, data, mask=mask)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def prod(x):
-    return functools.reduce(lambda a, b: a * b, x, 1)
+    with nvtx.annotate(message="prod", color="gold", category="dp_attention"):
+        return functools.reduce(lambda a, b: a * b, x, 1)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def memcpy_triton(dst, src, dim, offset, sz, offset_src):
-    max_size = min(src.numel(), dst.numel())
-    assert dim == 0, "dim != 0 unsupported"
-    assert src.shape[1:] == dst.shape[1:], "src and dst must have same shape"
-    chunk_size = prod(src.shape[1:])
-    BLOCK_SIZE = 8192
-    grid = (triton.cdiv(max_size, BLOCK_SIZE),)
+    with nvtx.annotate(message="memcpy_triton", color="gold", category="dp_attention"):
+        max_size = min(src.numel(), dst.numel())
+        assert dim == 0, "dim != 0 unsupported"
+        assert src.shape[1:] == dst.shape[1:], "src and dst must have same shape"
+        chunk_size = prod(src.shape[1:])
+        BLOCK_SIZE = 8192
+        grid = (triton.cdiv(max_size, BLOCK_SIZE),)
 
-    memcpy_triton_kernel[grid](dst, src, offset, sz, offset_src, chunk_size, BLOCK_SIZE)
+        memcpy_triton_kernel[grid](dst, src, offset, sz, offset_src, chunk_size, BLOCK_SIZE)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def _dp_gather(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
     forward_batch: ForwardBatch,
     is_partial: bool,
 ):
-    local_start_pos, local_num_tokens = get_dp_local_info(forward_batch)
+    with nvtx.annotate(message="_dp_gather", color="gold", category="dp_attention"):
+        local_start_pos, local_num_tokens = get_dp_local_info(forward_batch)
 
-    global_tokens.fill_(0)
-    assert local_tokens.is_contiguous()
-    assert global_tokens.is_contiguous()
+        global_tokens.fill_(0)
+        assert local_tokens.is_contiguous()
+        assert global_tokens.is_contiguous()
 
-    if local_tokens.shape[0] > 0 and (is_partial or get_attention_tp_rank() == 0):
-        assert (
-            local_tokens.untyped_storage() is not global_tokens.untyped_storage()
-        ), "aliasing between global_tokens and local_tokens not allowed"
-        memcpy_triton(
-            global_tokens, local_tokens, 0, local_start_pos, local_num_tokens, False
-        )
+        if local_tokens.shape[0] > 0 and (is_partial or get_attention_tp_rank() == 0):
+            assert (
+                local_tokens.untyped_storage() is not global_tokens.untyped_storage()
+            ), "aliasing between global_tokens and local_tokens not allowed"
+            memcpy_triton(
+                global_tokens, local_tokens, 0, local_start_pos, local_num_tokens, False
+            )
 
-    # Input IDs are in int 32. We should use inplace_all_reduce for local case becaues of custom all reduce.
-    NUM_GPUS_PER_NODE = 8
-    if (
-        not local_tokens.dtype.is_floating_point
-        and get_tensor_model_parallel_world_size() <= NUM_GPUS_PER_NODE
-    ):
-        torch.ops.sglang.inplace_all_reduce(
-            global_tokens, group_name=get_tp_group().unique_name
-        )
+        # Input IDs are in int 32. We should use inplace_all_reduce for local case becaues of custom all reduce.
+        NUM_GPUS_PER_NODE = 8
+        if (
+            not local_tokens.dtype.is_floating_point
+            and get_tensor_model_parallel_world_size() <= NUM_GPUS_PER_NODE
+        ):
+            torch.ops.sglang.inplace_all_reduce(
+                global_tokens, group_name=get_tp_group().unique_name
+            )
 
-    else:
-        global_tokens[:] = tensor_model_parallel_all_reduce(global_tokens)
+        else:
+            global_tokens[:] = tensor_model_parallel_all_reduce(global_tokens)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def dp_gather_partial(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
     forward_batch: ForwardBatch,
 ):
-    _dp_gather(global_tokens, local_tokens, forward_batch, is_partial=True)
+    with nvtx.annotate(message="dp_gather_partial", color="gold", category="dp_attention"):
+        _dp_gather(global_tokens, local_tokens, forward_batch, is_partial=True)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def dp_gather_replicate(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
     forward_batch: ForwardBatch,
 ):
-    _dp_gather(global_tokens, local_tokens, forward_batch, is_partial=False)
+    with nvtx.annotate(message="dp_gather_replicate", color="gold", category="dp_attention"):
+        _dp_gather(global_tokens, local_tokens, forward_batch, is_partial=False)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def dp_scatter(
     local_tokens: torch.Tensor,  # output
     global_tokens: torch.Tensor,  # input
     forward_batch: ForwardBatch,
 ):
-    # local_num_tokens is not necessarily the same as local_tokens.shape[0],
-    # since local_tokens may be padded for cuda graph
-    local_start_pos, local_num_tokens = get_dp_local_info(forward_batch)
+    with nvtx.annotate(message="dp_scatter", color="gold", category="dp_attention"):
+        # local_num_tokens is not necessarily the same as local_tokens.shape[0],
+        # since local_tokens may be padded for cuda graph
+        local_start_pos, local_num_tokens = get_dp_local_info(forward_batch)
 
-    local_tokens.fill_(0)
-    assert local_tokens.is_contiguous()
-    assert global_tokens.is_contiguous()
-    if local_tokens.shape[0] > 0:
-        assert (
-            local_tokens.untyped_storage() is not global_tokens.untyped_storage()
-        ), "aliasing between local_tokens and global_tokens not allowed"
-        memcpy_triton(
-            local_tokens, global_tokens, 0, local_start_pos, local_num_tokens, True
-        )
+        local_tokens.fill_(0)
+        assert local_tokens.is_contiguous()
+        assert global_tokens.is_contiguous()
+        if local_tokens.shape[0] > 0:
+            assert (
+                local_tokens.untyped_storage() is not global_tokens.untyped_storage()
+            ), "aliasing between local_tokens and global_tokens not allowed"
+            memcpy_triton(
+                local_tokens, global_tokens, 0, local_start_pos, local_num_tokens, True
+            )
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def tp_all_reduce(input_: torch.Tensor):
-    return get_attention_tp_group().all_reduce(input_)
+    with nvtx.annotate(message="tp_all_reduce", color="gold", category="dp_attention"):
+        return get_attention_tp_group().all_reduce(input_)
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def tp_reduce_scatter(
     output: torch.Tensor,
     input_list: List[torch.Tensor],
 ):
-    return get_attention_tp_group().reduce_scatter(output, input_list)
+    with nvtx.annotate(message="tp_reduce_scatter", color="gold", category="dp_attention"):
+        return get_attention_tp_group().reduce_scatter(output, input_list)
 
 
-@nvtx.annotate(color="gold", category="dp_attention")
 def tp_all_gather(output_list: List[torch.Tensor], input_: torch.Tensor):
-    return get_attention_tp_group().all_gather(input_, tensor_list=output_list)
+    with nvtx.annotate(message="tp_all_gather", color="gold", category="dp_attention"):
+        return get_attention_tp_group().all_gather(input_, tensor_list=output_list)

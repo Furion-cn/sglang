@@ -275,30 +275,30 @@ class ReplicatedLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    @nvtx.annotate(color="violet", category="replicated_linear")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        # If the weight on disk does not have a shape, give it one
-        # (such scales for AutoFp8).
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
+        with nvtx.annotate(message="weight_loader", color="violet", category="replicated_linear"):
+            # If the weight on disk does not have a shape, give it one
+            # (such scales for AutoFp8).
+            if len(loaded_weight.shape) == 0:
+                loaded_weight = loaded_weight.reshape(1)
 
-        assert param.size() == loaded_weight.size()
-        param.data.copy_(loaded_weight)
+            assert param.size() == loaded_weight.size()
+            param.data.copy_(loaded_weight)
 
-    @nvtx.annotate(color="violet", category="replicated_linear")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        bias = self.bias if not self.skip_bias_add else None
-        assert self.quant_method is not None
-        output = self.quant_method.apply(self, x, bias)
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+        with nvtx.annotate(message="forward", color="violet", category="replicated_linear"):
+            bias = self.bias if not self.skip_bias_add else None
+            assert self.quant_method is not None
+            output = self.quant_method.apply(self, x, bias)
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
 
-    @nvtx.annotate(color="violet", category="replicated_linear")
     def extra_repr(self) -> str:
-        s = f"in_features={self.input_size}"
-        s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
-        return s
+        with nvtx.annotate(message="extra_repr", color="violet", category="replicated_linear"):
+            s = f"in_features={self.input_size}"
+            s += f", output_features={self.output_size}"
+            s += f", bias={self.bias is not None}"
+            return s
 
 
 class ColumnParallelLinear(LinearBase):
@@ -393,81 +393,81 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        output_dim = getattr(param, "output_dim", None)
+        with nvtx.annotate(message="weight_loader", color="plum", category="column_parallel_linear"):
+            output_dim = getattr(param, "output_dim", None)
 
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            param.weight_type = loaded_weight.item()
+            # Special case for GGUF
+            is_gguf_weight = getattr(param, "is_gguf_weight", False)
+            is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+            if is_gguf_weight_type:
+                param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+            # Materialize GGUF UninitializedParameter
+            if is_gguf_weight and isinstance(param, UninitializedParameter):
+                param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
 
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
 
-        param_data = param.data
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow here
-        if output_dim is not None and not use_bitsandbytes_4bit:
-            shard_size = param_data.shape[output_dim]
-            start_idx = self.tp_rank * shard_size
-            if not self.use_presharded_weights:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            param_data = param.data
+            # bitsandbytes loads the weights of the specific portion
+            # no need to narrow here
+            if output_dim is not None and not use_bitsandbytes_4bit:
+                shard_size = param_data.shape[output_dim]
+                start_idx = self.tp_rank * shard_size
+                if not self.use_presharded_weights:
+                    loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
 
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
+            # Special case for loading scales off disk, which often do not
+            # have a shape (such as in the case of AutoFP8).
+            if len(loaded_weight.shape) == 0:
+                loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+            assert param_data.shape == loaded_weight.shape
+            param_data.copy_(loaded_weight)
 
-    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
-        if len(loaded_weight.shape) == 0:
-            assert loaded_weight.numel() == 1
-            loaded_weight = loaded_weight.reshape(1)
+        with nvtx.annotate(message="weight_loader_v2", color="plum", category="column_parallel_linear"):
+            # Special case for loading scales off disk, which often do not
+            # have a shape (such as in the case of AutoFP8).
+            if len(loaded_weight.shape) == 0:
+                assert loaded_weight.numel() == 1
+                loaded_weight = loaded_weight.reshape(1)
 
-        if isinstance(param, _ColumnvLLMParameter):
-            param.load_column_parallel_weight(
-                loaded_weight,
-                tp_rank=self.tp_rank,
-                use_presharded_weights=self.use_presharded_weights,
-            )
-        else:
-            # FIXME: This branch is needed to load deepseek v3 awq.
-            # However, we should fix this and avoid the branching here.
-            param.load_column_parallel_weight(loaded_weight)
+            if isinstance(param, _ColumnvLLMParameter):
+                param.load_column_parallel_weight(
+                    loaded_weight,
+                    tp_rank=self.tp_rank,
+                    use_presharded_weights=self.use_presharded_weights,
+                )
+            else:
+                # FIXME: This branch is needed to load deepseek v3 awq.
+                # However, we should fix this and avoid the branching here.
+                param.load_column_parallel_weight(loaded_weight)
 
-    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def forward(self, input_):
-        bias = self.bias if not self.skip_bias_add else None
+        with nvtx.annotate(message="forward", color="plum", category="column_parallel_linear"):
+            bias = self.bias if not self.skip_bias_add else None
 
-        # Matrix multiply.
-        assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
-        if self.gather_output:
-            # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
-        else:
-            output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+            # Matrix multiply.
+            assert self.quant_method is not None
+            output_parallel = self.quant_method.apply(self, input_, bias)
+            if self.gather_output:
+                # All-gather across the partitions.
+                output = tensor_model_parallel_all_gather(output_parallel)
+            else:
+                output = output_parallel
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
 
-    @nvtx.annotate(color="plum", category="column_parallel_linear")
     def extra_repr(self) -> str:
-        s = f"in_features={self.input_size}"
-        s += f", output_features={self.output_size_per_partition}"
-        s += f", bias={self.bias is not None}"
-        s += f", tp_size={self.tp_size}"
-        s += f", gather_output={self.gather_output}"
-        return s
+        with nvtx.annotate(message="extra_repr", color="plum", category="column_parallel_linear"):
+            s = f"in_features={self.input_size}"
+            s += f", output_features={self.output_size_per_partition}"
+            s += f", bias={self.bias is not None}"
+            s += f", tp_size={self.tp_size}"
+            s += f", gather_output={self.gather_output}"
+            return s
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):
@@ -1227,96 +1227,95 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        input_dim = getattr(param, "input_dim", None)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        with nvtx.annotate(message="weight_loader", color="purple", category="row_parallel_linear"):
+            input_dim = getattr(param, "input_dim", None)
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
 
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            param.weight_type = loaded_weight.item()
+            # Special case for GGUF
+            is_gguf_weight = getattr(param, "is_gguf_weight", False)
+            is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+            if is_gguf_weight_type:
+                param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
-            weight_shape = list(loaded_weight.shape)
-            if input_dim:
-                weight_shape[input_dim] = weight_shape[input_dim] // self.tp_size
-            param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
+            # Materialize GGUF UninitializedParameter
+            if is_gguf_weight and isinstance(param, UninitializedParameter):
+                weight_shape = list(loaded_weight.shape)
+                if input_dim:
+                    weight_shape[input_dim] = weight_shape[input_dim] // self.tp_size
+                param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
-        param_data = param.data
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow here
-        if (
-            input_dim is not None
-            and not use_bitsandbytes_4bit
-            and not self.use_presharded_weights
-        ):
-            shard_size = param_data.shape[input_dim]
-            start_idx = self.tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
+            param_data = param.data
+            # bitsandbytes loads the weights of the specific portion
+            # no need to narrow here
+            if (
+                input_dim is not None
+                and not use_bitsandbytes_4bit
+                and not self.use_presharded_weights
+            ):
+                shard_size = param_data.shape[input_dim]
+                start_idx = self.tp_rank * shard_size
+                loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
 
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
+            # Special case for loading scales off disk, which often do not
+            # have a shape (such as in the case of AutoFP8).
+            if len(loaded_weight.shape) == 0:
+                loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+            assert param_data.shape == loaded_weight.shape
+            param_data.copy_(loaded_weight)
 
-    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
+        with nvtx.annotate(message="weight_loader_v2", color="purple", category="row_parallel_linear"):
+            # Special case for loading scales off disk, which often do not
+            # have a shape (such as in the case of AutoFP8).
+            if len(loaded_weight.shape) == 0:
+                assert loaded_weight.numel() == 1
+                loaded_weight = loaded_weight.reshape(1)
 
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
-        if len(loaded_weight.shape) == 0:
-            assert loaded_weight.numel() == 1
-            loaded_weight = loaded_weight.reshape(1)
+            if isinstance(param, RowvLLMParameter):
+                # This `BasevLLMParameter` is defined in sglang/srt/layers/parameter.py,
+                # It supports additional parameters like tp_rank and use_presharded_weights.
+                param.load_row_parallel_weight(
+                    loaded_weight,
+                    tp_rank=self.tp_rank,
+                    use_presharded_weights=self.use_presharded_weights,
+                )
+            else:
+                # `params` is defined in `vllm/model_executor/parameter.py`,
+                # It does not support additional parameters.
+                param.load_row_parallel_weight(loaded_weight)
 
-        if isinstance(param, RowvLLMParameter):
-            # This `BasevLLMParameter` is defined in sglang/srt/layers/parameter.py,
-            # It supports additional parameters like tp_rank and use_presharded_weights.
-            param.load_row_parallel_weight(
-                loaded_weight,
-                tp_rank=self.tp_rank,
-                use_presharded_weights=self.use_presharded_weights,
-            )
-        else:
-            # `params` is defined in `vllm/model_executor/parameter.py`,
-            # It does not support additional parameters.
-            param.load_row_parallel_weight(loaded_weight)
-
-    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def forward(self, input_):
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size
-            )
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+        with nvtx.annotate(message="forward", color="purple", category="row_parallel_linear"):
+            if self.input_is_parallel:
+                input_parallel = input_
+            else:
+                splitted_input = split_tensor_along_last_dim(
+                    input_, num_partitions=self.tp_size
+                )
+                input_parallel = splitted_input[self.tp_rank].contiguous()
 
-        # Matrix multiply.
-        assert self.quant_method is not None
-        # Only fuse bias add into GEMM for rank 0 (this ensures that
-        # bias will not get added more than once in TP>1 case)
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
-        if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
-        else:
-            output = output_parallel
+            # Matrix multiply.
+            assert self.quant_method is not None
+            # Only fuse bias add into GEMM for rank 0 (this ensures that
+            # bias will not get added more than once in TP>1 case)
+            bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
+            if self.reduce_results and self.tp_size > 1:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
 
-        output_bias = self.bias if self.skip_bias_add else None
+            output_bias = self.bias if self.skip_bias_add else None
 
-        return output, output_bias
+            return output, output_bias
 
-    @nvtx.annotate(color="purple", category="row_parallel_linear")
     def extra_repr(self) -> str:
-        s = f"input_features={self.input_size_per_partition}"
-        s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
-        s += f", tp_size={self.tp_size}"
-        s += f", reduce_results={self.reduce_results}"
-        return s
+        with nvtx.annotate(message="extra_repr", color="purple", category="row_parallel_linear"):
+            s = f"input_features={self.input_size_per_partition}"
+            s += f", output_features={self.output_size}"
+            s += f", bias={self.bias is not None}"
+            s += f", tp_size={self.tp_size}"
+            s += f", reduce_results={self.reduce_results}"
+            return s

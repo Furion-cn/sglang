@@ -67,7 +67,6 @@ class RadixAttention(nn.Module):
         if self.quant_method is not None:
             self.quant_method.create_weights(self)
 
-    @nvtx.annotate(color="darkred", category="radix_attention")
     def forward(
         self,
         q,
@@ -76,12 +75,13 @@ class RadixAttention(nn.Module):
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
     ):
-        if k is not None:
-            # For cross-layer sharing, kv can be None
-            assert v is not None
-            k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
-            v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
+        with nvtx.annotate(message="weight_loader_v2", color="darkred", category="radix_attention"):
+            if k is not None:
+                # For cross-layer sharing, kv can be None
+                assert v is not None
+                k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
+                v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
 
-        return forward_batch.attn_backend.forward(
-            q, k, v, self, forward_batch, save_kv_cache
-        )
+            return forward_batch.attn_backend.forward(
+                q, k, v, self, forward_batch, save_kv_cache
+            )

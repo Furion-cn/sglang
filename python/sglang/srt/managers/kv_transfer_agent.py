@@ -336,7 +336,7 @@ class KVTransferAgent:
             cache, block_sizes=[2**i for i in range(3, 14)])
         self.req_to_kv_buffer_offset = {}
 
-    @nvtx.annotate(color="red")
+    @nvtx.annotate(color="red", category="kv_transfer_agent")
     def set_kv_buffer(self, req: Req):
         if self.attn_tp_rank != 0:
             return 0
@@ -344,13 +344,13 @@ class KVTransferAgent:
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
-        with nvtx.annotate(message="set_stack", color="blue"):
+        with nvtx.annotate(message="set_stack", color="blue", category="kv_transfer_agent"):
             kv_cache = torch.stack(
                 [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
                 for i in range(self.layer_num)]
             ).permute(1, 0, 2, 3).contiguous().to(self.device, non_blocking=True)
             torch.cuda.synchronize()
-        with nvtx.annotate(message="set_item", color="blue"):
+        with nvtx.annotate(message="set_item", color="blue", category="kv_transfer_agent"):
             offset = self.kv_buffer.set_item(kv_cache)
         self.req_to_kv_buffer_offset[req.rid] = offset
 
