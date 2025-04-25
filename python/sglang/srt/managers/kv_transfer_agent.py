@@ -269,7 +269,6 @@ class KVBuffer:
                 block.capacity for block in self.blocks.values() if block.length == 0]
         )
 
-
 KV_TRANSFER_AGENT_PORT = 19000
 
 
