@@ -117,12 +117,11 @@ class KVBuffer:
         largest_block = self.block_sizes[-1]
         return ((length + largest_block - 1) // largest_block) * largest_block
 
-    def set_item(self, item: torch.Tensor, non_blocking: bool = False) -> int:
+    def write_item(self, item: torch.Tensor, offset: int, non_blocking: bool = False):
         assert item.shape[1:] == self.cache.shape[1:], \
             f"item shape {item.shape} does not match cache shape {self.cache.shape}"
         offset = self.allocate(item.shape[0])
         self.cache[offset:offset + item.shape[0]].copy_(item, non_blocking=non_blocking)
-        return offset
 
     def get_item(self, offset: int) -> torch.Tensor:
         # Use the length to get the exact tensor that was set
@@ -136,9 +135,9 @@ class KVBuffer:
         if offset < 0:
             self._clean_fragment()
             offset = self._allocate(aligned_capacity, length)
-        if offset < 0:
-            raise Exception(
-                f"No enough free space for length {length} (aligned to {aligned_capacity}, stats: {self.stats()})")
+        # if offset < 0:
+        #     raise Exception(
+        #         f"No enough free space for length {length} (aligned to {aligned_capacity})")
         return offset
 
     def _allocate(self, capacity: int, length: int = None) -> int:
@@ -269,7 +268,6 @@ class KVBuffer:
                 block.capacity for block in self.blocks.values() if block.length == 0]
         )
 
-
 KV_TRANSFER_AGENT_PORT = 19000
 
 
@@ -339,7 +337,7 @@ class KVTransferAgent:
     def get_kv_buffer_stats(self):
         return self.kv_buffer.stats()
 
-    @nvtx.annotate("KVTransferAgent.set_kv_buffer", color="red")
+    @nvtx.annotate(color="red", category="kv_transfer_agent")
     def set_kv_buffer(self, req: Req):
         if self.attn_tp_rank != 0:
             return 0
@@ -347,21 +345,37 @@ class KVTransferAgent:
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
+        with nvtx.annotate(message="set_stack", color="blue", category="kv_transfer_agent"):
+            kv_cache = torch.stack(
+                [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
+                for i in range(self.layer_num)]
+            ).permute(1, 0, 2, 3).contiguous().to(self.device, non_blocking=True)
+            torch.cuda.synchronize()
+        with nvtx.annotate(message="write_item", color="blue", category="kv_transfer_agent"):
+            offset = self.req_to_kv_buffer_offset.get(req.rid)
+            if offset is None:
+                raise Exception(
+                    f"KV transfer fetch request {req.rid} not found")
+            self.kv_buffer.write_item(kv_cache, offset)
 
-        nvtx.push_range("KVTransferAgent.set_kv_buffer.stack_and_permute")
-        kv_cache = torch.stack(
-            [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
-             for i in range(self.layer_num)]
-        ).permute(1, 0, 2, 3).contiguous().to(self.device, non_blocking=True)
-        nvtx.pop_range()
-
-        nvtx.push_range("KVTransferAgent.set_kv_buffer.set_item")
-        offset = self.kv_buffer.set_item(kv_cache, non_blocking=True)
-        nvtx.pop_range()
-
+    def allocate_kv_buffer(self, req: Req):
+        if self.attn_tp_rank != 0:
+            return 0
+        token_ids = (req.origin_input_ids + req.output_ids)[:-1]
+        offset = self.kv_buffer.allocate(len(token_ids))
+        if offset < 0:
+            return -1
         self.req_to_kv_buffer_offset[req.rid] = offset
+        return offset
 
-    @nvtx.annotate("KVTransferAgent.get_kv_buffer", color="red")
+    def free_kv_buffer(self, req: Req):
+        offset = self.req_to_kv_buffer_offset.get(req.rid)
+        if offset is None:
+            raise Exception(
+                f"KV transfer fetch request {req.rid} not found")
+        self.kv_buffer.free(offset)
+        del self.req_to_kv_buffer_offset[req.rid]
+
     def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         if not req_list:
             return {}
@@ -385,11 +399,15 @@ class KVTransferAgent:
             return {}
         res = {}
         offsets = []
+        # First allocate space in decoder, then transfer KV cache from prefill instance
         try:
             start_time = time.time()
             dst_ptrs = []
             for req in req_list:
                 offset = self.kv_buffer.allocate(len(req.origin_input_ids))
+                if offset < 0:
+                    raise Exception(
+                        f"No enough free space for length {len(req.origin_input_ids)}")
                 dst_ptrs.append(self.kv_buffer.data_ptr(offset))
                 offsets.append(offset)
 

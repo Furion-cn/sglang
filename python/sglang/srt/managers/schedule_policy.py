@@ -318,7 +318,7 @@ class PrefillAdder:
     @property
     def kv_buffer_available_size(self):
         return self.kv_transfer_agent.get_kv_buffer_stats().available_size
-    
+
     @property
     def kv_buffer_available_blocks(self):
         return self.kv_transfer_agent.get_kv_buffer_stats().available_block_sizes
@@ -471,30 +471,21 @@ class PrefillAdder:
         input_tokens = req.extend_input_len
         prefix_len = len(req.prefix_indices)
 
-        kv_buffer_available_size = self.kv_buffer_available_size
-        available_blocks = self.kv_buffer_available_blocks
-        if kv_buffer_available_size < total_tokens or not available_blocks:
-            logger.warning(
-                f"KV buffer space insufficient: required={total_tokens}, "
-                f"available kv buffer available_size={self.kv_buffer_available_size}"
-            )
-            return AddReqResult.OTHER
-        max_block = max(available_blocks)
-        if total_tokens > max_block:
-            logger.warning(
-                f"KV buffer space insufficient: required={total_tokens}, "
-                f"available max kv buffer block={max_block}"
-            )
-            return AddReqResult.OTHER
-
         if total_tokens >= self.rem_total_tokens:
             return AddReqResult.NO_TOKEN
 
         if input_tokens > self.rem_input_tokens and len(self.can_run_list) != 0:
             return AddReqResult.OTHER
 
+        offset = self.kv_transfer_agent.allocate_kv_buffer(req)
+        if offset < 0:
+            logger.warning(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.kv_buffer.available_size}")
+            return AddReqResult.OTHER
+
         with self._lock_node(req.last_node):
             if total_tokens > self.rem_total_tokens:
+                self.kv_transfer_agent.free_kv_buffer(req)
+                logger.debug(f"KV cache space insufficient: required={total_tokens}, available={self.rem_total_tokens}, free kv buffer for req {req.rid}")
                 return AddReqResult.NO_TOKEN
 
             if (
@@ -523,6 +514,8 @@ class PrefillAdder:
                 )
             else:
                 if self.rem_chunk_tokens == 0:
+                    self.kv_transfer_agent.free_kv_buffer(req)
+                    logger.debug(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.kv_buffer.available_size}, free kv buffer for req {req.rid}")
                     return AddReqResult.OTHER
 
                 # Chunked prefill
