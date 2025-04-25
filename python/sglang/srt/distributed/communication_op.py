@@ -1,7 +1,6 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/communication_op.py
 
 from typing import Any, Dict, Optional, Union
-from unicodedata import category
 
 import torch
 import nvtx
