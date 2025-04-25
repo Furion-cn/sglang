@@ -27,6 +27,7 @@ from sglang.srt.layers.parameter import (
     RowvLLMParameter,
     _ColumnvLLMParameter,
 )
+from sglang.srt.layers.dp_attention import tp_all_reduce
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -1303,7 +1304,7 @@ class RowParallelLinear(LinearBase):
             bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
             output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
             if self.reduce_results and self.tp_size > 1:
-                output = tensor_model_parallel_all_reduce(output_parallel)
+                output = tp_all_reduce(output_parallel)
             else:
                 output = output_parallel
 
