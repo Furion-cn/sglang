@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, List
 
 import torch
+import nvtx
 import triton
 import triton.language as tl
 

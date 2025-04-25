@@ -16,6 +16,7 @@
 import logging
 from typing import Optional, Tuple, Union
 
+import nvtx
 import torch
 import torch.nn as nn
 

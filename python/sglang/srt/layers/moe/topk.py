@@ -13,6 +13,8 @@
 # ==============================================================================
 
 import math
+import nvtx
+
 from typing import Callable, Optional
 
 import torch

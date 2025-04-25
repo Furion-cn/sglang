@@ -13,6 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import nvtx
 import torch
 import torch.distributed as dist
 

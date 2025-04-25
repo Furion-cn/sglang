@@ -4,6 +4,7 @@ from abc import abstractmethod
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
+import nvtx
 import torch
 
 from sglang.srt.custom_op import CustomOp

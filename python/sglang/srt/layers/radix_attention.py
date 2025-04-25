@@ -12,6 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 """Radix attention."""
+import nvtx
 
 from typing import Optional
 

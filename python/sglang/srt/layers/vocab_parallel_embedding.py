@@ -1,5 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.3.post1/vllm/model_executor/layers/vocab_parallel_embedding.py
 
+import nvtx
+
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 

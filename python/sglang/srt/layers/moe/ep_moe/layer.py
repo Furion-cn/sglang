@@ -1,6 +1,7 @@
 import logging
 from typing import Callable, List, Optional, Tuple
 
+import nvtx
 import torch
 from torch.nn import Module
 

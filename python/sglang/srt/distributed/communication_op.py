@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional, Union
 
 import torch
+import nvtx
 import torch.distributed
 
 from .parallel_state import get_tp_group
