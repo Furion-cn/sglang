@@ -346,6 +346,7 @@ class KVTransferAgent:
             [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
              for i in range(self.layer_num)]
         ).permute(1, 0, 2, 3).contiguous().to(self.device, non_blocking=True)
+        torch.cuda.synchronize()
         offset = self.kv_buffer.set_item(kv_cache)
         self.req_to_kv_buffer_offset[req.rid] = offset
 
