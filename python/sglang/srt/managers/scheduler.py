@@ -383,8 +383,8 @@ class Scheduler(
             1.0,
         )
         self.new_token_ratio_decay = (
-            self.init_new_token_ratio - self.min_new_token_ratio
-        ) / global_config.default_new_token_ratio_decay_steps
+                                         self.init_new_token_ratio - self.min_new_token_ratio
+                                     ) / global_config.default_new_token_ratio_decay_steps
         self.new_token_ratio = self.init_new_token_ratio
 
         # Init watchdog thread
@@ -699,6 +699,76 @@ class Scheduler(
 
             self.last_batch = batch
 
+    @torch.no_grad()
+    def event_loop_normal_disagg_prefill(self):
+        """A normal scheduler loop for prefill worker in disaggregation mode."""
+
+        while True:
+            recv_reqs = self.recv_requests()
+            self.process_input_requests(recv_reqs)
+            self.waiting_queue.extend(
+                self.disagg_prefill_pending_queue.pop_bootstrapped()
+            )
+            self.process_prefill_chunk()
+            batch = self.get_new_batch_prefill()
+            self.cur_batch = batch
+
+            if batch:
+                result = self.run_batch(batch)
+                self.process_batch_result_disagg_prefill(batch, result)
+
+            if len(self.aborted_reqs) > 0:
+                self.process_aborted_requests()
+
+            if len(self.disagg_prefill_inflight_queue) > 0:
+                self.process_disagg_prefill_inflight_queue()
+
+            if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
+                self.check_memory()
+                self.new_token_ratio = self.init_new_token_ratio
+
+            self.last_batch = batch
+            # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
+            # Otherwise, it hangs under high concurrency
+            self.running_batch.batch_is_full = False
+
+    @torch.no_grad()
+    def event_loop_normal_disagg_decode(self):
+        """A normal scheduler loop for decode worker in disaggregation mode."""
+
+        while True:
+            recv_reqs = self.recv_requests()
+            self.process_input_requests(recv_reqs)
+            # polling and allocating kv cache
+            self.process_decode_queue()
+            batch = self.get_next_disagg_decode_batch_to_run()
+            self.cur_batch = batch
+
+            if batch:
+                # Generate fake extend output.
+                if batch.forward_mode.is_extend():
+                    # Note: Logprobs should be handled on the prefill engine.
+                    self.stream_output(
+                        batch.reqs, [False for _ in range(len(batch.reqs))]
+                    )
+                else:
+                    result = self.run_batch(batch)
+                    self.process_batch_result(batch, result)
+
+            if len(self.aborted_reqs) > 0:
+                self.process_aborted_requests()
+
+            if batch is None and (
+                len(self.disagg_decode_transfer_queue.queue)
+                + len(self.disagg_decode_prealloc_queue.queue)
+                == 0
+            ):
+                # When the server is idle, do self-check and re-init some states
+                self.check_memory()
+                self.new_token_ratio = self.init_new_token_ratio
+
+            self.last_batch = batch
+
     def recv_requests(self) -> List[Req]:
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
         if self.attn_tp_rank == 0:
@@ -728,14 +798,24 @@ class Scheduler(
                     req
                     for req in recv_reqs
                     if isinstance(
-                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput)
+                        req,
+                        (
+                            TokenizedGenerateReqInput,
+                            TokenizedEmbeddingReqInput,
+                            PrefilledReqInput,
+                        ),
                     )
                 ]
                 control_reqs = [
                     req
                     for req in recv_reqs
                     if not isinstance(
-                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput)
+                        req,
+                        (
+                            TokenizedGenerateReqInput,
+                            TokenizedEmbeddingReqInput,
+                            PrefilledReqInput,
+                        ),
                     )
                 ]
             else:
@@ -1220,7 +1300,10 @@ class Scheduler(
             else:
                 ret = self.get_new_batch_prefill()
 
-            if self.server_args.enable_dp_attention or self.server_args.enable_sp_layernorm:
+            if (
+                self.server_args.enable_dp_attention
+                or self.server_args.enable_sp_layernorm
+            ):
                 ret, _ = self.prepare_dp_attn_batch(ret)
 
             return ret
@@ -1278,7 +1361,7 @@ class Scheduler(
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
             return None
-         # Get priority queue
+        # Get priority queue
         prefix_computed = self.policy.calc_priority(self.waiting_queue)
 
         adder = PrefillAdder(
@@ -1306,10 +1389,10 @@ class Scheduler(
             if (
                 self.lora_paths
                 and len(
-                    lora_set
-                    | set([req.lora_path for req in adder.can_run_list])
-                    | set([req.lora_path])
-                )
+                lora_set
+                | set([req.lora_path for req in adder.can_run_list])
+                | set([req.lora_path])
+            )
                 > self.max_loras_per_batch
             ):
                 self.running_batch.batch_is_full = True
@@ -1323,15 +1406,13 @@ class Scheduler(
                 self.running_batch.batch_is_full = True
                 break
 
-            req.output_ids = [] # clear output_ids
+            req.output_ids = []  # clear output_ids
             req.init_next_round_input(
                 None if prefix_computed else self.tree_cache,
                 self.enable_hierarchical_cache,
             )
 
-            res = adder.add_one_req(
-                req, False, self.enable_hierarchical_cache
-            )
+            res = adder.add_one_req(req, False, self.enable_hierarchical_cache)
             if res != AddReqResult.CONTINUE:
                 if res == AddReqResult.NO_TOKEN:
                     if self.enable_hierarchical_cache:
@@ -1346,7 +1427,9 @@ class Scheduler(
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
         self.waiting_queue = [
-            x for x in self.waiting_queue if x not in set(can_run_list) and x not in self.aborted_reqs
+            x
+            for x in self.waiting_queue
+            if x not in set(can_run_list) and x not in self.aborted_reqs
         ]
         for req in self.waiting_queue:
             if req.rid in origin_output_ids:
@@ -1384,7 +1467,7 @@ class Scheduler(
             self.server_args.enable_custom_logit_processor,
         )
 
-        logger.debug(f"[Scheduler] Recovered new prefilled batch with kv_buffer: {kv_buffer.keys()}")
+        # logger.debug(f"[Scheduler] Recovered new prefilled batch with kv_buffer: {kv_buffer.keys()}")
         new_batch.recover_for_decode(origin_output_ids, kv_buffer)
         return new_batch
 
@@ -1435,10 +1518,10 @@ class Scheduler(
             if (
                 self.lora_paths
                 and len(
-                    lora_set
-                    | set([req.lora_path for req in adder.can_run_list])
-                    | set([req.lora_path])
-                )
+                lora_set
+                | set([req.lora_path for req in adder.can_run_list])
+                | set([req.lora_path])
+            )
                 > self.max_loras_per_batch
             ):
                 self.running_batch.batch_is_full = True
@@ -1467,9 +1550,9 @@ class Scheduler(
                         self.running_batch.batch_is_full = len(
                             adder.can_run_list
                         ) > 0 or (
-                            self.running_batch is not None
-                            and not self.running_batch.is_empty()
-                        )
+                                                               self.running_batch is not None
+                                                               and not self.running_batch.is_empty()
+                                                           )
                     else:
                         self.running_batch.batch_is_full = True
                 break
@@ -1485,7 +1568,9 @@ class Scheduler(
                 req.queue_time_end = time.time()
 
         self.waiting_queue = [
-            x for x in self.waiting_queue if x not in set(can_run_list) and x not in self.aborted_reqs
+            x
+            for x in self.waiting_queue
+            if x not in set(can_run_list) and x not in self.aborted_reqs
         ]
 
         if self.enable_hierarchical_cache:
@@ -1651,7 +1736,7 @@ class Scheduler(
     def process_aborted_requests(self):
         if self.kv_transfer_agent.role != "decode":
             return
-        logger.debug(f"[Scheduler] Processing aborted requests: {self.aborted_reqs.keys()}")
+        # logger.debug(f"[Scheduler] Processing aborted requests: {self.aborted_reqs.keys()}")
         self.process_aborted_result(self.aborted_reqs.values())
         self.aborted_reqs = {}
 
@@ -1722,8 +1807,8 @@ class Scheduler(
                     # We should have at least 1 token for sample in every case.
                     max(extend_len - logprob_start_len, 1)
                     for logprob_start_len, extend_len in zip(
-                        local_batch.extend_logprob_start_lens, local_batch.extend_lens
-                    )
+                    local_batch.extend_logprob_start_lens, local_batch.extend_lens
+                )
                 ]
             )
 
@@ -1977,13 +2062,13 @@ class Scheduler(
         # Sort in reverse order to avoid index issues when deleting
         for i in sorted(to_del, reverse=True):
             req = self.waiting_queue.pop(i)
-            logger.debug(f"Abort queued request. {req.rid=}")
+            # logger.debug(f"Abort queued request. {req.rid=}")
             return
 
         # Delete requests in the running batch
         for req in self.running_batch.reqs:
             if req.rid.startswith(recv_req.rid) and not req.finished():
-                logger.debug(f"Abort running request. {req.rid=}")
+                # logger.debug(f"Abort running request. {req.rid=}")
                 req.to_abort = True
                 return
 
@@ -2167,13 +2252,13 @@ class Scheduler(
         else:
             raise ValueError("Unrecognized ExpertDistributionReq value")
 
-    def start_expert_distribution_record(self, 
+    def start_expert_distribution_record(self,
                                          num_steps: Optional[int] = None,
                                          output_dir: Optional[str] = None):
         self.record_expert_distribution_forward_ct = self.forward_ct + num_steps
         self.record_expert_distribution_output_dir = output_dir
         expert_distribution_recorder.start_record()
-        
+
     def stop_expert_distribution_record(self):
         expert_distribution_recorder.stop_record()
         expert_distribution_recorder.dump_record(self.record_expert_distribution_output_dir)

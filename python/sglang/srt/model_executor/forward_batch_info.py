@@ -40,6 +40,10 @@ import triton.language as tl
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.utils import get_compiler_backend
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
     from sglang.srt.managers.schedule_batch import ModelWorkerBatch, MultimodalInputs
@@ -225,6 +229,7 @@ class ForwardBatch:
     req_to_token_pool: ReqToTokenPool = None
     token_to_kv_pool: KVCache = None
     attn_backend: AttentionBackend = None
+    attn_backend1: AttentionBackend = None
 
     # For DP attention
     global_num_tokens_cpu: Optional[List[int]] = None
@@ -285,12 +290,15 @@ class ForwardBatch:
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
             attn_backend=model_runner.attn_backend,
+            attn_backend1=model_runner.attn_backend1,
             spec_algorithm=batch.spec_algorithm,
             spec_info=batch.spec_info,
             capture_hidden_mode=batch.capture_hidden_mode,
             input_embeds=batch.input_embeds,
             extend_input_logprob_token_ids_gpu=extend_input_logprob_token_ids_gpu,
         )
+        # logger.debug(f"ModelRunner: attn_backend: {model_runner.attn_backend}, attn1_backend: {model_runner.attn_backend1}")
+        # logger.debug(f"ForwardBatch: attn_backend: {ret.attn_backend}, attn1_backend: {ret.attn_backend1}")
 
         # For DP attention
         if batch.global_num_tokens is not None:
@@ -433,13 +441,13 @@ class ForwardBatch:
                 if mm_input is None:
                     # text only
                     mrope_positions = [
-                        [
-                            pos
-                            for pos in range(
-                                extend_prefix_len, extend_prefix_len + extend_seq_len
-                            )
-                        ]
-                    ] * 3
+                                          [
+                                              pos
+                                              for pos in range(
+                                              extend_prefix_len, extend_prefix_len + extend_seq_len
+                                          )
+                                          ]
+                                      ] * 3
                 else:
                     image_grid_thws_list = [
                         item.image_grid_thws
@@ -478,8 +486,8 @@ class ForwardBatch:
                     mrope_positions, mrope_position_delta = (
                         MRotaryEmbedding.get_input_positions(
                             input_tokens=self.input_ids[
-                                extend_start_loc : extend_start_loc + extend_seq_len
-                            ].tolist(),
+                                         extend_start_loc: extend_start_loc + extend_seq_len
+                                         ].tolist(),
                             image_grid_thw=image_grid_thw,
                             video_grid_thw=video_grid_thw,
                             image_token_id=hf_config.image_token_id,
@@ -589,8 +597,8 @@ class ForwardBatch:
         self.prefix_chunk_len = chunk_capacity // self.batch_size
 
         self.num_prefix_chunks = (
-            max(self.extend_prefix_lens_cpu) + self.prefix_chunk_len - 1
-        ) // self.prefix_chunk_len
+                                     max(self.extend_prefix_lens_cpu) + self.prefix_chunk_len - 1
+                                 ) // self.prefix_chunk_len
 
         # Here we compute chunk lens twice to avoid stream sync, once on gpu and once on cpu.
         prefix_chunk_starts_cuda, prefix_chunk_seq_lens_cuda = (

@@ -174,7 +174,7 @@ class ModelRunner:
         )
 
         # CPU offload
-        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024**3))
+        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024 ** 3))
 
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
@@ -925,6 +925,7 @@ class ModelRunner:
             )
 
             self.attn_backend = FlashAttentionBackend(self)
+            self.attn_backend1 = FlashAttentionBackend(self)
         else:
             raise ValueError(
                 f"Invalid attention backend: {self.server_args.attention_backend}"
@@ -941,7 +942,7 @@ class ModelRunner:
             key = "model.layers." + str(i) + ".self_attn" + selected_channel
             self.sorted_channels.append(
                 torch.tensor(channel_config[key])[
-                    :, : self.server_args.ds_heavy_channel_num
+                :, : self.server_args.ds_heavy_channel_num
                 ]
                 .contiguous()
                 .cuda()
@@ -988,8 +989,8 @@ class ModelRunner:
         self.attn_backend.init_forward_metadata(forward_batch)
         torch.cuda.nvtx.range_pop()
         return self.model.forward(
-                forward_batch.input_ids, forward_batch.positions, forward_batch
-            )
+            forward_batch.input_ids, forward_batch.positions, forward_batch
+        )
 
     def forward_extend(
         self, forward_batch: ForwardBatch, skip_attn_backend_init: bool = False
@@ -1039,8 +1040,8 @@ class ModelRunner:
             return self.forward_decode(forward_batch)
         elif forward_batch.forward_mode.is_extend():
             return self.forward_extend(
-                    forward_batch, skip_attn_backend_init=skip_attn_backend_init
-                )
+                forward_batch, skip_attn_backend_init=skip_attn_backend_init
+            )
         elif forward_batch.forward_mode.is_idle():
             return self.forward_idle(forward_batch)
         else:
