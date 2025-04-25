@@ -1471,7 +1471,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
 
-    @nvtx.annotate(color="cadeblue", category="deepseek_v2_model")
+    @nvtx.annotate(color="cadetblue", category="deepseek_v2_model")
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1502,7 +1502,7 @@ class DeepseekV2Model(nn.Module):
 
         self.dp_size = get_attention_dp_size()
 
-    @nvtx.annotate(color="cadeblue", category="deepseek_v2_model")
+    @nvtx.annotate(color="cadetblue", category="deepseek_v2_model")
     def forward(
         self,
         input_ids: torch.Tensor,
