@@ -372,8 +372,8 @@ class EPMoE(torch.nn.Module):
         )
         return output
 
-    @classmethod
     @nvtx.annotate(color="lightskyblue", category="ep_moe")
+    @classmethod
     def make_expert_params_mapping(
         cls,
         ckpt_gate_proj_name: str,
