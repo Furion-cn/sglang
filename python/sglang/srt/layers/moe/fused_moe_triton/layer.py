@@ -655,7 +655,6 @@ class FusedMoE(torch.nn.Module):
 
         return final_hidden_states
 
-    @nvtx.annotate(color="steelblue", category="fused_moe")
     @classmethod
     def make_expert_params_mapping(
         cls,

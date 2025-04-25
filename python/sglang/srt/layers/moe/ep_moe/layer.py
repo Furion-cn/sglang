@@ -372,7 +372,6 @@ class EPMoE(torch.nn.Module):
         )
         return output
 
-    @nvtx.annotate(color="lightskyblue", category="ep_moe")
     @classmethod
     def make_expert_params_mapping(
         cls,
