@@ -450,6 +450,7 @@ class ColumnParallelLinear(LinearBase):
         with nvtx.annotate(message="forward", color="plum", category="column_parallel_linear"):
             bias = self.bias if not self.skip_bias_add else None
 
+<<<<<<< HEAD
 
             # Matrix multiply.
             assert self.quant_method is not None
@@ -462,6 +463,24 @@ class ColumnParallelLinear(LinearBase):
 
             output_bias = self.bias if self.skip_bias_add else None
             return output, output_bias
+=======
+        logger.info(f"ColumnParallelLinear forward {input_.shape}")
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self, input_, bias)
+        if self.gather_output:
+            # All-gather across the partitions.
+            logger.info(f"tensor_model_parallel_all_gather start")
+            output = tensor_model_parallel_all_gather(output_parallel)
+            logger.info(f"tensor_model_parallel_all_gather end")
+        else:
+            output = output_parallel
+
+        logger.info(f"ColumnParallelLinear forward end {output.shape}")
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+>>>>>>> 89c78992 (fix: add some debug logs in Linear)
 
     def extra_repr(self) -> str:
         with nvtx.annotate(message="extra_repr", color="plum", category="column_parallel_linear"):
@@ -1290,6 +1309,7 @@ class RowParallelLinear(LinearBase):
                 param.load_row_parallel_weight(loaded_weight)
 
     def forward(self, input_):
+<<<<<<< HEAD
         with nvtx.annotate(message="forward", color="purple", category="row_parallel_linear"):
             if self.input_is_parallel:
                 input_parallel = input_
@@ -1313,6 +1333,35 @@ class RowParallelLinear(LinearBase):
 
             output_bias = self.bias if self.skip_bias_add else None
             return output, output_bias
+=======
+        logger.info(f"RowParallelLinear forward start {input_.shape}, {self.input_is_parallel}")
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size
+            )
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        logger.info(f"RowParallelLinear forward input_parallel {input_parallel.shape}")
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
+        logger.info(f"RowParallelLinear forward output_parallel {output_parallel.shape}")
+        if self.reduce_results and self.tp_size > 1:
+            logger.info(f"reduce_results {output_parallel.shape}")
+            output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+        logger.info(f"RowParallelLinear forward end {output.shape}")
+        return output, output_bias
+>>>>>>> 89c78992 (fix: add some debug logs in Linear)
 
     def extra_repr(self) -> str:
         with nvtx.annotate(message="extra_repr", color="purple", category="row_parallel_linear"):

@@ -864,6 +864,7 @@ class DeepEPMoE(EPMoE):
         reorder_topk_ids: torch.Tensor,
         seg_indptr: torch.Tensor,
     ):
+<<<<<<< HEAD
         with nvtx.annotate(message="forward_normal", color="deepskyblue", category="deepep_moe"):
             assert self.quant_method is not None
             assert self.activation == "silu"
@@ -871,6 +872,15 @@ class DeepEPMoE(EPMoE):
                 self.grouped_gemm_runner = GroupedGemmRunner(
                     hidden_states.device, use_flashinfer=False  # TODO: use flashinfer
                 )
+=======
+        logger.info(f"DeepEPMoE.forward_normal {hidden_states.shape}")
+        assert self.quant_method is not None
+        assert self.activation == "silu"
+        if self.grouped_gemm_runner is None:
+            self.grouped_gemm_runner = GroupedGemmRunner(
+                hidden_states.device, use_flashinfer=False  # TODO: use flashinfer
+            )
+>>>>>>> 89c78992 (fix: add some debug logs in Linear)
 
             if self.activation_scheme == "dynamic" and not self.use_block_quant:
                 max_value = (

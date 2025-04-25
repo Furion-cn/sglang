@@ -1207,6 +1207,7 @@ class Scheduler(
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.metrics_collector.log_stats(self.stats)
 
+    @nvtx.annotate("Scheduler.get_next_batch_to_run", color="green")
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         if self.server_args.kv_transfer_config is not None:
             if self.last_batch:
@@ -1274,6 +1275,7 @@ class Scheduler(
 
         return ret
 
+    @nvtx.annotate("Scheduler.recover_new_prefilled_batch", color="green")
     def recover_new_prefilled_batch(self) -> Optional[ScheduleBatch]:
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
@@ -1396,6 +1398,7 @@ class Scheduler(
         new_batch.recover_for_decode(origin_output_ids, kv_buffer)
         return new_batch
 
+    @nvtx.annotate("Scheduler.get_new_batch_prefill", color="green")
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
         # Check if the grammar is ready in the grammar queue
         if self.grammar_queue:
@@ -1523,8 +1526,11 @@ class Scheduler(
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
         )
-        new_batch.prepare_for_extend()
 
+        nvtx.push_range(f"Scheduler.get_new_batch_prefill.prepare_for_extend {adder.log_input_tokens}")
+        new_batch.prepare_for_extend()
+        nvtx.pop_range()
+        
         # Mixed-style chunked prefill
         if (
             self.is_mixed_chunk
@@ -1588,6 +1594,7 @@ class Scheduler(
         batch.prepare_for_decode()
         return batch
 
+    @nvtx.annotate("Scheduler.run_batch", color="green")
     def run_batch(
         self, batch: ScheduleBatch
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
@@ -1665,6 +1672,7 @@ class Scheduler(
         self.process_aborted_result(self.aborted_reqs.values())
         self.aborted_reqs = {}
 
+    @nvtx.annotate("Scheduler.process_batch_result", color="green")
     def process_batch_result(
         self,
         batch: ScheduleBatch,
@@ -1693,6 +1701,7 @@ class Scheduler(
             self.return_health_check_ct -= 1
             self.send_to_tokenizer.send_pyobj(HealthCheckOutput())
 
+    @nvtx.annotate("Scheduler.prepare_dp_attn_batch", color="green")
     def prepare_dp_attn_batch(self, local_batch: ScheduleBatch):
         return self.prepare_dp_attn_batch_raw(
             local_batch,

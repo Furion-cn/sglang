@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import nvtx
+
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -22,6 +24,7 @@ class SchedulerOutputProcessorMixin:
     We put them into a separate file to make the `scheduler.py` shorter.
     """
 
+    @nvtx.annotate("SchedulerOutputProcessorMixin.process_batch_result_prefill", color="green")
     def process_batch_result_prefill(
         self,
         batch: ScheduleBatch,
@@ -44,6 +47,7 @@ class SchedulerOutputProcessorMixin:
                 result.bid,
             )
 
+            nvtx.push_range("resolve_batch_result")
             if self.enable_overlap:
                 logits_output, next_token_ids = self.tp_worker.resolve_batch_result(bid)
             else:
@@ -58,6 +62,7 @@ class SchedulerOutputProcessorMixin:
                         logits_output.input_token_logprobs = tuple(
                             logits_output.input_token_logprobs.tolist()
                         )
+            nvtx.pop_range()
 
             hidden_state_offset = 0
 
@@ -181,6 +186,7 @@ class SchedulerOutputProcessorMixin:
 
         self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
 
+    @nvtx.annotate("SchedulerOutputProcessorMixin.process_batch_result_decode", color="green")
     def process_batch_result_decode(
         self,
         batch: ScheduleBatch,

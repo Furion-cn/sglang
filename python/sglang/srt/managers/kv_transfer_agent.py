@@ -358,6 +358,7 @@ class KVTransferAgent:
                     f"KV transfer fetch request {req.rid} not found")
             self.kv_buffer.write_item(kv_cache, offset)
 
+<<<<<<< HEAD
     def allocate_kv_buffer(self, req: Req):
         if self.attn_tp_rank != 0:
             return 0
@@ -376,6 +377,8 @@ class KVTransferAgent:
         self.kv_buffer.free(offset)
         del self.req_to_kv_buffer_offset[req.rid]
 
+=======
+>>>>>>> 89c78992 (fix: add some debug logs in Linear)
     @nvtx.annotate("KVTransferAgent.get_kv_buffer", color="red")
     def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
         if not req_list:
@@ -391,7 +394,6 @@ class KVTransferAgent:
         results = {}
         for src_reqs in requests_by_src.values():
             results.update(self._get_kv_buffer_from_same_src(src_reqs))
-
         return results
 
     @nvtx.annotate("KVTransferAgent._get_kv_buffer_from_same_src", color="red")
