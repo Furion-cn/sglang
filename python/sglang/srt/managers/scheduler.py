@@ -1336,6 +1336,7 @@ class Scheduler(
                 self.enable_hierarchical_cache,
             )
 
+            # decode not check kv buffer space
             res = adder.add_one_req(
                 req, False, self.enable_hierarchical_cache
             )
