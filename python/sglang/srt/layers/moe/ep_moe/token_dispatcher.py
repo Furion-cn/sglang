@@ -13,6 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import nvtx
 import torch
 import torch.distributed as dist
 
@@ -542,6 +543,8 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
 
 class DeepEPDispatcher:
+
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer")
     def __init__(
         self,
         group: torch.distributed.ProcessGroup,
@@ -580,8 +583,9 @@ class DeepEPDispatcher:
             )
 
     def dispatch(self, *args, **kwargs) -> Tuple:
-        self.dispatch_a(*args, **kwargs)
-        return self.dispatch_b()
+        with nvtx.annotate(message="dispatch", color="yellow", category="deepep_dispathcer"):
+            self.dispatch_a(*args, **kwargs)
+            return self.dispatch_b()
 
     def dispatch_a(
         self,
@@ -590,21 +594,24 @@ class DeepEPDispatcher:
         topk_weights: torch.Tensor,
         forward_mode: ForwardMode = None,
     ):
-        inner_state = self._get_impl(forward_mode).dispatch_a(
-            hidden_states=hidden_states,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-        )
-        self._dispatch_intermediate_state = forward_mode, inner_state
+        with nvtx.annotate(message="dispatch_a", color="yellow", category="deepep_dispathcer"):
+            inner_state = self._get_impl(forward_mode).dispatch_a(
+                hidden_states=hidden_states,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+            )
+            self._dispatch_intermediate_state = forward_mode, inner_state
 
     def dispatch_b(self):
-        forward_mode, inner_state = self._dispatch_intermediate_state
-        del self._dispatch_intermediate_state
-        return self._get_impl(forward_mode).dispatch_b(*inner_state)
+        with nvtx.annotate(message="dispatch_b", color="yellow", category="deepep_dispathcer"):
+            forward_mode, inner_state = self._dispatch_intermediate_state
+            del self._dispatch_intermediate_state
+            return self._get_impl(forward_mode).dispatch_b(*inner_state)
 
     def combine(self, *args, **kwargs) -> Tuple:
-        self.combine_a(*args, **kwargs)
-        return self.combine_b()
+        with nvtx.annotate(message="combine", color="yellow", category="deepep_dispathcer"):
+            self.combine_a(*args, **kwargs)
+            return self.combine_b()
 
     def combine_a(
         self,
@@ -613,23 +620,26 @@ class DeepEPDispatcher:
         topk_weights: torch.Tensor,
         forward_mode: ForwardMode,
     ):
-        inner_state = self._get_impl(forward_mode).combine_a(
-            hidden_states=hidden_states,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-        )
-        self._combine_intermediate_state = forward_mode, inner_state
+        with nvtx.annotate(message="combine_a", color="yellow", category="deepep_dispathcer"):
+            inner_state = self._get_impl(forward_mode).combine_a(
+                hidden_states=hidden_states,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+            )
+            self._combine_intermediate_state = forward_mode, inner_state
 
     def combine_b(self):
-        forward_mode, inner_state = self._combine_intermediate_state
-        del self._combine_intermediate_state
-        return self._get_impl(forward_mode).combine_b(*inner_state)
+        with nvtx.annotate(message="combine_b", color="yellow", category="deepep_dispathcer"):
+            forward_mode, inner_state = self._combine_intermediate_state
+            del self._combine_intermediate_state
+            return self._get_impl(forward_mode).combine_b(*inner_state)
 
     def _get_impl(self, forward_mode: ForwardMode) -> _DeepEPDispatcherImplBase:
-        resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
-        if resolved_deepep_mode == DeepEPMode.normal:
-            return self._normal_dispatcher
-        elif resolved_deepep_mode == DeepEPMode.low_latency:
-            return self._low_latency_dispatcher
-        else:
-            raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
+        with nvtx.annotate(message="_get_impl", color="yellow", category="deepep_dispathcer"):
+            resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
+            if resolved_deepep_mode == DeepEPMode.normal:
+                return self._normal_dispatcher
+            elif resolved_deepep_mode == DeepEPMode.low_latency:
+                return self._low_latency_dispatcher
+            else:
+                raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")

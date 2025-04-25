@@ -13,6 +13,8 @@
 # ==============================================================================
 
 import math
+import nvtx
+
 from typing import Callable, Optional
 
 import torch
@@ -262,56 +264,57 @@ def select_experts(
     correction_bias: Optional[torch.Tensor] = None,
     torch_native: bool = False,
 ):
-    n_share_experts_fusion = 0
-    if global_server_args_dict["n_share_experts_fusion"] is not None:
-        n_share_experts_fusion = global_server_args_dict["n_share_experts_fusion"]
-    # DeekSeek V2/V3/R1 serices models uses grouped_top_k
-    if use_grouped_topk:
-        assert topk_group is not None
-        assert num_expert_group is not None
-        if correction_bias is None:
-            topk_weights, topk_ids = grouped_topk(
+    with nvtx.annotate(message="select_experts", color="cyan", category="select_experts"):
+        n_share_experts_fusion = 0
+        if global_server_args_dict["n_share_experts_fusion"] is not None:
+            n_share_experts_fusion = global_server_args_dict["n_share_experts_fusion"]
+        # DeekSeek V2/V3/R1 serices models uses grouped_top_k
+        if use_grouped_topk:
+            assert topk_group is not None
+            assert num_expert_group is not None
+            if correction_bias is None:
+                topk_weights, topk_ids = grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    n_share_experts_fusion=n_share_experts_fusion,
+                )
+            else:
+                topk_weights, topk_ids = biased_grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    correction_bias=correction_bias,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    n_share_experts_fusion=n_share_experts_fusion,
+                )
+        elif torch_native and custom_routing_function is None:
+            topk_weights, topk_ids = fused_topk_native(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 topk=top_k,
                 renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                n_share_experts_fusion=n_share_experts_fusion,
+            )
+        elif custom_routing_function is None:
+            topk_weights, topk_ids = fused_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
             )
         else:
-            topk_weights, topk_ids = biased_grouped_topk(
+            topk_weights, topk_ids = custom_routing_function(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                correction_bias=correction_bias,
                 topk=top_k,
                 renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                n_share_experts_fusion=n_share_experts_fusion,
             )
-    elif torch_native and custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk_native(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-        )
-    elif custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-        )
-    else:
-        topk_weights, topk_ids = custom_routing_function(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-        )
 
-    expert_distribution_recorder.record_new_token(topk_ids)
+        expert_distribution_recorder.record_new_token(topk_ids)
 
-    return topk_weights, topk_ids
+        return topk_weights, topk_ids
