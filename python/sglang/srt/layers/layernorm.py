@@ -16,6 +16,7 @@
 import logging
 from typing import Optional, Tuple, Union
 
+import nvtx
 import torch
 import torch.nn as nn
 
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 
 class RMSNorm(CustomOp):
+
+    @nvtx.annotate(color="slateblue", category="rms_norm")
     def __init__(
         self,
         hidden_size: int,
@@ -51,34 +54,37 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-
-        if residual is not None:
-            fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-            return x, residual
-        out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-        return out
+        with nvtx.annotate(message="forward_cuda", color="slateblue", category="rms_norm"):
+            if residual is not None:
+                fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
+                return x, residual
+            out = rmsnorm(x, self.weight.data, self.variance_epsilon)
+            return out
 
     def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        if residual is not None:
-            x = x + residual.to(torch.float32)
-            residual = x.to(orig_dtype)
+        with nvtx.annotate(message="forward_native", color="slateblue", category="rms_norm"):
+            orig_dtype = x.dtype
+            x = x.to(torch.float32)
+            if residual is not None:
+                x = x + residual.to(torch.float32)
+                residual = x.to(orig_dtype)
 
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = (x * self.weight).to(orig_dtype)
-        if residual is None:
-            return x
-        else:
-            return x, residual
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.variance_epsilon)
+            x = (x * self.weight).to(orig_dtype)
+            if residual is None:
+                return x
+            else:
+                return x, residual
 
 
 class GemmaRMSNorm(CustomOp):
+
+    @nvtx.annotate(color="darkslateblue", category="gemma_rms_norm")
     def __init__(
         self,
         hidden_size: int,
@@ -93,50 +99,57 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        orig_dtype = x.dtype
-        if residual is not None:
-            x = x + residual
-            residual = x
+        with nvtx.annotate(message="forward_native", color="darkslateblue", category="gemma_rms_norm"):
+            orig_dtype = x.dtype
+            if residual is not None:
+                x = x + residual
+                residual = x
 
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x * (1.0 + self.weight.float())
-        x = x.to(orig_dtype)
-        return x if residual is None else (x, residual)
+            x = x.float()
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.variance_epsilon)
+            x = x * (1.0 + self.weight.float())
+            x = x.to(orig_dtype)
+            return x if residual is None else (x, residual)
 
     def forward_cuda(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is not None:
-            gemma_fused_add_rmsnorm(
-                x, residual, self.weight.data, self.variance_epsilon
-            )
-            return x, residual
-        out = gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
-        return out
+        with nvtx.annotate(message="forward_cuda", color="darkslateblue", category="gemma_rms_norm"):
+            if residual is not None:
+                gemma_fused_add_rmsnorm(
+                    x, residual, self.weight.data, self.variance_epsilon
+                )
+                return x, residual
+            out = gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
+            return out
 
 
 class Gemma3RMSNorm(nn.Module):
+
+    @nvtx.annotate(color="darkslateblue", category="gemma3_rms_norm")
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.zeros(dim))
 
     def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        with nvtx.annotate(message="_norm", color="darkslateblue", category="gemma3_rms_norm"):        
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float())
-        # Llama does x.to(float16) * w whilst Gemma3 is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        output = output * (1.0 + self.weight.float())
-        return output.type_as(x)
+        with nvtx.annotate(message="forward", color="darkslateblue", category="gemma3_rms_norm"):        
+            output = self._norm(x.float())
+            # Llama does x.to(float16) * w whilst Gemma3 is (x * w).to(float16)
+            # See https://github.com/huggingface/transformers/pull/29402
+            output = output * (1.0 + self.weight.float())
+            return output.type_as(x)
 
     def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
+        with nvtx.annotate(message="extra_repr", color="darkslateblue", category="gemma3_rms_norm"):        
+            return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
 if not _is_cuda:

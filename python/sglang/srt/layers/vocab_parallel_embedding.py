@@ -1,5 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.3.post1/vllm/model_executor/layers/vocab_parallel_embedding.py
 
+import nvtx
+
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -210,6 +212,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         prefix: full name of the layer in the state dict
     """  # noqa: E501
 
+    @nvtx.annotate(color="springgreen", category="vocab_parallel_embedding")
     def __init__(
         self,
         num_embeddings: int,
@@ -321,182 +324,187 @@ class VocabParallelEmbedding(torch.nn.Module):
         tp_rank: int,
         tp_size: int,
     ) -> VocabParallelEmbeddingShardIndices:
-        """Get start and end indices for vocab parallel embedding, following the
-        layout outlined in the class docstring, based on the given tp_rank and
-        tp_size."""
-        num_added_embeddings_padded = vocab_size_padded - org_vocab_size_padded
-        padded_org_vocab_start_index, padded_org_vocab_end_index = (
-            vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank, tp_size)
-        )
-        padded_added_vocab_start_index, padded_added_vocab_end_index = (
-            vocab_range_from_global_vocab_size(
-                num_added_embeddings_padded, tp_rank, tp_size, offset=org_vocab_size
+        with nvtx.annotate(message="_get_indices", color="springgreen", category="vocab_parallel_embedding"):
+            """Get start and end indices for vocab parallel embedding, following the
+            layout outlined in the class docstring, based on the given tp_rank and
+            tp_size."""
+            num_added_embeddings_padded = vocab_size_padded - org_vocab_size_padded
+            padded_org_vocab_start_index, padded_org_vocab_end_index = (
+                vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank, tp_size)
             )
-        )
-        # remove padding
-        org_vocab_start_index = min(padded_org_vocab_start_index, org_vocab_size)
-        org_vocab_end_index = min(padded_org_vocab_end_index, org_vocab_size)
-        added_vocab_start_index = min(padded_added_vocab_start_index, vocab_size)
-        added_vocab_end_index = min(padded_added_vocab_end_index, vocab_size)
-        return VocabParallelEmbeddingShardIndices(
-            padded_org_vocab_start_index,
-            padded_org_vocab_end_index,
-            padded_added_vocab_start_index,
-            padded_added_vocab_end_index,
-            org_vocab_start_index,
-            org_vocab_end_index,
-            added_vocab_start_index,
-            added_vocab_end_index,
-        )
+            padded_added_vocab_start_index, padded_added_vocab_end_index = (
+                vocab_range_from_global_vocab_size(
+                    num_added_embeddings_padded, tp_rank, tp_size, offset=org_vocab_size
+                )
+            )
+            # remove padding
+            org_vocab_start_index = min(padded_org_vocab_start_index, org_vocab_size)
+            org_vocab_end_index = min(padded_org_vocab_end_index, org_vocab_size)
+            added_vocab_start_index = min(padded_added_vocab_start_index, vocab_size)
+            added_vocab_end_index = min(padded_added_vocab_end_index, vocab_size)
+            return VocabParallelEmbeddingShardIndices(
+                padded_org_vocab_start_index,
+                padded_org_vocab_end_index,
+                padded_added_vocab_start_index,
+                padded_added_vocab_end_index,
+                org_vocab_start_index,
+                org_vocab_end_index,
+                added_vocab_start_index,
+                added_vocab_end_index,
+            )
 
     def get_sharded_to_full_mapping(self) -> Optional[List[int]]:
-        """Get a mapping that can be used to reindex the gathered
-        logits for sampling.
+        with nvtx.annotate(message="get_sharded_to_full_mapping", color="springgreen", category="vocab_parallel_embedding"):
+            """Get a mapping that can be used to reindex the gathered
+            logits for sampling.
 
-        During sampling, we gather logits from all ranks. The relationship
-        of index->token_id will follow the same format as outlined in the class
-        docstring. However, after the gather, we want to reindex the final
-        logits tensor to map index->token_id one-to-one (the index is always
-        equal the token_id it corresponds to). The indices returned by this
-        method allow us to do that.
-        """
-        if self.tp_size < 2:
-            return None
+            During sampling, we gather logits from all ranks. The relationship
+            of index->token_id will follow the same format as outlined in the class
+            docstring. However, after the gather, we want to reindex the final
+            logits tensor to map index->token_id one-to-one (the index is always
+            equal the token_id it corresponds to). The indices returned by this
+            method allow us to do that.
+            """
+            if self.tp_size < 2:
+                return None
 
-        base_embeddings: List[int] = []
-        added_embeddings: List[int] = []
-        padding: List[int] = []
-        for tp_rank in range(self.tp_size):
-            shard_indices = self._get_indices(
-                self.num_embeddings_padded,
-                self.org_vocab_size_padded,
-                self.num_embeddings,
-                self.org_vocab_size,
-                tp_rank,
-                self.tp_size,
-            )
-            range_start = self.num_embeddings_per_partition * tp_rank
-            range_end = self.num_embeddings_per_partition * (tp_rank + 1)
-            base_embeddings.extend(
-                range(range_start, range_start + shard_indices.num_org_elements)
-            )
-            padding.extend(
-                range(
-                    range_start + shard_indices.num_org_elements,
-                    range_start + shard_indices.num_org_elements_padded,
+            base_embeddings: List[int] = []
+            added_embeddings: List[int] = []
+            padding: List[int] = []
+            for tp_rank in range(self.tp_size):
+                shard_indices = self._get_indices(
+                    self.num_embeddings_padded,
+                    self.org_vocab_size_padded,
+                    self.num_embeddings,
+                    self.org_vocab_size,
+                    tp_rank,
+                    self.tp_size,
                 )
-            )
-            added_embeddings.extend(
-                range(
-                    range_start + shard_indices.num_org_elements_padded,
+                range_start = self.num_embeddings_per_partition * tp_rank
+                range_end = self.num_embeddings_per_partition * (tp_rank + 1)
+                base_embeddings.extend(
+                    range(range_start, range_start + shard_indices.num_org_elements)
+                )
+                padding.extend(
+                    range(
+                        range_start + shard_indices.num_org_elements,
+                        range_start + shard_indices.num_org_elements_padded,
+                    )
+                )
+                added_embeddings.extend(
+                    range(
+                        range_start + shard_indices.num_org_elements_padded,
+                        range_start
+                        + shard_indices.num_org_elements_padded
+                        + shard_indices.num_added_elements,
+                    )
+                )
+                padding.extend(
+                    range(
+                        range_start
+                        + shard_indices.num_org_elements_padded
+                        + shard_indices.num_added_elements,
+                        range_start
+                        + shard_indices.num_org_elements_padded
+                        + shard_indices.num_added_elements_padded,
+                    )
+                )
+                assert (
                     range_start
                     + shard_indices.num_org_elements_padded
-                    + shard_indices.num_added_elements,
+                    + shard_indices.num_added_elements_padded
+                    == range_end
                 )
-            )
-            padding.extend(
-                range(
-                    range_start
-                    + shard_indices.num_org_elements_padded
-                    + shard_indices.num_added_elements,
-                    range_start
-                    + shard_indices.num_org_elements_padded
-                    + shard_indices.num_added_elements_padded,
-                )
-            )
-            assert (
-                range_start
-                + shard_indices.num_org_elements_padded
-                + shard_indices.num_added_elements_padded
-                == range_end
-            )
-        ret = base_embeddings + added_embeddings + padding
-        assert len(ret) == self.num_embeddings_padded
-        return ret
+            ret = base_embeddings + added_embeddings + padding
+            assert len(ret) == self.num_embeddings_padded
+            return ret
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        output_dim = getattr(param, "output_dim", None)
-        packed_dim = getattr(param, "packed_dim", None)
+        with nvtx.annotate(message="weight_loader", color="springgreen", category="vocab_parallel_embedding"):
+            output_dim = getattr(param, "output_dim", None)
+            packed_dim = getattr(param, "packed_dim", None)
 
-        # If the parameter is a gguf weight, then load it directly.
-        if getattr(param, "is_gguf_weight_type", None):
-            param.data.copy_(loaded_weight)
-            param.weight_type = loaded_weight.item()
-            return
-        elif isinstance(param, UninitializedParameter):
-            shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                shape[output_dim] = shape[output_dim] // self.tp_size
-            param.materialize(tuple(shape), dtype=loaded_weight.dtype)
+            # If the parameter is a gguf weight, then load it directly.
+            if getattr(param, "is_gguf_weight_type", None):
+                param.data.copy_(loaded_weight)
+                param.weight_type = loaded_weight.item()
+                return
+            elif isinstance(param, UninitializedParameter):
+                shape = list(loaded_weight.shape)
+                if output_dim is not None:
+                    shape[output_dim] = shape[output_dim] // self.tp_size
+                param.materialize(tuple(shape), dtype=loaded_weight.dtype)
 
-        # If parameter does not have output dim, then it should
-        # be copied onto all gpus (e.g. g_idx for act_order gptq).
-        if output_dim is None:
-            assert param.data.shape == loaded_weight.shape
-            param.data.copy_(loaded_weight)
-            return
+            # If parameter does not have output dim, then it should
+            # be copied onto all gpus (e.g. g_idx for act_order gptq).
+            if output_dim is None:
+                assert param.data.shape == loaded_weight.shape
+                param.data.copy_(loaded_weight)
+                return
 
-        # Shard indexes for loading the weight
-        start_idx = self.shard_indices.org_vocab_start_index
-        shard_size = self.shard_indices.org_vocab_end_index - start_idx
+            # Shard indexes for loading the weight
+            start_idx = self.shard_indices.org_vocab_start_index
+            shard_size = self.shard_indices.org_vocab_end_index - start_idx
 
-        # If param packed on the same dim we are sharding on, then
-        # need to adjust offsets of loaded weight by pack_factor.
-        if packed_dim is not None and packed_dim == output_dim:
-            packed_factor = (
-                param.packed_factor
-                if isinstance(param, BasevLLMParameter)
-                else param.packed_factor
-            )
-            assert loaded_weight.shape[output_dim] == (
-                self.org_vocab_size // param.packed_factor
-            )
-            start_idx = start_idx // packed_factor
-            shard_size = shard_size // packed_factor
-        else:
-            assert loaded_weight.shape[output_dim] == (
-                self.org_vocab_size
-                // (self.tp_size if self.use_presharded_weights else 1)
-            ), f"{self.org_vocab_size=} {self.use_presharded_weights=} {loaded_weight.shape[output_dim]=}"
+            # If param packed on the same dim we are sharding on, then
+            # need to adjust offsets of loaded weight by pack_factor.
+            if packed_dim is not None and packed_dim == output_dim:
+                packed_factor = (
+                    param.packed_factor
+                    if isinstance(param, BasevLLMParameter)
+                    else param.packed_factor
+                )
+                assert loaded_weight.shape[output_dim] == (
+                    self.org_vocab_size // param.packed_factor
+                )
+                start_idx = start_idx // packed_factor
+                shard_size = shard_size // packed_factor
+            else:
+                assert loaded_weight.shape[output_dim] == (
+                    self.org_vocab_size
+                    // (self.tp_size if self.use_presharded_weights else 1)
+                ), f"{self.org_vocab_size=} {self.use_presharded_weights=} {loaded_weight.shape[output_dim]=}"
 
-        # Copy the data.
-        if not self.use_presharded_weights:
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
-        param[loaded_weight.shape[0] :].data.fill_(0)
+            # Copy the data.
+            if not self.use_presharded_weights:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
+            param[loaded_weight.shape[0] :].data.fill_(0)
 
     def forward(self, input_):
-        if self.tp_size > 1:
-            # Build the mask.
-            masked_input, input_mask = get_masked_input_and_mask(
-                input_,
-                self.shard_indices.org_vocab_start_index,
-                self.shard_indices.org_vocab_end_index,
-                self.shard_indices.num_org_vocab_padding,
-                self.shard_indices.added_vocab_start_index,
-                self.shard_indices.added_vocab_end_index,
-            )
-        else:
-            masked_input = input_
-        # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
-        # Mask the output embedding.
-        if self.tp_size > 1:
-            output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-            # Reduce across all the model parallel GPUs.
-            output = tensor_model_parallel_all_reduce(output_parallel)
-        else:
-            output = output_parallel
-        return output
+        with nvtx.annotate(message="forward", color="springgreen", category="vocab_parallel_embedding"):
+            if self.tp_size > 1:
+                # Build the mask.
+                masked_input, input_mask = get_masked_input_and_mask(
+                    input_,
+                    self.shard_indices.org_vocab_start_index,
+                    self.shard_indices.org_vocab_end_index,
+                    self.shard_indices.num_org_vocab_padding,
+                    self.shard_indices.added_vocab_start_index,
+                    self.shard_indices.added_vocab_end_index,
+                )
+            else:
+                masked_input = input_
+            # Get the embeddings.
+            output_parallel = self.quant_method.embedding(self, masked_input.long())
+            # Mask the output embedding.
+            if self.tp_size > 1:
+                output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+                # Reduce across all the model parallel GPUs.
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
+            return output
 
     def extra_repr(self) -> str:
-        s = f"num_embeddings={self.num_embeddings_per_partition}"
-        s += f", embedding_dim={self.embedding_dim}"
-        s += f", org_vocab_size={self.org_vocab_size}"
-        s += f", num_embeddings_padded={self.num_embeddings_padded}"
-        if self.enable_tp:
-            s += f", tp_size={self.tp_size}"
-        return s
+        with nvtx.annotate(message="extra_repr", color="springgreen", category="vocab_parallel_embedding"):
+            s = f"num_embeddings={self.num_embeddings_per_partition}"
+            s += f", embedding_dim={self.embedding_dim}"
+            s += f", org_vocab_size={self.org_vocab_size}"
+            s += f", num_embeddings_padded={self.num_embeddings_padded}"
+            if self.enable_tp:
+                s += f", tp_size={self.tp_size}"
+            return s
 
 
 class ParallelLMHead(VocabParallelEmbedding):
