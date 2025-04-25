@@ -173,6 +173,7 @@ class TpModelWorker:
             self.model_runner.token_to_kv_pool_allocator,
         )
 
+    @nvtx.annotate("TpModelWorker.forward_batch_generation", color="green")
     def forward_batch_generation(
         self,
         model_worker_batch: ModelWorkerBatch,
