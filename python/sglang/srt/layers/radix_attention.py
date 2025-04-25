@@ -28,7 +28,7 @@ class RadixAttention(nn.Module):
     The attention layer implementation.
     """
 
-    @nvtx.annotate(color="dark_red", category="radix_attention")
+    @nvtx.annotate(color="darkred", category="radix_attention")
     def __init__(
         self,
         num_heads: int,
@@ -67,7 +67,7 @@ class RadixAttention(nn.Module):
         if self.quant_method is not None:
             self.quant_method.create_weights(self)
 
-    @nvtx.annotate(color="dark_red", category="radix_attention")
+    @nvtx.annotate(color="darkred", category="radix_attention")
     def forward(
         self,
         q,
