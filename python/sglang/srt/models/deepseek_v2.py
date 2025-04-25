@@ -1346,7 +1346,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
-
+        logger.info(f"forward_normal self attn end")
         # Gather
         if get_tensor_model_parallel_world_size() > 1:
             # all gather and all reduce
