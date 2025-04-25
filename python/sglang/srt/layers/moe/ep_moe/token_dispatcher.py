@@ -23,14 +23,87 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class DeepEPDispatchMode(IntEnum):
     NORMAL = auto()
     LOW_LATENCY = auto()
 
 
-class DeepEPBuffer:
+class DeepEPBufferFurion(Buffer):
+    def __init__(
+        self,
+        group: dist.ProcessGroup,
+        hidden_size: int,
+        param_bytes: int,
+        deepep_mode: DeepEPMode,
+        num_max_dispatch_tokens_per_rank: int = None,
+        num_experts: int = None,
+    ):
+        """
+        note: it is same to get_deepep_buffer
+        """
+        num_nvl_bytes, num_rdma_bytes = 0, 0
+        if deepep_mode.enable_normal():
+            hidden_bytes = hidden_size * param_bytes
+            for config in (
+                Buffer.get_dispatch_config(group.size()),
+                Buffer.get_combine_config(group.size()),
+            ):
+                num_nvl_bytes = max(
+                    config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
+                    num_nvl_bytes,
+                )
+                num_rdma_bytes = max(
+                    config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                    num_rdma_bytes,
+                )
+        if deepep_mode.enable_low_latency():
+            assert num_max_dispatch_tokens_per_rank is not None
+            assert num_experts is not None and num_experts % group.size() == 0
+            num_rdma_bytes = max(
+                Buffer.get_low_latency_rdma_size_hint(
+                    num_max_dispatch_tokens_per_rank,
+                    hidden_size,
+                    group.size(),
+                    num_experts,
+                ),
+                num_rdma_bytes,
+            )
 
+        super().__init__(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            low_latency_mode=deepep_mode.enable_low_latency(),
+            num_qps_per_rank=(
+                num_experts // group.size() if deepep_mode.enable_low_latency() else 1
+            ),
+        )
+
+        self._dispatch_mode = (
+            DeepEPDispatchMode.NORMAL
+            if deepep_mode.enable_normal
+            else DeepEPDispatchMode.LOW_LATENCY
+        )
+        self._hidden_size = hidden_size
+        self._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
+        self._num_experts = num_experts
+
+    def clean_buffer(self):
+        if not self.low_latency_mode:
+            return
+        self.clean_low_latency_buffer(
+            self._num_max_dispatch_tokens_per_rank,
+            self._hidden_size,
+            self._num_experts,
+        )
+
+
+class DeepEPBuffer:
     _buffer = None
     _dispatch_mode: Optional[DeepEPDispatchMode] = None
     _hidden_size: Optional[int] = None
@@ -145,6 +218,22 @@ class _DeepEPDispatcherImplBase:
         self.num_max_dispatch_tokens_per_rank = 128
 
         self.handle = None
+        self.event = None
+
+        self._buffer = None
+
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def wait_dispatch(self):
+        raise NotImplementedError
 
     def dispatch_a(
         self,
@@ -155,6 +244,17 @@ class _DeepEPDispatcherImplBase:
         raise NotImplementedError
 
     def dispatch_b(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        raise NotImplementedError
+
+    def wait_combine(self):
         raise NotImplementedError
 
     def combine_a(
@@ -178,6 +278,58 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
 
         self.async_finish = async_finish
         self.src2dst = None
+
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ) -> torch.Tensor:
+        topk_idx = topk_idx.to(torch.int64)
+        previous_event = Buffer.capture() if self.async_finish else None
+        (
+            self.hidden_states,
+            self.topk_idx,
+            self.topk_weights,
+            self.event,
+        ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
+        return self.hidden_states
+
+    def wait_dispatch(self):
+        self.event.current_stream_wait() if self.async_finish else ()
+
+        hidden_states = self.hidden_states
+        topk_idx = self.topk_idx
+        topk_weights = self.topk_weights
+
+        if self.hidden_states.shape[0] > 0:
+            reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
+                hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
+            )
+        else:
+            reorder_topk_ids = torch.empty(
+                (0,), device=hidden_states.device, dtype=torch.int64
+            )
+            seg_indptr = torch.zeros(
+                (self.num_experts + 1,), device=hidden_states.device, dtype=torch.int64
+            )
+
+        masked_m = expected_m = None
+        self.event = None
+        self.hidden_states = None
+        self.topk_idx = None
+        self.topk_weights = None
+        return (
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            reorder_topk_ids,
+            seg_indptr,
+            masked_m,
+            expected_m,
+        )
 
     def dispatch_a(
         self,
@@ -313,6 +465,45 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         )
         return reorder_topk_ids, seg_indptr, gateup_input
 
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        if hidden_states.shape[0] > 0:
+            num_tokens = self.src2dst.shape[0] // self.router_topk
+            output = torch.empty(
+                (num_tokens, hidden_states.shape[1]),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+            deepep_post_reorder_triton_kernel[(num_tokens,)](
+                hidden_states,
+                output,
+                self.src2dst,
+                topk_idx,
+                topk_weights,
+                self.router_topk,
+                hidden_states.shape[1],
+                BLOCK_SIZE=512,
+            )
+        else:
+            output = torch.zeros(
+                (0, hidden_states.shape[1]),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+        previous_event = Buffer.capture() if self.async_finish else None
+        self.hidden_states, self.event = self._combine_core(output, previous_event)
+
+    def wait_combine(self):
+        self.event.current_stream_wait() if self.async_finish else ()
+        self.handle = None
+        self.src2dst = None
+        self.event = None
+        return self.hidden_states
+
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -364,6 +555,17 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return combined_x, event
 
     def _get_buffer(self):
+        # if self._buffer is not None:
+        #     return self._buffer
+        # self._buffer = DeepEPBufferFurion(
+        #     self.group,
+        #     self.hidden_size,
+        #     self.params_bytes,
+        #     self.deepep_mode,
+        #     self.num_max_dispatch_tokens_per_rank,
+        #     self.num_experts,
+        # )
+        # return self._buffer
         DeepEPBuffer.set_dispatch_mode_as_normal()
         return DeepEPBuffer.get_deepep_buffer(
             self.group,
@@ -385,6 +587,42 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         """
         self.return_recv_hook = return_recv_hook
 
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: int,
+    ) -> torch.Tensor:
+        (
+            self.hidden_states,
+            self.topk_idx,
+            self.topk_weights,
+            self.masked_m,
+            self.expected_m,
+            self.event,
+            self.hook,
+        ) = self.dispatch_a(
+            hidden_states=hidden_states, topk_idx=topk_idx, topk_weights=topk_weights
+        )
+        return hidden_states
+
+    def wait_dispatch(self):
+        self.hook() if self.return_recv_hook else self.event.current_stream_wait()
+
+        reorder_topk_ids = seg_indptr = None
+
+        return (
+            self.hidden_states,
+            self.topk_idx,
+            self.topk_weights,
+            reorder_topk_ids,
+            seg_indptr,
+            self.masked_m,
+            self.expected_m,
+        )
+
     def dispatch_a(
         self,
         hidden_states: torch.Tensor,
@@ -395,9 +633,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         buffer = self._get_buffer()
         topk_idx = topk_idx.to(torch.int64)
         expected_m = (
-            hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1]
-            + self.num_experts
-        ) // self.num_experts
+                         hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1]
+                         + self.num_experts
+                     ) // self.num_experts
         # logger.info(f"dispatch_a {hidden_states.shape}")
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
@@ -491,6 +729,20 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         )
         return packed_recv_hidden, packed_recv_count, event, hook
 
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        self.hidden_states, self.event, self.hook = self.combine_a(
+            hidden_states=hidden_states, topk_idx=topk_idx, topk_weights=topk_weights
+        )
+
+    def wait_combine(self):
+        self.hook() if self.return_recv_hook else self.event.current_stream_wait()
+        return self.hidden_states
+
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -527,6 +779,18 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         return combined_hidden_states, event, hook
 
     def _get_buffer(self):
+        # if self._buffer is not None:
+        #     self._buffer.clean_buffer()
+        #     return self._buffer
+        # self._buffer = DeepEPBufferFurion(
+        #     self.group,
+        #     self.hidden_size,
+        #     self.params_bytes,
+        #     self.deepep_mode,
+        #     self.num_max_dispatch_tokens_per_rank,
+        #     self.num_experts,
+        # )
+        # return self._buffer
         DeepEPBuffer.set_dispatch_mode_as_low_latency()
         return DeepEPBuffer.get_deepep_buffer(
             self.group,
@@ -576,6 +840,40 @@ class DeepEPDispatcher:
                 **common_kwargs,
             )
 
+    def launch_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        num_max_dispatch_tokens_per_rank: Optional[int] = 128,
+        forward_mode: Optional[ForwardMode] = None,
+    ) -> torch.Tensor:
+        return self._get_impl(forward_mode).launch_dispatch(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            num_experts,
+            num_max_dispatch_tokens_per_rank,
+        )
+
+    def wait_dispatch(self, forward_mode: ForwardMode = None) -> Tuple:
+        return self._get_impl(forward_mode).wait_dispatch()
+
+    def launch_combine(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        forward_mode: ForwardMode = None,
+    ):
+        self._get_impl(forward_mode).launch_combine(
+            hidden_states, topk_idx, topk_weights
+        )
+
+    def wait_combine(self, forward_mode: ForwardMode = None) -> Tuple:
+        return self._get_impl(forward_mode).wait_combine()
+
     def dispatch(self, *args, **kwargs) -> Tuple:
         self.dispatch_a(*args, **kwargs)
         return self.dispatch_b()
@@ -624,9 +922,15 @@ class DeepEPDispatcher:
 
     def _get_impl(self, forward_mode: ForwardMode) -> _DeepEPDispatcherImplBase:
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
+        # logger.debug(
+        # f"_get_impl: deepep_mode: {self.deepep_mode}, forward_mode: {forward_mode}, resolved_deepep_mode: {resolved_deepep_mode}")
         if resolved_deepep_mode == DeepEPMode.normal:
             return self._normal_dispatcher
         elif resolved_deepep_mode == DeepEPMode.low_latency:
             return self._low_latency_dispatcher
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
+
+
+DeepEPDispatcherImplLowLatency = _DeepEPDispatcherImplLowLatency
+DeepEPDispatcherImplNormal = _DeepEPDispatcherImplNormal
