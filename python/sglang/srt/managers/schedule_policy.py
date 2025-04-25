@@ -493,14 +493,8 @@ class PrefillAdder:
         if input_tokens > self.rem_input_tokens and len(self.can_run_list) != 0:
             return AddReqResult.OTHER
 
-        offset = self.kv_transfer_agent.allocate_kv_buffer(req)
-        if offset < 0:
-            logger.warning(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.get_kv_buffer_stats().available_size}")
-            return AddReqResult.OTHER
-
         with self._lock_node(req.last_node):
             if total_tokens > self.rem_total_tokens:
-                self.kv_transfer_agent.free_kv_buffer(req)
                 logger.debug(f"KV cache space insufficient: required={total_tokens}, available={self.rem_total_tokens} for req {req.rid}")
                 return AddReqResult.NO_TOKEN
 
@@ -530,7 +524,6 @@ class PrefillAdder:
                 )
             else:
                 if self.rem_chunk_tokens == 0:
-                    self.kv_transfer_agent.free_kv_buffer(req)
                     logger.debug(
                         f"KV cache space insufficient: required={total_tokens}, rem_chunk_tokens is 0 for req {req.rid}")
                     return AddReqResult.OTHER

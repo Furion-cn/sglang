@@ -345,6 +345,7 @@ class KVTransferAgent:
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
+        logger.info(f"set_kv_buffer: origin input token length is {len(req.origin_input_ids)}, output token length is {len(req.output_ids)}")
         with nvtx.annotate(message="set_stack", color="blue", category="kv_transfer_agent"):
             kv_cache = torch.stack(
                 [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
@@ -357,6 +358,16 @@ class KVTransferAgent:
                 raise Exception(
                     f"KV transfer fetch request {req.rid} not found")
             self.kv_buffer.write_item(kv_cache, offset)
+
+    def allocate_kv_buffer(self, req: Req):
+        if self.attn_tp_rank != 0:
+            return 0
+        logger.info(f"set_kv_buffer: origin input token length is {len(req.origin_input_ids)}")
+        offset = self.kv_buffer.allocate(len(req.origin_input_ids) + 1)
+        if offset < 0:
+            return -1
+        self.req_to_kv_buffer_offset[req.rid] = offset
+        return offset
 
     def allocate_kv_buffer(self, req: Req):
         if self.attn_tp_rank != 0:
@@ -521,6 +532,7 @@ class KVTransferAgent:
             f"[KVTransferAgent] Dispatched prefilled request {req.rid}")
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
+        logger.debug(f"_handle_kv_transfer_fetch 1 {req}")
         transfered_bytes = 0
         try:
             start_time = time.time()
@@ -542,18 +554,23 @@ class KVTransferAgent:
 
                 transfered_bytes += kv_cache.nbytes
             logger.debug(
-                f"[KVTransferAgent] Transferred kv cache to RANK_{req.dst_rank} ({transfered_bytes / 1024 / 1024} MB) in {time.time() - start_time} seconds, bandwidth: {transfered_bytes/1024/1024/1024 / (time.time() - start_time)} GB/s, kv_buffer_stats: {self.kv_buffer.stats()}")
+                f"[KVTransferAgent] Transferred kv cache to RANK_{req.dst_rank} ({transfered_bytes / 1024 / 1024} MB) in {time.time() - start_time} seconds, bandwidth: {transfered_bytes/1024/1024/1024 / (time.time() - start_time)} GB/s, kv_buffer_stats: {self.kv_buffer.stats()}, req: {req}")
 
             ack_error_message = None
         except Exception as e:
             logger.error(f"[KVTransferAgent] KV transfer failed: {e}")
             ack_error_message = str(e)
 
+        logger.debug(f"_handle_kv_transfer_fetch 2 {req}")
+
         # send ack to remote addr
         self.send_to_pd_disagg_controller.send_pyobj(
             KVTransferAck(req.rids, req.dst_addr, req.dst_rank, ack_error_message))
 
+        logger.debug(f"_handle_kv_transfer_fetch 3 {req}")
+
         if ack_error_message is not None:
+            logger.debug(f"_handle_kv_transfer_fetch ack_error_message {ack_error_message}")
             return
 
         # free buffer
