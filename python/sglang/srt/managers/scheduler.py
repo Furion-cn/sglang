@@ -1292,6 +1292,7 @@ class Scheduler(
         adder = PrefillAdder(
             self.tree_cache,
             self.token_to_kv_pool_allocator,
+            self.kv_transfer_agent,
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -1425,6 +1426,7 @@ class Scheduler(
         adder = PrefillAdder(
             self.tree_cache,
             self.token_to_kv_pool_allocator,
+            self.kv_transfer_agent,
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -2183,13 +2185,13 @@ class Scheduler(
         else:
             raise ValueError("Unrecognized ExpertDistributionReq value")
 
-    def start_expert_distribution_record(self, 
+    def start_expert_distribution_record(self,
                                          num_steps: Optional[int] = None,
                                          output_dir: Optional[str] = None):
         self.record_expert_distribution_forward_ct = self.forward_ct + num_steps
         self.record_expert_distribution_output_dir = output_dir
         expert_distribution_recorder.start_record()
-        
+
     def stop_expert_distribution_record(self):
         expert_distribution_recorder.stop_record()
         expert_distribution_recorder.dump_record(self.record_expert_distribution_output_dir)
