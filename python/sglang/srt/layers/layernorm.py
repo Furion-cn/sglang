@@ -148,9 +148,6 @@ class GemmaRMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         with nvtx.annotate(message="forward_cuda", color="darkslateblue", category="gemma_rms_norm"):
-            if not x.is_contiguous():
-                x = x.contiguous()
-            # logger.info(f"x contiguous {x.is_contiguous()}")
             if residual is not None:
                 gemma_fused_add_rmsnorm(
                     x, residual, self.weight.data, self.variance_epsilon
