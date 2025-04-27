@@ -451,6 +451,7 @@ class ColumnParallelLinear(LinearBase):
             bias = self.bias if not self.skip_bias_add else None
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 
             # Matrix multiply.
             assert self.quant_method is not None
@@ -465,19 +466,18 @@ class ColumnParallelLinear(LinearBase):
             return output, output_bias
 =======
         logger.info(f"ColumnParallelLinear forward {input_.shape}")
+=======
+>>>>>>> a181af9e (rm log)
 
         # Matrix multiply.
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
-            logger.info(f"tensor_model_parallel_all_gather start")
             output = tensor_model_parallel_all_gather(output_parallel)
-            logger.info(f"tensor_model_parallel_all_gather end")
         else:
             output = output_parallel
 
-        logger.info(f"ColumnParallelLinear forward end {output.shape}")
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 >>>>>>> 89c78992 (fix: add some debug logs in Linear)
@@ -1310,6 +1310,7 @@ class RowParallelLinear(LinearBase):
 
     def forward(self, input_):
 <<<<<<< HEAD
+<<<<<<< HEAD
         with nvtx.annotate(message="forward", color="purple", category="row_parallel_linear"):
             if self.input_is_parallel:
                 input_parallel = input_
@@ -1335,6 +1336,8 @@ class RowParallelLinear(LinearBase):
             return output, output_bias
 =======
         logger.info(f"RowParallelLinear forward start {input_.shape}, {self.input_is_parallel}")
+=======
+>>>>>>> a181af9e (rm log)
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1343,7 +1346,6 @@ class RowParallelLinear(LinearBase):
             )
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
-        logger.info(f"RowParallelLinear forward input_parallel {input_parallel.shape}")
 
         # Matrix multiply.
         assert self.quant_method is not None
@@ -1351,7 +1353,6 @@ class RowParallelLinear(LinearBase):
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
-        logger.info(f"RowParallelLinear forward output_parallel {output_parallel.shape}")
         if self.reduce_results and self.tp_size > 1:
             logger.info(f"reduce_results {output_parallel.shape}")
             output = tp_all_reduce(output_parallel)
@@ -1359,7 +1360,6 @@ class RowParallelLinear(LinearBase):
             output = output_parallel
 
         output_bias = self.bias if self.skip_bias_add else None
-        logger.info(f"RowParallelLinear forward end {output.shape}")
         return output, output_bias
 >>>>>>> 89c78992 (fix: add some debug logs in Linear)
 
