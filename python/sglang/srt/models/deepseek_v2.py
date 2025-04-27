@@ -153,6 +153,9 @@ class DeepseekV2MLP(nn.Module):
     def forward(self, x):
         with nvtx.annotate(message="forward", color="orange", category="deepseek_v2_mlp"):
             gate_up, _ = self.gate_up_proj(x)
+            if gate_up.isnan().any() or gate_up.isinf().any():
+                print(f"Warning: gate_up contains NaN or Inf values")
+            gate_up = gate_up.contiguous()
             x = self.act_fn(gate_up)
             x, _ = self.down_proj(x)
             return x
