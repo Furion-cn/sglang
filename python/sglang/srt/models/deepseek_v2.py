@@ -454,8 +454,8 @@ class DeepseekV2MoE(nn.Module):
                 num_expert_group=self.num_expert_group,
                 correction_bias=self.correction_bias,
             )
-        if get_attention_tp_rank() == 0:
-            prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
         if self.ep_size > 1:
             with torch.cuda.nvtx.range("dispatch"):
                 # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
@@ -473,10 +473,10 @@ class DeepseekV2MoE(nn.Module):
                     topk_weights,
                     forward_mode=forward_mode,
                 )
-        if get_attention_tp_rank() == 0:
-            logger.debug(
-                f"original_moe,after dispatch,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
-            prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(
+        #         f"original_moe,after dispatch,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
+        #     prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
         with torch.cuda.nvtx.range("experts_foward"):
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
@@ -486,10 +486,10 @@ class DeepseekV2MoE(nn.Module):
                 expected_m=expected_m,
                 forward_mode=forward_mode,
             )
-        if get_attention_tp_rank() == 0:
-            logger.debug(
-                f"original_moe,after experts,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
-            prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(
+        #         f"original_moe,after experts,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
+        #     prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
         if self.ep_size > 1:
             with torch.cuda.nvtx.range("combine"):
                 final_hidden_states = self.deepep_dispatcher.combine(
@@ -500,10 +500,10 @@ class DeepseekV2MoE(nn.Module):
                 )
         final_hidden_states *= self.routed_scaling_factor
 
-        if get_attention_tp_rank() == 0:
-            logger.debug(
-                f"original_moe,after combine,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
-            # prev_cached_mem,prev_allocated_mem,prev_free_mem=get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(
+        #         f"original_moe,after combine,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
+        # prev_cached_mem,prev_allocated_mem,prev_free_mem=get_gpu_memory_info_not_str(0)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -1753,9 +1753,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
-        if get_attention_tp_rank() == 0:
-            prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
-            # get reorder_topk_ids, seg_indptr, masked_m, expected_m from extra_args
+        # if get_attention_tp_rank() == 0:
+        #     prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
+        #     # get reorder_topk_ids, seg_indptr, masked_m, expected_m from extra_args
         assert (
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY in extra_args
         ), f"layer_id: {self.layer_id}, {MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY} not in extra_args:{extra_args} "
@@ -1780,12 +1780,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         ]
         mlp_output_tensor = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_EMPTY_MLP_OUTPUT_KEY]
 
-        if get_attention_tp_rank() == 0:
-            logger.debug(
-                f"layer[{self.layer_id}]],forward_mlp,after get keys from dict,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
-            prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(
+        #         f"layer[{self.layer_id}]],forward_mlp,after get keys from dict,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
+        #     prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
 
-            # self.mlp.experts.deepep_mode = DeepEPMode.normal if forward_batch.forward_mode.is_extend() else DeepEPMode.low_latency
+        # self.mlp.experts.deepep_mode = DeepEPMode.normal if forward_batch.forward_mode.is_extend() else DeepEPMode.low_latency
         final_hidden_states = self.mlp.experts(
             hidden_states=hidden_states,
             reorder_topk_ids=reorder_topk_ids,
@@ -1796,21 +1796,21 @@ class DeepseekV2DecoderLayer(nn.Module):
             output_tensor=mlp_output_tensor,
         )
 
-        if get_attention_tp_rank() == 0:
-            logger.debug(
-                f"layer[{self.layer_id}]],forward_mlp,after experts,after clear_tmp_data,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
-            prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(
+        #         f"layer[{self.layer_id}]],forward_mlp,after experts,after clear_tmp_data,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
+        #     prev_cached_mem, prev_allocated_mem, prev_free_mem = get_gpu_memory_info_not_str(0)
 
-            # remove used args
+        # remove used args
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY]
 
-        if get_attention_tp_rank() == 0:
-            logger.debug(
-                f"layer[{self.layer_id}]],forward_mlp,after del,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
-            # prev_cached_mem,prev_allocated_mem,prev_free_mem=get_gpu_memory_info_not_str(0)
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(
+        #         f"layer[{self.layer_id}]],forward_mlp,after del,{get_gpu_memory_info_diff_str(0, prev_cached_mem, prev_allocated_mem, prev_free_mem)}")
+        #     # prev_cached_mem,prev_allocated_mem,prev_free_mem=get_gpu_memory_info_not_str(0)
 
         return final_hidden_states, residual, extra_args
 
@@ -1905,8 +1905,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             }
         )
 
-        if get_attention_tp_rank() == 0:
-            logger.debug(f"layer[{self.layer_id}]],forward_decode,after clear_tmp_data,{get_gpu_memory_info(0)}")
+        # if get_attention_tp_rank() == 0:
+        #     logger.debug(f"layer[{self.layer_id}]],forward_decode,after clear_tmp_data,{get_gpu_memory_info(0)}")
 
         return hidden_states, residual, extra_args
 
