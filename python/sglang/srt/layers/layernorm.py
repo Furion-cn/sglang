@@ -144,6 +144,8 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if not x.is_contiguous():
+            x = x.contiguous()
         with nvtx.annotate(message="forward_cuda", color="darkslateblue", category="gemma_rms_norm"):
             if residual is not None:
                 gemma_fused_add_rmsnorm(
@@ -163,11 +165,11 @@ class Gemma3RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.zeros(dim))
 
     def _norm(self, x):
-        with nvtx.annotate(message="_norm", color="darkslateblue", category="gemma3_rms_norm"):        
+        with nvtx.annotate(message="_norm", color="darkslateblue", category="gemma3_rms_norm"):
             return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        with nvtx.annotate(message="forward", color="darkslateblue", category="gemma3_rms_norm"):        
+        with nvtx.annotate(message="forward", color="darkslateblue", category="gemma3_rms_norm"):
             output = self._norm(x.float())
             # Llama does x.to(float16) * w whilst Gemma3 is (x * w).to(float16)
             # See https://github.com/huggingface/transformers/pull/29402
@@ -175,7 +177,7 @@ class Gemma3RMSNorm(nn.Module):
             return output.type_as(x)
 
     def extra_repr(self):
-        with nvtx.annotate(message="extra_repr", color="darkslateblue", category="gemma3_rms_norm"):        
+        with nvtx.annotate(message="extra_repr", color="darkslateblue", category="gemma3_rms_norm"):
             return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
