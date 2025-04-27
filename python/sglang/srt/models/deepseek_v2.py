@@ -1339,12 +1339,12 @@ class DeepseekV2DecoderLayer(nn.Module):
                     self.attn_tp_size != 1 and self.input_is_scattered
                 ), "moe_layer_freq > 1 is not supported when attn_tp_size > 1"
 
-                # Self Attention
-                hidden_states = self.self_attn(
-                    positions=positions,
-                    hidden_states=hidden_states,
-                    forward_batch=forward_batch,
-                )
+            # Self Attention
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
+            )
 
         # Gather
         if get_tensor_model_parallel_world_size() > 1:
