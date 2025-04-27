@@ -115,6 +115,9 @@ class ForwardMode(IntEnum):
 
     def is_decode_or_idle(self):
         return self == ForwardMode.DECODE or self == ForwardMode.IDLE
+    
+    def is_extend_or_idle(self):
+        return self == ForwardMode.EXTEND or self == ForwardMode.IDLE
 
 
 class CaptureHiddenMode(IntEnum):
@@ -225,6 +228,7 @@ class ForwardBatch:
     req_to_token_pool: ReqToTokenPool = None
     token_to_kv_pool: KVCache = None
     attn_backend: AttentionBackend = None
+    attn_backend1: AttentionBackend = None
 
     # For DP attention
     global_num_tokens_cpu: Optional[List[int]] = None
@@ -285,6 +289,7 @@ class ForwardBatch:
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
             attn_backend=model_runner.attn_backend,
+            attn_backend1=model_runner.attn_backend1,
             spec_algorithm=batch.spec_algorithm,
             spec_info=batch.spec_info,
             capture_hidden_mode=batch.capture_hidden_mode,

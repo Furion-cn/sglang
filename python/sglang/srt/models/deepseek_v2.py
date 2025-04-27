@@ -406,8 +406,11 @@ class DeepseekV2MoE(nn.Module):
             and not forward_mode.is_idle()
             and hidden_states.shape[0] > 0
         ):
-            router_logits = self.gate(hidden_states)
-            shared_output = self._forward_shared_experts(hidden_states)
+            with torch.cuda.nvtx.range("forward_deepep gate"):
+                # router_logits: (num_tokens, n_experts)
+                router_logits = self.gate(hidden_states)
+            with torch.cuda.nvtx.range("forward_deepep _forward_shared_experts"):
+                shared_output = self._forward_shared_experts(hidden_states)
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -2239,11 +2242,7 @@ class DeepseekV2Model(nn.Module):
             hidden_states = input_embeds
 
         residual = None
-        if (
-            forward_batch.batch_size == 1
-            or not global_server_args_dict["enable_micro_batch_overlap"]
-            # or forward_batch.forward_mode == ForwardMode.DECODE
-        ):
+        if not global_server_args_dict["enable_micro_batch_overlap"]:
             for i in range(len(self.layers)):
                 expert_distribution_recorder.set_current_layer(i)
                 layer = self.layers[i]
@@ -2259,14 +2258,14 @@ class DeepseekV2Model(nn.Module):
                     positions, hidden_states, forward_batch, residual
                 )
 
-            if forward_batch.forward_mode == ForwardMode.EXTEND:
+            if forward_batch.forward_mode.is_extend_or_idle():
                 hidden_states, residual = self.forward_prefill(
                     hidden_states,
                     positions,
                     forward_batch,
                     residual,
                 )
-            elif forward_batch.forward_mode == ForwardMode.DECODE:
+            elif forward_batch.forward_mode.is_decode_or_idle():
                 hidden_states, residual = self.forward_decode(
                     hidden_states,
                     positions,
@@ -2274,7 +2273,7 @@ class DeepseekV2Model(nn.Module):
                     residual,
                 )
             else:
-                raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
+                raise ValueError(f"Unsupported forward mode: {forward_batch.forward_mode}")
 
         if not forward_batch.forward_mode.is_idle():
             if residual is None:
@@ -2320,16 +2319,14 @@ class DeepseekV2Model(nn.Module):
             self.config.first_k_dense_replace,
         )
         # init attn_backend metadata again
-        fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
-        fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
+        if fwd_batch0.batch_size != 0:
+            fwd_batch0.attn_backend.init_forward_metadata(fwd_batch0)
+        if fwd_batch1.batch_size != 0:
+            fwd_batch1.attn_backend = forward_batch.attn_backend1
+            fwd_batch1.attn_backend.init_forward_metadata(fwd_batch1)
 
-        if get_tensor_model_parallel_rank() == 0:
-            logger.debug(f'********* {forward_batch=}')
-            logger.debug(f'********* {fwd_batch0=}')
-            logger.debug(f'********* {fwd_batch1=}')
         # last moe layer
         for i in range(self.config.first_k_dense_replace, len(self.layers) + 1):
-            logger.debug(f'$$$$$$ {hidden_states_0.shape=}, {hidden_states_1.shape=}')
             # overlap b1 attn and b0 shared_experts with b0 combine
             hidden_states_0, residual_0, extra_args_0 = self.forward_layer(
                 l0,
@@ -2515,11 +2512,6 @@ class DeepseekV2Model(nn.Module):
             l1 += 1
 
         # check last_layer
-        # logger.debug(f"~~~~~~~~~~ after self.forward_step, step: {step},batch_size: {forward_batch.batch_size},layer_id:{self.layer_id}")
-        # logger.debug(f'~~~~~~~~~~ after self.forward_step, hidden_states.shape: {hidden_states.shape}, \
-        #                  residual.shape:{residual.shape}')
-        # logger.debug(f'~~~~~~~~~~ after self.forward_step, hidden_states.shape: {hidden_states.shape}, \
-        #                  residual_after.shape:{residual_after.shape}')
         attn_tp_size = get_attention_tp_size()
         if attn_tp_size != 1:
             hidden_states_0 += residual_0
@@ -2540,13 +2532,10 @@ class DeepseekV2Model(nn.Module):
             tp_all_gather(
                 list(hidden_states_1.tensor_split(attn_tp_size)), local_hidden_states_1
             )
-        logger.debug(
-            f'~~~~~~~~~~ before layers,{hidden_states_0.shape=},{hidden_states_1.shape=},{residual_0.shape=},{residual_1.shape=}')
         hidden_states = torch.cat([hidden_states_0, hidden_states_1], dim=0)
         # note: keep same with python/sglang/srt/models/deepseek_v2.py:1247(official v0.4.5 implementation)
         # residual = torch.cat([residual_0, residual_1], dim=0)
         residual = None
-        logger.debug(f'~~~~~~~~~~ after layers, {hidden_states.shape=}')
 
         return hidden_states, residual
 
@@ -2590,8 +2579,6 @@ class DeepseekV2Model(nn.Module):
         for i in range(len(self.layers) + 1):
             expert_distribution_recorder.set_current_layer(i)
             # pipeline two micro batches according to https://github.com/deepseek-ai/profile-data
-            logger.debug(f'~~~~~~~~~~ begin to run decode layer[{i}], {hidden_states=}, {residual=}')
-
             # mb0: launch_dispatch
             mb0_hidden_states, _, mb0_extra_args = self.forward_layer(
                 l0,
@@ -2908,10 +2895,6 @@ class DeepseekV2ForCausalLM(nn.Module):
         logits_output = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
-        logger.debug(
-            f'~~~~~~~~~~ after self.model, hidden_states.shape: {hidden_states.shape}, batch_size: {forward_batch.batch_size}')
-        logger.debug(
-            f'~~~~~~~~~~ after self.model, batch_size: {forward_batch.batch_size}, logits_output: {logits_output}')
         return logits_output
 
     def post_load_weights(self):
@@ -3148,8 +3131,8 @@ class DeepseekV2ForCausalLM(nn.Module):
 
 
 def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
-    if fwd_batch.forward_mode == ForwardMode.DECODE:
-        logger.debug(f"[token_balanced_batch_split] original forward batch: {fwd_batch}")
+    if fwd_batch.batch_size == 0:
+        return 0, fwd_batch, fwd_batch
     sub_fwd_batch0 = copy(fwd_batch)
     sub_fwd_batch1 = copy(fwd_batch)
     bs_joint_batch_boundary = 0
@@ -3158,13 +3141,15 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
         all_tokens = sum(fwd_batch.extend_seq_lens)
         batch_boundary = 0
         for batch_tokens in fwd_batch.extend_seq_lens[:-1]:
-            bs_joint_batch_boundary += batch_tokens
+            bs_joint_batch_boundary += batch_tokens.item()
             batch_boundary += 1
-            if bs_joint_batch_boundary >= all_tokens // 2:
+            if bs_joint_batch_boundary >= all_tokens.item() // 2:
                 break
 
     elif fwd_batch.forward_mode.is_decode():
         bs_joint_batch_boundary = fwd_batch.batch_size // 2
+    elif fwd_batch.forward_mode.is_idle():
+        return 0, sub_fwd_batch0, sub_fwd_batch1
     else:
         assert False
     for key in [
@@ -3188,7 +3173,7 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
         not fwd_batch.forward_mode.is_decode()
         and getattr(fwd_batch, "extend_num_tokens") is not None
     ):
-        sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary.item()
+        sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary
         sub_fwd_batch1.extend_num_tokens = (
             fwd_batch.extend_num_tokens - sub_fwd_batch0.extend_num_tokens
         )
