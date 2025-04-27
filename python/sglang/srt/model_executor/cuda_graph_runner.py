@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import logging
 import bisect
 import os
 from contextlib import contextmanager
@@ -42,8 +41,6 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
 _is_hip = is_hip()
-
-logger = logging.getLogger(__name__)
 
 
 def _to_torch(model: torch.nn.Module, reverse: bool, num_tokens: int):
@@ -215,8 +212,6 @@ class CudaGraphRunner:
         self.seq_lens_cpu = torch.full(
             (self.max_bs,), self.seq_len_fill_value, dtype=torch.int32
         )
-
-        logger.info(f"CudaGraphRunner.init.max_bs={self.max_bs}, max_num_token={self.max_num_token}, capture_bs={self.capture_bs}, compile_bs={self.compile_bs}")
 
         if self.enable_torch_compile:
             set_torch_compile_config()

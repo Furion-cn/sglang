@@ -17,8 +17,6 @@ import dataclasses
 import logging
 import signal
 import threading
-
-import nvtx
 from queue import Queue
 from typing import Optional
 
@@ -192,7 +190,6 @@ class TpModelWorkerClient:
         next_token_ids = next_token_ids.tolist()
         return logits_output, next_token_ids
 
-    @nvtx.annotate("TpModelWorkerClient.forward_batch_generation", color="green")
     def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch):
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info

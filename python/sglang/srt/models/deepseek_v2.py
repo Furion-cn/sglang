@@ -318,31 +318,33 @@ class DeepseekV2MoE(nn.Module):
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_mode: ForwardMode
     ) -> torch.Tensor:
-        shared_output = None
-        topk_idx = torch.full(
-            (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
-        )
-        topk_weights = torch.empty(
-            (0, self.top_k), dtype=torch.float32, device=hidden_states.device
-        )
-        if (
-            forward_mode is not None
-            and not forward_mode.is_idle()
-            and hidden_states.shape[0] > 0
-        ):
-            router_logits = self.gate(hidden_states)
-            shared_output = self._forward_shared_experts(hidden_states)
-            topk_weights, topk_idx = select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=self.top_k,
-                use_grouped_topk=True,
-                renormalize=self.renormalize,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                correction_bias=self.correction_bias,
+        with nvtx.annotate(message="forward_deepep", color="blue", category="deepseek_v2_moe"):
+            shared_output = None
+            topk_idx = torch.full(
+                (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
             )
-        if self.ep_size > 1:
+            topk_weights = torch.empty(
+                (0, self.top_k), dtype=torch.float32, device=hidden_states.device
+            )
+            if (
+                forward_mode is not None
+                and not forward_mode.is_idle()
+                and hidden_states.shape[0] > 0
+            ):
+                # router_logits: (num_tokens, n_experts)
+                router_logits = self.gate(hidden_states)
+                shared_output = self._forward_shared_experts(hidden_states)
+                topk_weights, topk_idx = select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    top_k=self.top_k,
+                    use_grouped_topk=True,
+                    renormalize=self.renormalize,
+                    topk_group=self.topk_group,
+                    num_expert_group=self.num_expert_group,
+                    correction_bias=self.correction_bias,
+                )
+            if self.ep_size > 1:
                 # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
                 (
                     hidden_states,
@@ -1323,73 +1325,68 @@ class DeepseekV2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-
-        if hidden_states.shape[0] == 0:
-            residual = hidden_states
-        else:
-            if residual is None:
+        with nvtx.annotate(message="forforward_normalward", color="lightcoral", category="deepseek_v2_decoder_layer"):
+            if hidden_states.shape[0] == 0:
                 residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
             else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+                if residual is None:
+                    residual = hidden_states
+                    hidden_states = self.input_layernorm(hidden_states)
+                else:
+                    hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-            assert not (
-                self.attn_tp_size != 1 and self.input_is_scattered
-            ), "moe_layer_freq > 1 is not supported when attn_tp_size > 1"
+                assert not (
+                    self.attn_tp_size != 1 and self.input_is_scattered
+                ), "moe_layer_freq > 1 is not supported when attn_tp_size > 1"
 
-            # Self Attention
-            hidden_states = self.self_attn(
-                positions=positions,
-                hidden_states=hidden_states,
-                forward_batch=forward_batch,
-            )
+                # Self Attention
+                hidden_states = self.self_attn(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    forward_batch=forward_batch,
+                )
 
-        # Gather
-        if get_tensor_model_parallel_world_size() > 1:
-            # all gather and all reduce
-            if self.dp_size != 1:
-                if not global_server_args_dict["enable_deepep_moe"]:
-                    if self.attn_tp_rank == 0:
-                        hidden_states += residual
-                    hidden_states, local_hidden_states = (
-                        forward_batch.gathered_buffer,
-                        hidden_states,
-                    )
-                    dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
-                    dp_scatter(residual, hidden_states, forward_batch)
-                    hidden_states = self.post_attention_layernorm(hidden_states)
+            # Gather
+            if get_tensor_model_parallel_world_size() > 1:
+                # all gather and all reduce
+                if self.dp_size != 1:
+                    if not global_server_args_dict["enable_deepep_moe"]:
+                        if self.attn_tp_rank == 0:
+                            hidden_states += residual
+                        hidden_states, local_hidden_states = (
+                            forward_batch.gathered_buffer,
+                            hidden_states,
+                        )
+                        dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
+                        dp_scatter(residual, hidden_states, forward_batch)
+                        hidden_states = self.post_attention_layernorm(hidden_states)
                 else:
                     if hidden_states.shape[0] != 0:
                         if self.attn_tp_size != 1:
                             hidden_states = tp_all_reduce(hidden_states)
-                        hidden_states, residual = self.post_attention_layernorm(
-                            hidden_states, residual
+                    hidden_states, residual = self.post_attention_layernorm(
+                        hidden_states, residual
                         )
+
             else:
-                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual
                 )
-        else:
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
 
-        # Fully Connected
-        if hidden_states.shape[0] != 0:
-            hidden_states = self.mlp(hidden_states)
+            # Fully Connected
+            if hidden_states.shape[0] != 0:
+                hidden_states = self.mlp(hidden_states)
 
-        # TODO(ch-wan): ues reduce-scatter in MLP to avoid this scatter
-        # Scatter
-        if self.dp_size != 1 and not global_server_args_dict["enable_deepep_moe"]:
-            # important: forward batch.gathered_buffer is used both after scatter and after gather.
-            # be careful about this!
-            hidden_states, global_hidden_states = (
-                forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-                hidden_states,
-            )
-            dp_scatter(hidden_states, global_hidden_states, forward_batch)
-
+            # TODO(ch-wan): ues reduce-scatter in MLP to avoid this scatter
+            # Scatter
+            if self.dp_size != 1 and not global_server_args_dict["enable_deepep_moe"]:
+                # important: forward batch.gathered_buffer is used both after scatter and after gather.
+                # be careful about this!
+                hidden_states, global_hidden_states = (
+                    forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
+                    hidden_states,
+                )
+                dp_scatter(hidden_states, global_hidden_states, forward_batch)
 
             return hidden_states, residual
 
@@ -1400,10 +1397,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        if hidden_states.shape[0] == 0:
-            residual = hidden_states
-        else:
-            with torch.cuda.nvtx.range("layer_norm"):
+        with nvtx.annotate(message="forward_deepep", color="lightcoral", category="deepseek_v2_decoder_layer"):
+            if hidden_states.shape[0] == 0:
+                residual = hidden_states
+            else:
                 if residual is None:
                     residual = hidden_states
                     hidden_states = self.input_layernorm(hidden_states)
@@ -1425,10 +1422,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 forward_batch=forward_batch,
             )
 
-
-        if self.attn_tp_size != 1:
-            if self.input_is_scattered:
-                with torch.cuda.nvtx.range("reduce_scatter"):
+            if self.attn_tp_size != 1:
+                if self.input_is_scattered:
                     tensor_list = list(hidden_states.tensor_split(self.attn_tp_size))
                     hidden_states = tensor_list[self.attn_tp_rank]
                     tp_reduce_scatter(hidden_states, tensor_list)
@@ -1445,19 +1440,15 @@ class DeepseekV2DecoderLayer(nn.Module):
                     residual = hidden_states
                     if hidden_states.shape[0] != 0:
                         hidden_states = self.post_attention_layernorm(hidden_states)
-        else:
-            if hidden_states.shape[0] != 0:
-                with torch.cuda.nvtx.range("post_attn_norm"):
+            else:
+                if hidden_states.shape[0] != 0:
                     hidden_states, residual = self.post_attention_layernorm(
                         hidden_states, residual
                     )
 
-        with torch.cuda.nvtx.range("mlp"):
             hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
 
-
-        if self.is_last_layer and self.attn_tp_size != 1:
-            with torch.cuda.nvtx.range("last_layer_ops"):
+            if self.is_last_layer and self.attn_tp_size != 1:
                 hidden_states += residual
                 residual = None
                 hidden_states, local_hidden_states = (

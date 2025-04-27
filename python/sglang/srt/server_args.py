@@ -44,14 +44,14 @@ logger = logging.getLogger(__name__)
 
 class KVTransferConfig(BaseModel):
     role: str = "prefill" # "prefill" or "decode"
-    
+
     decode_dist_init_host: str = None
     prefill_dist_init_host: str = None
 
     transfer_engine_metadata_server: str = None
     transfer_engine_rdma_device: str = "mlx5_0"
 
-    kv_cache_capacity: int = 512 * 1024 # the max tokens number of kv cache
+    kv_cache_capacity: int = 256 * 1024 # the max tokens number of kv cache
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
