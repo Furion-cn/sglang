@@ -2827,7 +2827,7 @@ class DeepseekV2Model(nn.Module):
         launch_ll_dispatch_step = "launch_ll_dispatch"
         launch_ll_combine_step = "launch_ll_combine"
         """
-        logger.debug(f"forward_decode in two micro batch")
+        # logger.debug(f"forward_decode in two micro batch")
         # if get_attention_tp_rank()==0:
         # logger.debug(f"forward_decode start: forward_batch, attn_backend: {forward_batch.attn_backend}, attn_backend1: {forward_batch.attn_backend1}")
         bs_joint_batch_boundary, fwd_batch0, fwd_batch1 = token_balanced_batch_split(
