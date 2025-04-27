@@ -338,7 +338,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         )
 
     def clear_tmp_data(self):
-        return self.hidden_states
+        del self.hidden_states
 
     def get_hidden_states(self):
         return self.hidden_states
