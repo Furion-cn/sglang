@@ -450,16 +450,18 @@ class ColumnParallelLinear(LinearBase):
         with nvtx.annotate(message="forward", color="plum", category="column_parallel_linear"):
             bias = self.bias if not self.skip_bias_add else None
 
-            # Matrix multiply.
-            assert self.quant_method is not None
-            output_parallel = self.quant_method.apply(self, input_, bias)
-            if self.gather_output:
-                # All-gather across the partitions.
-                output = tensor_model_parallel_all_gather(output_parallel)
-            else:
-                output = output_parallel
-            output_bias = self.bias if self.skip_bias_add else None
-            return output, output_bias
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self, input_, bias)
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = tensor_model_parallel_all_gather(output_parallel)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
 
     def extra_repr(self) -> str:
         with nvtx.annotate(message="extra_repr", color="plum", category="column_parallel_linear"):
@@ -1288,29 +1290,29 @@ class RowParallelLinear(LinearBase):
                 param.load_row_parallel_weight(loaded_weight)
 
     def forward(self, input_):
-        with nvtx.annotate(message="forward", color="purple", category="row_parallel_linear"):
-            if self.input_is_parallel:
-                input_parallel = input_
-            else:
-                splitted_input = split_tensor_along_last_dim(
-                    input_, num_partitions=self.tp_size
-                )
-                input_parallel = splitted_input[self.tp_rank].contiguous()
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size
+            )
+            input_parallel = splitted_input[self.tp_rank].contiguous()
 
-            # Matrix multiply.
-            assert self.quant_method is not None
-            # Only fuse bias add into GEMM for rank 0 (this ensures that
-            # bias will not get added more than once in TP>1 case)
-            bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
-            if self.reduce_results and self.tp_size > 1:
-                output = tp_all_reduce(output_parallel)
-            else:
-                output = output_parallel
 
-            output_bias = self.bias if self.skip_bias_add else None
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
+        if self.reduce_results and self.tp_size > 1:
+            logger.info(f"reduce_results {output_parallel.shape}")
+            output = tp_all_reduce(output_parallel)
+        else:
+            output = output_parallel
 
-            return output, output_bias
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
 
     def extra_repr(self) -> str:
         with nvtx.annotate(message="extra_repr", color="purple", category="row_parallel_linear"):
