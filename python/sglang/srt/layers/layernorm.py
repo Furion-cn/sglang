@@ -49,6 +49,16 @@ class RMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
+    def forward(self, *args, **kwargs):
+        if torch.compiler.is_compiling():
+            return self.forward_native(*args, **kwargs)
+        if _is_cuda:
+            return self.forward_cuda(*args, **kwargs)
+        elif _is_hip:
+            return self.forward_hip(*args, **kwargs)
+        else:
+            return self.forward_native(*args, **kwargs)
+
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -61,12 +71,29 @@ class RMSNorm(CustomOp):
             out = rmsnorm(x, self.weight.data, self.variance_epsilon)
             return out
 
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if not x.is_contiguous():
+            # NOTE: Romove this if aiter kernel supports discontinuous input
+            x = x.contiguous()
+        if residual is not None:
+            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)
+            return x, residual
+        out = torch.empty_like(x)
+        rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        return out
+
     def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         with nvtx.annotate(message="forward_native", color="slateblue", category="rms_norm"):
+            if not x.is_contiguous():
+                x = x.contiguous()
             orig_dtype = x.dtype
             x = x.to(torch.float32)
             if residual is not None:
