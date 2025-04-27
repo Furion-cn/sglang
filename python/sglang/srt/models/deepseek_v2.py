@@ -155,6 +155,7 @@ class DeepseekV2MLP(nn.Module):
             gate_up, _ = self.gate_up_proj(x)
             gate_up = gate_up.contiguous()
             x = self.act_fn(gate_up)
+            x = x.contiguous()
             x, _ = self.down_proj(x)
             return x
 
