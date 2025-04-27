@@ -1838,13 +1838,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         micro_batch_idx = extra_args[
             MicroBatchOverlapExtraArgs.EXTRA_ARGS_MICRO_BATCH_IDX_KEY
         ]
-        if get_attention_tp_rank() == 0 and self.layer_id > 4:
-            acc_gpu_mem = 0
-            for j in range(4, self.layer_id):
-                t = self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].get_hidden_states(
-                    forward_mode=forward_batch.forward_mode)
-                acc_gpu_mem += t.numel() * t.element_size() if t is not None else 0
-            logger.debug(f"layer[{self.layer_id}], micro_idx: {micro_batch_idx}, acc_gpu_mem: {acc_gpu_mem}")
+        # if get_attention_tp_rank() == 0 and self.layer_id > 4:
+        #     acc_gpu_mem = 0
+        #     for j in range(4, self.layer_id):
+        #         t = self.mlp.deepep_dispatchers[get_role(forward_batch)][micro_batch_idx].get_hidden_states(
+        #             forward_mode=forward_batch.forward_mode)
+        #         acc_gpu_mem += t.numel() * t.element_size() if t is not None else 0
+        #     logger.debug(f"layer[{self.layer_id}], micro_idx: {micro_batch_idx}, acc_gpu_mem: {acc_gpu_mem}")
 
         dispatched_hidden_states = self.mlp.deepep_dispatchers[get_role(forward_batch)][
             micro_batch_idx
