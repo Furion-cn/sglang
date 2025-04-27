@@ -859,7 +859,6 @@ class DeepEPMoE(EPMoE):
         reorder_topk_ids: torch.Tensor,
         seg_indptr: torch.Tensor,
     ):
-        logger.info(f"DeepEPMoE.forward_normal {hidden_states.shape}")
         assert self.quant_method is not None
         assert self.activation == "silu"
         if self.grouped_gemm_runner is None:

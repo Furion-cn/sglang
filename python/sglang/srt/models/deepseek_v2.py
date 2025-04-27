@@ -315,7 +315,6 @@ class DeepseekV2MoE(nn.Module):
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_mode: ForwardMode
     ) -> torch.Tensor:
-        logger.info(f"DeepseekV2MoE.forward_deepep {hidden_states.shape}")
         shared_output = None
         topk_idx = torch.full(
             (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -329,9 +328,7 @@ class DeepseekV2MoE(nn.Module):
             and hidden_states.shape[0] > 0
         ):
             router_logits = self.gate(hidden_states)
-            logger.info(f"forward_deepep gate end")
             shared_output = self._forward_shared_experts(hidden_states)
-            logger.info(f"forward_deepep _forward_shared_experts end")
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -342,7 +339,6 @@ class DeepseekV2MoE(nn.Module):
                 num_expert_group=self.num_expert_group,
                 correction_bias=self.correction_bias,
             )
-            logger.info(f"select_experts end")
         if self.ep_size > 1:
             with torch.cuda.nvtx.range("dispatch"):
                 # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
@@ -1325,7 +1321,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        logger.info(f"forward_normal {hidden_states.shape}")
 
         if hidden_states.shape[0] == 0:
             residual = hidden_states
@@ -1402,7 +1397,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        logger.info(f"forward_deepep {hidden_states.shape}")
         if hidden_states.shape[0] == 0:
             residual = hidden_states
         else:
@@ -1430,7 +1424,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                 forward_batch=forward_batch,
             )
 
-        logger.info(f"self_attention end")
 
         if self.attn_tp_size != 1:
             if self.input_is_scattered:
@@ -1455,7 +1448,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                 if hidden_states.shape[0] != 0:
                     with torch.cuda.nvtx.range("post_attn_norm"):
                         hidden_states = self.post_attention_layernorm(hidden_states)
-                logger.info(f"post_attn_norm end")
         else:
             if hidden_states.shape[0] != 0:
                 with torch.cuda.nvtx.range("post_attn_norm"):
@@ -1466,7 +1458,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         with torch.cuda.nvtx.range("mlp"):
             hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
 
-        logger.info(f"mlp end")
 
         if self.is_last_layer and self.attn_tp_size != 1:
             with torch.cuda.nvtx.range("last_layer_ops"):
