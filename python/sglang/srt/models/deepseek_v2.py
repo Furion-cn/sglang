@@ -1351,7 +1351,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         if get_tensor_model_parallel_world_size() > 1:
             # all gather and all reduce
             if self.dp_size != 1:
-                logger.info(f"dp_size {self.dp_size} forward post atten start")
                 if not global_server_args_dict["enable_deepep_moe"]:
                     if self.attn_tp_rank == 0:
                         hidden_states += residual
@@ -1369,7 +1368,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                         hidden_states, residual = self.post_attention_layernorm(
                             hidden_states, residual
                         )
-                logger.info(f"dp_size {self.dp_size} forward post atten end")
             else:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
                 hidden_states, residual = self.post_attention_layernorm(
@@ -1379,11 +1377,10 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-        logger.info("forward normal mlp start")
+
         # Fully Connected
         if hidden_states.shape[0] != 0:
             hidden_states = self.mlp(hidden_states)
-        logger.info("forward normal mlp end")
 
         # TODO(ch-wan): ues reduce-scatter in MLP to avoid this scatter
         # Scatter
@@ -1394,9 +1391,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
                 hidden_states,
             )
-            logger.info(f"dp_size {self.dp_size} forward dp_scatter start")
             dp_scatter(hidden_states, global_hidden_states, forward_batch)
-            logger.info(f"dp_size {self.dp_size} forward dp_scatter end")
+
         return hidden_states, residual
 
     def forward_deepep(
