@@ -172,7 +172,7 @@ class MoEGate(nn.Module):
             self.e_score_correction_bias = None
 
     def forward(self, hidden_states):
-        logger.info(f"MoeGate Start {hidden_states.shape} {hidden_states.device}")
+        logger.info("MoeGate Start")
         logits = F.linear(hidden_states, self.weight, None)
         logger.info("MoeGate End")
         return logits
