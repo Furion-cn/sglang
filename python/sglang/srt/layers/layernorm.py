@@ -65,6 +65,10 @@ class RMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         with nvtx.annotate(message="forward_cuda", color="slateblue", category="rms_norm"):
+            if x.shape[0] == 0:
+                if residual is not None:
+                    return x, residual
+                return x
             if not x.is_contiguous():
                 x = x.contiguous()
             # logger.info(f"x contiguous {x.is_contiguous()}")

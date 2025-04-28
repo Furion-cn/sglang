@@ -1365,17 +1365,23 @@ class DeepseekV2DecoderLayer(nn.Module):
                             if self.attn_tp_size != 1:
                                 hidden_states = tp_all_reduce(hidden_states)
 
-                        logger.info(f"[Layer {self.layer_id}] Before layernorm: hidden_states shape={hidden_states.shape}, "
-                            f"device={hidden_states.device}, dtype={hidden_states.dtype}, "
-                            f"contiguous={hidden_states.is_contiguous()}, "
-                            f"residual shape={residual.shape if residual is not None else None}, "
-                            f"device={residual.device if residual is not None else None}, "
-                            f"dtype={residual.dtype if residual is not None else None}, "
-                            f"contiguous={residual.is_contiguous() if residual is not None else None}")
+                            logger.info(f"[Layer {self.layer_id}] Before layernorm: hidden_states shape={hidden_states.shape}, "
+                                f"device={hidden_states.device}, dtype={hidden_states.dtype}, "
+                                f"contiguous={hidden_states.is_contiguous()}, "
+                                f"residual shape={residual.shape if residual is not None else None}, "
+                                f"device={residual.device if residual is not None else None}, "
+                                f"dtype={residual.dtype if residual is not None else None}, "
+                                f"contiguous={residual.is_contiguous() if residual is not None else None}")
 
-                        hidden_states, residual = self.post_attention_layernorm(
-                            hidden_states, residual
-                            )
+                            hidden_states, residual = self.post_attention_layernorm(
+                                hidden_states, residual
+                                )                            
+                        else:
+                            # 当 hidden_states 为空张量时，跳过 layernorm 操作
+                            logger.info(f"[Layer {self.layer_id}] Skipping layernorm for empty tensor")
+                            # 确保 residual 也是空张量
+                            if residual is None or residual.shape[0] != 0:
+                                residual = hidden_states
                         logger.info(f"[Layer {self.layer_id}] After layernorm: hidden_states shape={hidden_states.shape}, "
                             f"device={hidden_states.device}, dtype={hidden_states.dtype}, "
                             f"contiguous={hidden_states.is_contiguous()}, "
