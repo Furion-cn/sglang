@@ -1360,14 +1360,13 @@ class DeepseekV2DecoderLayer(nn.Module):
                         dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
                         dp_scatter(residual, hidden_states, forward_batch)
                         hidden_states = self.post_attention_layernorm(hidden_states)
-                else:
-                    if hidden_states.shape[0] != 0:
-                        if self.attn_tp_size != 1:
-                            hidden_states = tp_all_reduce(hidden_states)
-                    hidden_states, residual = self.post_attention_layernorm(
-                        hidden_states, residual
-                        )
-
+                    else:
+                        if hidden_states.shape[0] != 0:
+                            if self.attn_tp_size != 1:
+                                hidden_states = tp_all_reduce(hidden_states)
+                        hidden_states, residual = self.post_attention_layernorm(
+                            hidden_states, residual
+                            )
             else:
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual
