@@ -82,11 +82,11 @@ class SchedulerOutputProcessorMixin:
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
 
-                    if req.pd_step == PDStep.PREFILL:
+                    req.check_finished()
+
+                    if req.pd_step == PDStep.PREFILL and not req.finished():
                         req.pd_step = PDStep.DISPATCHING
                         self.kv_transfer_agent.set_kv_buffer(req)
-
-                    req.check_finished()
 
                     if req.finished():
                         self.tree_cache.cache_finished_req(req)
