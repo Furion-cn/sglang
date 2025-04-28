@@ -89,7 +89,7 @@ class SchedulerOutputProcessorMixin:
 
                     req.check_finished()
 
-                    if req.pd_step == PDStep.PREFILL and not req.is_finished():
+                    if req.pd_step == PDStep.PREFILL and not req.finished():
                         req.pd_step = PDStep.DISPATCHING
                         try:
                             self.kv_transfer_agent.set_kv_buffer(req)
