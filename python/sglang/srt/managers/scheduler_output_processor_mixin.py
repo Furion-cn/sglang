@@ -10,6 +10,8 @@ from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBa
 from sglang.srt.managers.schedule_batch import PDStep
 from sglang.srt.managers.io_struct import PrefilledReqInput
 
+from python.sglang.srt.managers.schedule_batch import FINISH_ABORT
+
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
         EmbeddingBatchResult,
@@ -84,7 +86,10 @@ class SchedulerOutputProcessorMixin:
 
                     if req.pd_step == PDStep.PREFILL:
                         req.pd_step = PDStep.DISPATCHING
-                        self.kv_transfer_agent.set_kv_buffer(req)
+                        try:
+                            self.kv_transfer_agent.set_kv_buffer(req)
+                        except Exception as ex:
+                            req.finished_reason = FINISH_ABORT("kv_buffer_is_full")
 
                     req.check_finished()
 
