@@ -69,6 +69,8 @@ class RMSNorm(CustomOp):
                 x = x.contiguous()
             # logger.info(f"x contiguous {x.is_contiguous()}")
             if residual is not None:
+                if not residual.is_contiguous():
+                    residual = residual.contiguous()
                 fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
                 return x, residual
             out = rmsnorm(x, self.weight.data, self.variance_epsilon)

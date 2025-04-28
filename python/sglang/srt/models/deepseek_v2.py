@@ -1364,9 +1364,25 @@ class DeepseekV2DecoderLayer(nn.Module):
                         if hidden_states.shape[0] != 0:
                             if self.attn_tp_size != 1:
                                 hidden_states = tp_all_reduce(hidden_states)
+
+                        logger.info(f"[Layer {self.layer_id}] Before layernorm: hidden_states shape={hidden_states.shape}, "
+                            f"device={hidden_states.device}, dtype={hidden_states.dtype}, "
+                            f"contiguous={hidden_states.is_contiguous()}, "
+                            f"residual shape={residual.shape if residual is not None else None}, "
+                            f"device={residual.device if residual is not None else None}, "
+                            f"dtype={residual.dtype if residual is not None else None}, "
+                            f"contiguous={residual.is_contiguous() if residual is not None else None}")
+
                         hidden_states, residual = self.post_attention_layernorm(
                             hidden_states, residual
                             )
+                        logger.info(f"[Layer {self.layer_id}] After layernorm: hidden_states shape={hidden_states.shape}, "
+                            f"device={hidden_states.device}, dtype={hidden_states.dtype}, "
+                            f"contiguous={hidden_states.is_contiguous()}, "
+                            f"residual shape={residual.shape if residual is not None else None}, "
+                            f"device={residual.device if residual is not None else None}, "
+                            f"dtype={residual.dtype if residual is not None else None}, "
+                            f"contiguous={residual.is_contiguous() if residual is not None else None}")
             else:
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual
