@@ -485,6 +485,7 @@ class CudaGraphRunner:
             )
         else:
             index = bisect.bisect_left(self.capture_bs, raw_bs)
+        print(f"raw_bs={self.capture_bs}, index={index}")
         bs = self.capture_bs[index]
         if bs != raw_bs:
             self.seq_lens.fill_(1)
