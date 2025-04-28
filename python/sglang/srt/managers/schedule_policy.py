@@ -479,7 +479,7 @@ class PrefillAdder:
 
         offset = self.kv_transfer_agent.allocate_kv_buffer(req)
         if offset < 0:
-            logger.warning(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.kv_buffer.available_size}")
+            logger.warning(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.get_kv_buffer_stats().available_size}")
             return AddReqResult.OTHER
 
         with self._lock_node(req.last_node):
@@ -515,7 +515,7 @@ class PrefillAdder:
             else:
                 if self.rem_chunk_tokens == 0:
                     self.kv_transfer_agent.free_kv_buffer(req)
-                    logger.debug(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.kv_buffer.available_size}, free kv buffer for req {req.rid}")
+                    logger.debug(f"KV buffer space insufficient: required={req.extend_input_len}, available={self.kv_transfer_agent.get_kv_buffer_stats().available_size}, free kv buffer for req {req.rid}")
                     return AddReqResult.OTHER
 
                 # Chunked prefill
