@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import nvtx
+import logging
 
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
         GenerationBatchResult,
         ScheduleBatch,
     )
+
+logger = logging.getLogger(__name__)
 
 
 class SchedulerOutputProcessorMixin:
@@ -82,11 +85,16 @@ class SchedulerOutputProcessorMixin:
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
 
-                    if req.pd_step == PDStep.PREFILL:
-                        req.pd_step = PDStep.DISPATCHING
-                        self.kv_transfer_agent.set_kv_buffer(req)
+
 
                     req.check_finished()
+
+                    if req.pd_step == PDStep.PREFILL and not req.is_finished():
+                        req.pd_step = PDStep.DISPATCHING
+                        try:
+                            self.kv_transfer_agent.set_kv_buffer(req)
+                        except Exception as e:
+                            logger.error(f"kv_transfer_agent error: {e}")
 
                     if req.finished():
                         self.tree_cache.cache_finished_req(req)
