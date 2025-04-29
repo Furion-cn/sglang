@@ -174,6 +174,7 @@ class _DeepEPDispatcherImplBase:
 
 
 class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
+    @nvtx.annotate(color="yellow", category="deepep_dispathcer_normal")
     def __init__(self, async_finish: bool, **kwargs):
         super().__init__(**kwargs)
 
@@ -186,41 +187,44 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        topk_idx = topk_idx.to(torch.int64)
-        previous_event = Buffer.capture() if self.async_finish else None
-        return hidden_states, topk_idx, topk_weights, previous_event
+        with nvtx.annotate(message="dispatch_a", color="yellow", category="deepep_dispathcer_normal"):
+            topk_idx = topk_idx.to(torch.int64)
+            previous_event = Buffer.capture() if self.async_finish else None
+            return hidden_states, topk_idx, topk_weights, previous_event
 
     def dispatch_b(self, hidden_states, topk_idx, topk_weights, previous_event):
-        (
-            hidden_states,
-            topk_idx,
-            topk_weights,
-            event,
-        ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
-        event.current_stream_wait() if self.async_finish else ()
-        if hidden_states.shape[0] > 0:
-            reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
-                hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
-            )
-        else:
-            reorder_topk_ids = torch.empty(
-                (0,), device=hidden_states.device, dtype=torch.int64
-            )
-            seg_indptr = torch.zeros(
-                (self.num_experts + 1,), device=hidden_states.device, dtype=torch.int64
-            )
+        with nvtx.annotate(message="dispatch_b", color="yellow", category="deepep_dispathcer_normal"):
+            (
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                event,
+            ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
+            with nvtx.annotate(message="dispatch_b_wait", color="yellow", category="deepep_dispathcer_normal"):
+                event.current_stream_wait() if self.async_finish else ()
+            if hidden_states.shape[0] > 0:
+                reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
+                    hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
+                )
+            else:
+                reorder_topk_ids = torch.empty(
+                    (0,), device=hidden_states.device, dtype=torch.int64
+                )
+                seg_indptr = torch.zeros(
+                    (self.num_experts + 1,), device=hidden_states.device, dtype=torch.int64
+                )
 
-        masked_m = expected_m = None
+            masked_m = expected_m = None
 
-        return (
-            hidden_states,
-            topk_idx,
-            topk_weights,
-            reorder_topk_ids,
-            seg_indptr,
-            masked_m,
-            expected_m,
-        )
+            return (
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                reorder_topk_ids,
+                seg_indptr,
+                masked_m,
+                expected_m,
+            )
 
     def _dispatch_core(
         self,
@@ -229,51 +233,52 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
         previous_event,
     ):
-        buffer = self._get_buffer()
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            previous_event,
-        ) = buffer.get_dispatch_layout(
-            topk_idx,
-            self.num_experts,
-            previous_event=previous_event,
-            async_finish=self.async_finish,
-            allocate_on_comm_stream=previous_event is not None,
-        )
+        with nvtx.annotate(message="adispatch_core", color="yellow", category="deepep_dispathcer_normal"):
+            buffer = self._get_buffer()
+            (
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                num_tokens_per_expert,
+                is_token_in_rank,
+                previous_event,
+            ) = buffer.get_dispatch_layout(
+                topk_idx,
+                self.num_experts,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=previous_event is not None,
+            )
 
-        # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
-        # However, doing this would incur an unknown synchronization error, but keeping
-        # `handle` as a member variable works.
+            # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
+            # However, doing this would incur an unknown synchronization error, but keeping
+            # `handle` as a member variable works.
 
-        (
-            recv_x,
-            recv_topk_idx,
-            recv_topk_weights,
-            _,  # num_recv_tokens_per_expert_list
-            self.handle,
-            event,
-        ) = buffer.dispatch(
-            x,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=self.async_finish,
-            allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-        )
+            (
+                recv_x,
+                recv_topk_idx,
+                recv_topk_weights,
+                _,  # num_recv_tokens_per_expert_list
+                self.handle,
+                event,
+            ) = buffer.dispatch(
+                x,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
+            )
 
-        return (
-            recv_x,
-            recv_topk_idx,
-            recv_topk_weights,
-            event,
-        )
+            return (
+                recv_x,
+                recv_topk_idx,
+                recv_topk_weights,
+                event,
+            )
 
     def _deepep_permute(
         self,
@@ -283,36 +288,37 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         use_fp8_w8a8: bool = False,
         use_block_quant: bool = False,
     ):
-        """
-        Copy from Megatron-Core token_dispatcher MoEFlexTokenDispatcher
-        https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/moe/token_dispatcher.py
-        """
+        with nvtx.annotate(message="deepep_permute", color="yellow", category="deepep_dispathcer_normal"):
+            """
+            Copy from Megatron-Core token_dispatcher MoEFlexTokenDispatcher
+            https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/moe/token_dispatcher.py
+            """
 
-        reorder_topk_ids, self.src2dst, seg_indptr = deepep_run_moe_deep_preprocess(
-            topk_idx, self.num_experts
-        )
-        num_total_tokens = reorder_topk_ids.numel()
-        gateup_input = torch.empty(
-            (int(num_total_tokens), hidden_states.shape[1]),
-            device=hidden_states.device,
-            dtype=(
-                fp8_dtype
-                if (use_fp8_w8a8 and not use_block_quant)
-                else hidden_states.dtype
-            ),
-        )
-        # PreReorder
-        deepep_permute_triton_kernel[(hidden_states.shape[0],)](
-            hidden_states,
-            gateup_input,
-            self.src2dst,
-            topk_idx,
-            None,
-            self.router_topk,
-            hidden_states.shape[1],
-            BLOCK_SIZE=512,
-        )
-        return reorder_topk_ids, seg_indptr, gateup_input
+            reorder_topk_ids, self.src2dst, seg_indptr = deepep_run_moe_deep_preprocess(
+                topk_idx, self.num_experts
+            )
+            num_total_tokens = reorder_topk_ids.numel()
+            gateup_input = torch.empty(
+                (int(num_total_tokens), hidden_states.shape[1]),
+                device=hidden_states.device,
+                dtype=(
+                    fp8_dtype
+                    if (use_fp8_w8a8 and not use_block_quant)
+                    else hidden_states.dtype
+                ),
+            )
+            # PreReorder
+            deepep_permute_triton_kernel[(hidden_states.shape[0],)](
+                hidden_states,
+                gateup_input,
+                self.src2dst,
+                topk_idx,
+                None,
+                self.router_topk,
+                hidden_states.shape[1],
+                BLOCK_SIZE=512,
+            )
+            return reorder_topk_ids, seg_indptr, gateup_input
 
     def combine_a(
         self,
