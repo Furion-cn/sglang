@@ -2468,13 +2468,13 @@ class DeepseekV2Model(nn.Module):
         assert num_experts % ep_size == 0, f"num_experts[{config.n_routed_experts}]%ep_size[{ep_size}] must be 0"
         self.top_k = config.num_experts_per_tok
         # constraints: low_latency && decode
-        # shape=[local_num_experts, num_max_dispatch_tokens_per_rank*topk, hidden_size]
+        # shape=[local_num_experts, num_max_dispatch_tokens_per_rank*num_ranks, hidden_size]
         self.mb0_mlp_output = torch.empty(
-            (num_experts // ep_size, 128 * config.num_experts_per_tok, config.hidden_size),
+            (num_experts // ep_size, 128 * parallel_state.get_tp_group().world_size, config.hidden_size),
             device=torch.cuda.current_device(), dtype=torch.bfloat16
         )
         self.mb1_mlp_output = torch.empty(
-            (num_experts // ep_size, 128 * config.num_experts_per_tok, config.hidden_size),
+            (num_experts // ep_size, 128 * parallel_state.get_tp_group().world_size, config.hidden_size),
             device=torch.cuda.current_device(), dtype=torch.bfloat16
         )
 

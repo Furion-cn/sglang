@@ -416,6 +416,7 @@ class Scheduler(
         self.torch_profiler_output_dir: Optional[str] = None
         self.profiler_activities: Optional[List[str]] = None
         self.profiler_target_forward_ct: Optional[int] = None
+        self.profiler_decode_only: Optional[bool] = None
         self.record_expert_distribution_forward_ct: Optional[int] = None
         self.record_expert_distribution_output_dir: Optional[str] = None
 
@@ -1670,9 +1671,12 @@ class Scheduler(
         self.forward_ct += 1
 
         # Check profiler
+        forward_ct = self.forward_ct
+        if self.profiler_decode_only:
+            forward_ct = self.forward_ct_decode
         if (
             self.profiler_target_forward_ct
-            and self.profiler_target_forward_ct <= self.forward_ct
+            and self.profiler_target_forward_ct <= forward_ct
         ):
             self.stop_profile()
 
@@ -2147,6 +2151,7 @@ class Scheduler(
                 recv_req.activities,
                 recv_req.with_stack,
                 recv_req.record_shapes,
+                recv_req.decode_only,
             )
         else:
             return self.stop_profile()
@@ -2158,6 +2163,7 @@ class Scheduler(
         activities: Optional[List[str]],
         with_stack: Optional[bool],
         record_shapes: Optional[bool],
+        decode_only: Optional[bool],
     ) -> None:
         if self.profiler_activities:
             return ProfileReqOutput(
@@ -2172,6 +2178,7 @@ class Scheduler(
 
         self.torch_profiler_output_dir = output_dir
         self.profiler_activities = activities
+        self.profiler_decode_only = decode_only
         logger.info(
             "Profiling starts. Traces will be saved to: %s",
             self.torch_profiler_output_dir,
@@ -2200,7 +2207,10 @@ class Scheduler(
             torch.cuda.cudart().cudaProfilerStart()
 
         if num_steps:
-            self.profiler_target_forward_ct = self.forward_ct + num_steps
+            if decode_only:
+                self.profiler_target_forward_ct = self.forward_ct_decode + num_steps
+            else:
+                self.profiler_target_forward_ct = self.forward_ct + num_steps
             # The caller will be notified when reaching profiler_target_forward_ct
         else:
             self.profiler_target_forward_ct = None
