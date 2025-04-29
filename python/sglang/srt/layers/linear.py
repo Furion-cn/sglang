@@ -27,6 +27,7 @@ from sglang.srt.layers.parameter import (
     RowvLLMParameter,
     _ColumnvLLMParameter,
 )
+from sglang.srt.layers.dp_attention import tp_all_reduce
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -449,6 +450,7 @@ class ColumnParallelLinear(LinearBase):
         with nvtx.annotate(message="forward", color="plum", category="column_parallel_linear"):
             bias = self.bias if not self.skip_bias_add else None
 
+
             # Matrix multiply.
             assert self.quant_method is not None
             output_parallel = self.quant_method.apply(self, input_, bias)
@@ -457,6 +459,7 @@ class ColumnParallelLinear(LinearBase):
                 output = tensor_model_parallel_all_gather(output_parallel)
             else:
                 output = output_parallel
+
             output_bias = self.bias if self.skip_bias_add else None
             return output, output_bias
 
@@ -1296,6 +1299,7 @@ class RowParallelLinear(LinearBase):
                 )
                 input_parallel = splitted_input[self.tp_rank].contiguous()
 
+
             # Matrix multiply.
             assert self.quant_method is not None
             # Only fuse bias add into GEMM for rank 0 (this ensures that
@@ -1303,12 +1307,11 @@ class RowParallelLinear(LinearBase):
             bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
             output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
             if self.reduce_results and self.tp_size > 1:
-                output = tensor_model_parallel_all_reduce(output_parallel)
+                output = tp_all_reduce(output_parallel)
             else:
                 output = output_parallel
 
             output_bias = self.bias if self.skip_bias_add else None
-
             return output, output_bias
 
     def extra_repr(self) -> str:

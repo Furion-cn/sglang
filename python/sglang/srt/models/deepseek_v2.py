@@ -296,7 +296,7 @@ class DeepseekV2MoE(nn.Module):
     ) -> torch.Tensor:
         with nvtx.annotate(message="forward", color="blue", category="deepseek_v2_moe"):
             if not global_server_args_dict["enable_deepep_moe"]:
-                return self.forward_normal(hidden_states)   
+                return self.forward_normal(hidden_states)
             else:
                 return self.forward_deepep(hidden_states, forward_mode)
 
@@ -1285,8 +1285,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=add_prefix("mlp", prefix),
-                tp_rank=0,
-                tp_size=1,
+                tp_rank=get_attention_tp_rank(),
+                tp_size=get_attention_tp_size(),
             )
             self.is_sparse = False
 
@@ -1350,32 +1350,24 @@ class DeepseekV2DecoderLayer(nn.Module):
             if get_tensor_model_parallel_world_size() > 1:
                 # all gather and all reduce
                 if self.dp_size != 1:
-                    # if not global_server_args_dict["enable_deepep_moe"]:
-                    #     if self.attn_tp_rank == 0:
-                    #         hidden_states += residual
-                    #     hidden_states, local_hidden_states = (
-                    #         forward_batch.gathered_buffer,
-                    #         hidden_states,
-                    #     )
-                    #     dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
-                    #     dp_scatter(residual, hidden_states, forward_batch)
-                    #     hidden_states = self.post_attention_layernorm(hidden_states)
-                    # else:
-                    #     if self.attn_tp_size != 0:
-                    #         hidden_states = tp_all_reduce(hidden_states)
-                    #     if hidden_states.shape[0] != 0:
-                    #         hidden_states, residual = self.post_attention_layernorm(
-                    #             hidden_states, residual
-                    #         )
-                    if self.attn_tp_rank == 0:
-                        hidden_states += residual
-                    hidden_states, local_hidden_states = (
-                        forward_batch.gathered_buffer,
-                        hidden_states,
-                    )
-                    dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
-                    dp_scatter(residual, hidden_states, forward_batch)
-                    hidden_states = self.post_attention_layernorm(hidden_states)
+                    if not global_server_args_dict["enable_deepep_moe"]:
+                        if self.attn_tp_rank == 0:
+                            hidden_states += residual
+                        hidden_states, local_hidden_states = (
+                            forward_batch.gathered_buffer,
+                            hidden_states,
+                        )
+                        dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
+                        dp_scatter(residual, hidden_states, forward_batch)
+                        hidden_states = self.post_attention_layernorm(hidden_states)
+                    else:
+                        if hidden_states.shape[0] != 0:
+                            if self.attn_tp_size != 1:
+                                hidden_states = tp_all_reduce(hidden_states)
+
+                            hidden_states, residual = self.post_attention_layernorm(
+                                hidden_states, residual
+                                )
                 else:
                     hidden_states = tensor_model_parallel_all_reduce(hidden_states)
                     hidden_states, residual = self.post_attention_layernorm(
@@ -1387,11 +1379,12 @@ class DeepseekV2DecoderLayer(nn.Module):
                 )
 
             # Fully Connected
-            hidden_states = self.mlp(hidden_states)
+            if hidden_states.shape[0] != 0:
+                hidden_states = self.mlp(hidden_states)
 
             # TODO(ch-wan): ues reduce-scatter in MLP to avoid this scatter
             # Scatter
-            if self.dp_size != 1:
+            if self.dp_size != 1 and not global_server_args_dict["enable_deepep_moe"]:
                 # important: forward batch.gathered_buffer is used both after scatter and after gather.
                 # be careful about this!
                 hidden_states, global_hidden_states = (

@@ -978,7 +978,7 @@ class DeepEPMoE(EPMoE):
         masked_m: torch.Tensor,
         expected_m: int,
     ):
-        with nvtx.annotate(message="forward_deepgemm_masked", color="deepskyblue", category="deepep_moe"):  
+        with nvtx.annotate(message="forward_deepgemm_masked", color="deepskyblue", category="deepep_moe"):
             assert self.quant_method is not None
             assert self.activation == "silu"
             assert (

@@ -1016,7 +1016,6 @@ class Scheduler(
     ):
         gap_latency = time.time() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.time()
-        self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = 0
 
         num_used = self.max_total_num_tokens - (
@@ -1026,15 +1025,22 @@ class Scheduler(
         self._largest_prefill_len = max(
             self._largest_prefill_len, adder.log_input_tokens
         )
+        self.last_input_throughput = adder.log_input_tokens / gap_latency
 
         num_new_seq = len(can_run_list)
         f = (
             f"Prefill batch. "
             f"#new-seq: {num_new_seq}, "
             f"#new-token: {adder.log_input_tokens}, "
+            f"#rem-total-token: {adder.rem_total_tokens}, "
+            f"#rem-input-token: {adder.rem_input_tokens}, "
+            f"#rem-chunk-token: {adder.rem_chunk_tokens}, "
+            f"#cur-rem-token: {adder.cur_rem_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
             f"#running-req: {running_bs}, "
+            f"#prefill-len: {adder.log_input_tokens:.2f}, "
+            f"#gen-throughput: {self.last_input_throughput:.2f}, "
             f"#queue-req: {len(self.waiting_queue)}, "
         )
         logger.info(f)
@@ -1284,6 +1290,7 @@ class Scheduler(
         adder = PrefillAdder(
             self.tree_cache,
             self.token_to_kv_pool_allocator,
+            self.kv_transfer_agent,
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -1329,6 +1336,7 @@ class Scheduler(
                 self.enable_hierarchical_cache,
             )
 
+            # decode not check kv buffer space
             res = adder.add_one_req(
                 req, False, self.enable_hierarchical_cache
             )
@@ -1416,6 +1424,7 @@ class Scheduler(
         adder = PrefillAdder(
             self.tree_cache,
             self.token_to_kv_pool_allocator,
+            self.kv_transfer_agent,
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -2167,13 +2176,13 @@ class Scheduler(
         else:
             raise ValueError("Unrecognized ExpertDistributionReq value")
 
-    def start_expert_distribution_record(self, 
+    def start_expert_distribution_record(self,
                                          num_steps: Optional[int] = None,
                                          output_dir: Optional[str] = None):
         self.record_expert_distribution_forward_ct = self.forward_ct + num_steps
         self.record_expert_distribution_output_dir = output_dir
         expert_distribution_recorder.start_record()
-        
+
     def stop_expert_distribution_record(self):
         expert_distribution_recorder.stop_record()
         expert_distribution_recorder.dump_record(self.record_expert_distribution_output_dir)
