@@ -75,6 +75,8 @@ from sglang.srt.distributed import (
 from transformers import PretrainedConfig
 from tqdm import tqdm
 from torch import nn
+
+import nvtx
 import torch.nn.functional as F
 import torch
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -220,6 +222,7 @@ class MoEGate(nn.Module):
         else:
             self.e_score_correction_bias = None
 
+    @nvtx.annotate("Moe_Gate_normal", color="green")
     def forward(self, hidden_states):
         logits = F.linear(hidden_states, self.weight, None)
         return logits
@@ -1379,6 +1382,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+    @nvtx.annotate("forward_shared_experts", color="green")
     def forward_shared_experts(
         self,
         positions: torch.Tensor,
@@ -1402,6 +1406,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_moe_gate", color="green")
     def forward_moe_gate(
         self,
         positions: torch.Tensor,
@@ -1441,6 +1446,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_decode_attn_0", color="green")
     def forward_decode_attn_0(
         self,
         positions: torch.Tensor,
@@ -1525,6 +1531,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_decode_attn_1", color="green")
     def forward_decode_attn_1(
         self,
         positions: torch.Tensor,
@@ -1620,6 +1627,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return output, residual, extra_args
 
+    @nvtx.annotate("forward_mlp", color="green")
     def forward_mlp(
         self,
         positions: torch.Tensor,
@@ -1669,6 +1677,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return final_hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_decode_launch_dispatch_ll", color="green")
     def forward_decode_launch_dispatch_ll(
         self,
         positions: torch.Tensor,
@@ -1709,6 +1718,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return dispatched_hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_decode_wait_dispatch_ll", color="green")
     def forward_decode_wait_dispatch_ll(
         self,
         positions: torch.Tensor,
@@ -1739,6 +1749,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_decode_launch_combine_ll", color="green")
     def forward_decode_launch_combine_ll(
         self,
         positions: torch.Tensor,
@@ -1768,6 +1779,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_decode_wait_combine_ll", color="green")
     def forward_decode_wait_combine_ll(
         self,
         positions: torch.Tensor,
@@ -1782,6 +1794,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_prefill_self_attn", color="green")
     def forward_prefill_self_attn(
         self,
         positions: torch.Tensor,
@@ -1839,6 +1852,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 )
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_launch_dispatch_normal", color="green")
     def forward_launch_dispatch_normal(
         self,
         positions: torch.Tensor,
@@ -1874,6 +1888,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_wait_dispatch_normal", color="green")
     def forward_wait_dispatch_normal(
         self,
         positions: torch.Tensor,
@@ -1915,6 +1930,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             )
         return after_dispatch_hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_launch_combine_normal", color="green")
     def forward_launch_combine_normal(
         self,
         positions: torch.Tensor,
@@ -1950,6 +1966,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY]
         return hidden_states, residual, extra_args
 
+    @nvtx.annotate("forward_wait_combine_normal", color="green")
     def forward_wait_combine_normal(
         self,
         positions: torch.Tensor,

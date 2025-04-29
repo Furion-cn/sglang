@@ -1,6 +1,7 @@
 import logging
 from typing import Callable, List, Optional, Tuple
 
+import nvtx
 import torch
 from torch.nn import Module
 
@@ -68,6 +69,7 @@ class GroupedGemmRunner(torch.nn.Module):
         cls.flashinfer_gemm_warpper = SegmentGEMMWrapper(workspace_buffer)
 
     # c = a * b
+    @nvtx.annotate("GroupedGemmRunner_forward", color="green")
     def forward(
         self,
         a: torch.Tensor,
@@ -198,6 +200,7 @@ class EPMoE(torch.nn.Module):
 
         self.grouped_gemm_runner = None
 
+    @nvtx.annotate("EP_MoE_Expert_forward", color="green")
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         assert self.quant_method is not None
 
@@ -836,6 +839,7 @@ class DeepEPMoE(EPMoE):
             self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
         )
 
+    @nvtx.annotate("DeepEP_MoE_Expert_forward", color="green")
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -853,6 +857,7 @@ class DeepEPMoE(EPMoE):
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
 
+    @nvtx.annotate("DeepEP_MoE_Expert_forward_normal", color="green")
     def forward_normal(
         self,
         hidden_states: torch.Tensor,
@@ -966,6 +971,7 @@ class DeepEPMoE(EPMoE):
             )
         return down_output
 
+    @nvtx.annotate("DeepEP_MoE_Expert_forward_deepgemm_masked", color="green")
     def forward_deepgemm_masked(
         self,
         hidden_states_fp8: Tuple[torch.Tensor, torch.Tensor],

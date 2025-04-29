@@ -1,3 +1,4 @@
+import nvtx
 from sglang.srt.utils import DeepEPMode
 
 try:
@@ -207,6 +208,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.async_finish = async_finish
         self.src2dst = None
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal_launch_dispatch", color="green")
     def launch_dispatch(
         self,
         hidden_states: torch.Tensor,
@@ -227,6 +229,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         )
         return self.hidden_states
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal_wait_dispatch", color="green")
     def wait_dispatch(self):
         self.event.current_stream_wait() if self.async_finish else ()
 
@@ -261,6 +264,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             expected_m,
         )
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__dispatch_a", color="green")
     def dispatch_a(
         self,
         hidden_states: torch.Tensor,
@@ -271,6 +275,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         previous_event = Buffer.capture() if self.async_finish else None
         return hidden_states, topk_idx, topk_weights, previous_event
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__dispatch_b", color="green")
     def dispatch_b(self, hidden_states, topk_idx, topk_weights, previous_event):
         (
             hidden_states,
@@ -303,6 +308,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             expected_m,
         )
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal___dispatch_core", color="green")
     def _dispatch_core(
         self,
         x: torch.Tensor,
@@ -324,7 +330,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             async_finish=self.async_finish,
             allocate_on_comm_stream=previous_event is not None,
         )
-        
+
         # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
         # However, doing this would incur an unknown synchronization error, but keeping
         # `handle` as a member variable works.
@@ -348,7 +354,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             async_finish=self.async_finish,
             allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
         )
-        
+
         return (
             recv_x,
             recv_topk_idx,
@@ -356,6 +362,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             event,
         )
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal___deepep_permute", color="green")
     def _deepep_permute(
         self,
         hidden_states: torch.Tensor,
@@ -395,6 +402,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         )
         return reorder_topk_ids, seg_indptr, gateup_input
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__launch_combine", color="green")
     def launch_combine(
         self,
         hidden_states: torch.Tensor,
@@ -427,6 +435,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         previous_event = Buffer.capture() if self.async_finish else None
         self.hidden_states, self.event = self._combine_core(output, previous_event)
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__wait_combine", color="green")
     def wait_combine(self):
         self.event.current_stream_wait() if self.async_finish else ()
         self.handle = None
@@ -434,6 +443,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.event = None
         return self.hidden_states
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__combine_a", color="green")
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -466,6 +476,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         previous_event = Buffer.capture() if self.async_finish else None
         return output, previous_event
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__combine_b", color="green")
     def combine_b(self, output, previous_event):
         hidden_states, event = self._combine_core(output, previous_event)
         event.current_stream_wait() if self.async_finish else ()
@@ -473,6 +484,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.src2dst = None
         return hidden_states
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__combine_core", color="green")
     def _combine_core(self, x: torch.Tensor, previous_event):
         buffer = self._get_buffer()
         combined_x, _, event = buffer.combine(
@@ -484,6 +496,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         )
         return combined_x, event
 
+    @nvtx.annotate("_DeepEPDispatcherImplNormal__get_buffer", color="green")
     def _get_buffer(self):
         DeepEPBuffer.set_dispatch_mode_as_normal()
         return DeepEPBuffer.get_deepep_buffer(
