@@ -821,7 +821,6 @@ class DeepEPMoE(EPMoE):
             activation,
         )
         self.deepep_mode = deepep_mode
-        logger.info(f"DeepEPMoE __init__: deepep_mode: {deepep_mode}")
         if self.deepep_mode.enable_low_latency():
             assert use_deep_gemm, f"DeepEP {self.deepep_mode} mode requires deep_gemm"
         self.w13_weight_fp8 = (
@@ -845,6 +844,7 @@ class DeepEPMoE(EPMoE):
         masked_m: torch.Tensor,
         expected_m: int,
         forward_mode: ForwardMode,
+        output_tensor: Optional[torch.Tensor] = None,
     ):
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
         # logger.debug(
@@ -852,7 +852,7 @@ class DeepEPMoE(EPMoE):
         if resolved_deepep_mode == DeepEPMode.normal:
             return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:
-            return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
+            return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m, output_tensor)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
 
@@ -974,6 +974,7 @@ class DeepEPMoE(EPMoE):
         hidden_states_fp8: Tuple[torch.Tensor, torch.Tensor],
         masked_m: torch.Tensor,
         expected_m: int,
+        output_tensor: Optional[torch.Tensor] = None,
     ):
         assert self.quant_method is not None
         assert self.activation == "silu"
@@ -1026,11 +1027,31 @@ class DeepEPMoE(EPMoE):
             down_input,
             get_col_major_tma_aligned_tensor(down_input_scale),
         )
-        down_output = torch.empty(
-            (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
-        )
+        # if get_tensor_model_parallel_rank()==0:
+        #     logger.debug(f"[forward_deepgemm_masked],{get_gpu_memory_info(down_input.device)}")
+        #     logger.debug(f"[forward_deepgemm_masked],memory_summary: {torch.cuda.memory_summary(device=0)}")
+        if output_tensor is None:
+            down_output = torch.empty(
+                (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
+            )
+        else:
+            down_output = output_tensor
         m_grouped_gemm_fp8_fp8_bf16_nt_masked(
             down_input_fp8, self.w2_weight_fp8, down_output, masked_m, expected_m
         )
 
+        # del tensor to avoid out of memory
+        # del gateup_output
+        # del down_input
+        # del down_input_scale
+        # del down_input_fp8
+        # del hidden_states_fp8
+
+        # if get_tensor_model_parallel_rank()==0:
+        #     logger.debug(f"[forward_deepgemm_masked after del tensor],memory_summary: {torch.cuda.memory_summary(device=0)}")
+        #     logger.debug(f"[forward_deepgemm_masked after del tensor],{get_gpu_memory_info(down_output.device)}")
         return down_output
+
+
+def get_gpu_memory_info(device) -> str:
+    return f"device[{device}],cached:{torch.cuda.memory_reserved(device=device)},[[[allocated:{torch.cuda.memory_allocated(device=device)},]]]free:{torch.cuda.memory_reserved(device=device) - torch.cuda.memory_allocated(device=device)}"

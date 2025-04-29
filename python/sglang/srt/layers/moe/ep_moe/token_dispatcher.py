@@ -257,6 +257,12 @@ class _DeepEPDispatcherImplBase:
     def wait_combine(self):
         raise NotImplementedError
 
+    def clear_tmp_data(self):
+        raise NotImplementedError
+
+    def get_hidden_states(self):
+        raise NotImplementedError
+
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -330,6 +336,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             masked_m,
             expected_m,
         )
+
+    def clear_tmp_data(self):
+        del self.hidden_states
+
+    def get_hidden_states(self):
+        return self.hidden_states
 
     def dispatch_a(
         self,
@@ -586,6 +598,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         https://github.com/deepseek-ai/DeepEP?tab=readme-ov-file#example-use-in-inference-decoding
         """
         self.return_recv_hook = return_recv_hook
+        self.hidden_states = None
 
     def launch_dispatch(
         self,
@@ -622,6 +635,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.masked_m,
             self.expected_m,
         )
+
+    def clear_tmp_data(self):
+        del self.hidden_states
+
+    def get_hidden_states(self):
+        return self.hidden_states
 
     def dispatch_a(
         self,
@@ -859,6 +878,12 @@ class DeepEPDispatcher:
 
     def wait_dispatch(self, forward_mode: ForwardMode = None) -> Tuple:
         return self._get_impl(forward_mode).wait_dispatch()
+
+    def get_hidden_states(self, forward_mode: ForwardMode = None):
+        return self._get_impl(forward_mode).get_hidden_states()
+
+    def clear_tmp_data(self, forward_mode: ForwardMode = None) -> Tuple:
+        return self._get_impl(forward_mode).clear_tmp_data()
 
     def launch_combine(
         self,
