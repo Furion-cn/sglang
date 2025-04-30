@@ -1284,13 +1284,13 @@ class Scheduler(
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
             return None
-         # Get priority queue
+        # Get priority queue
         prefix_computed = self.policy.calc_priority(self.waiting_queue)
 
         adder = PrefillAdder(
             self.tree_cache,
             self.token_to_kv_pool_allocator,
-            self.kv_transfer_agent,
+            self.kv_transfer_agent.get_kv_buffer_allocator(),
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -1313,10 +1313,10 @@ class Scheduler(
             if (
                 self.lora_paths
                 and len(
-                    lora_set
-                    | set([req.lora_path for req in adder.can_run_list])
-                    | set([req.lora_path])
-                )
+                lora_set
+                | set([req.lora_path for req in adder.can_run_list])
+                | set([req.lora_path])
+            )
                 > self.max_loras_per_batch
             ):
                 self.running_batch.batch_is_full = True
@@ -1424,7 +1424,7 @@ class Scheduler(
         adder = PrefillAdder(
             self.tree_cache,
             self.token_to_kv_pool_allocator,
-            self.kv_transfer_agent,
+            self.kv_transfer_agent.get_kv_buffer_allocator(),
             self.running_batch,
             self.new_token_ratio,
             self.max_prefill_tokens,
@@ -1487,6 +1487,12 @@ class Scheduler(
         can_run_list: List[Req] = adder.can_run_list
         if len(can_run_list) == 0:
             return None
+
+        # prefill
+        if self.server_args.kv_transfer_config is not None and self.server_args.kv_transfer_config.role == "prefill":
+            logger.debug(f"get_new_batch_prefill: allocate_kv_buffer")
+            self.kv_transfer_agent.allocate_kv_buffer(can_run_list)
+            can_run_list = [req for req in can_run_list if req.kv_cache_offset >= 0]
 
         if self.enable_metrics:
             # only record queue time when enable_metrics is True to avoid overhead
@@ -1731,8 +1737,8 @@ class Scheduler(
                     # We should have at least 1 token for sample in every case.
                     max(extend_len - logprob_start_len, 1)
                     for logprob_start_len, extend_len in zip(
-                        local_batch.extend_logprob_start_lens, local_batch.extend_lens
-                    )
+                    local_batch.extend_logprob_start_lens, local_batch.extend_lens
+                )
                 ]
             )
 

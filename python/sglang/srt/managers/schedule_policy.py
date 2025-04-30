@@ -30,7 +30,7 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.memory_pool import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.radix_cache import RadixCache, TreeNode
-from sglang.srt.managers.kv_transfer_agent import KVTransferAgent
+from sglang.srt.managers.kv_transfer_agent import KVBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,7 @@ class PrefillAdder:
         self,
         tree_cache: BasePrefixCache,
         token_to_kv_pool_allocator: TokenToKVPoolAllocator,
-        kv_transfer_agent:  KVTransferAgent,
+        kv_buffer: KVBuffer,
         running_batch: ScheduleBatch,
         new_token_ratio: float,
         rem_input_tokens: int,
@@ -286,7 +286,7 @@ class PrefillAdder:
     ):
         self.tree_cache = tree_cache
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
-        self.kv_transfer_agent = kv_transfer_agent
+        self.kv_buffer = kv_buffer
         self.running_batch = running_batch
         self.new_token_ratio = new_token_ratio
         self.rem_input_tokens = rem_input_tokens - mixed_with_decode_tokens
@@ -314,14 +314,6 @@ class PrefillAdder:
                     for r in running_batch.reqs
                 ]
             )
-
-    @property
-    def kv_buffer_available_size(self):
-        return self.kv_transfer_agent.get_kv_buffer_stats().available_size
-
-    @property
-    def kv_buffer_available_blocks(self):
-        return self.kv_transfer_agent.get_kv_buffer_stats().available_block_sizes
 
     @property
     def rem_total_tokens(self):
@@ -471,26 +463,13 @@ class PrefillAdder:
         input_tokens = req.extend_input_len
         prefix_len = len(req.prefix_indices)
 
-        kv_buffer_available_size = self.kv_buffer_available_size
-        available_blocks = self.kv_buffer_available_blocks
-        if kv_buffer_available_size < total_tokens or not available_blocks:
-            logger.warning(
-                f"KV buffer space insufficient: required={total_tokens}, "
-                f"available kv buffer available_size={self.kv_buffer_available_size}"
-            )
-            return AddReqResult.OTHER
-        max_block = max(available_blocks)
-        if total_tokens > max_block:
-            logger.warning(
-                f"KV buffer space insufficient: required={total_tokens}, "
-                f"available max kv buffer block={max_block}"
-            )
-            return AddReqResult.OTHER
-
         if total_tokens >= self.rem_total_tokens:
             return AddReqResult.NO_TOKEN
 
         if input_tokens > self.rem_input_tokens and len(self.can_run_list) != 0:
+            return AddReqResult.OTHER
+
+        if not self.can_allocate_reqs(req):
             return AddReqResult.OTHER
 
         with self._lock_node(req.last_node):
@@ -540,3 +519,33 @@ class PrefillAdder:
                 self._prefill_one_req(prefix_len, trunc_len, 0)
 
         return self.budget_state()
+
+    def can_allocate_reqs(self, req: Req):
+        free_slots = self.kv_buffer.stats().available_block_sizes
+        aligned_reqs = [self.kv_buffer.align_to_block_size(len(req.origin_input_ids)+1) for req in self.can_run_list]
+        logger.debug(f"can_allocate_reqs: free_slots={free_slots}, aligned_reqs={aligned_reqs}, req={req.rid} req length is {len(req.origin_input_ids)}")
+        for aligned_req in aligned_reqs:
+            available_slots = [slot for slot in free_slots if slot >= aligned_req]
+            if available_slots:
+                best_fit = min(available_slots)
+                free_slots.remove(best_fit)
+                if best_fit > aligned_req:
+                    free_slots.append(best_fit - aligned_req)
+            else:
+                logger.warning(f"No available slots for can_run_list, this should not happen. "
+                               "free_slots={self.kv_buffer.stats().available_block_sizes}, aligned_reqs={aligned_reqs}")
+                raise Exception("No available slots for can_run_list, this should not happen")
+
+        aligned_check_reqs = self.kv_buffer.align_to_block_size(len(req.origin_input_ids)+1)
+        available_slots = [slot for slot in free_slots if slot >= aligned_check_reqs]
+        if available_slots:
+            best_fit = min(available_slots)
+            free_slots.remove(best_fit)
+            if best_fit > aligned_check_reqs:
+                free_slots.append(best_fit - aligned_check_reqs)
+        else:
+            logger.debug(f"No available slots for the new request {req.rid}, "
+                         "free_slots={self.kv_buffer.stats().available_block_sizes}, aligned_reqs={aligned_check_reqs}")
+            return False
+
+        return True

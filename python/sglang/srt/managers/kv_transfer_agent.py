@@ -105,6 +105,10 @@ class KVBuffer:
         logger.debug(
             f"KVBuffer initialized with block sizes: {self.block_sizes}")
 
+    def align_to_block_size(self, length: int) -> int:
+        """Align length to predefined block sizes"""
+        return self._align_to_block_size(length)
+
     def _align_to_block_size(self, length: int) -> int:
         """Align length to predefined block sizes"""
         if not self.block_sizes:
@@ -118,7 +122,7 @@ class KVBuffer:
         largest_block = self.block_sizes[-1]
         return ((length + largest_block - 1) // largest_block) * largest_block
 
-    def write_item(self, item: torch.Tensor, offset: int):
+    def set_item(self, item: torch.Tensor, offset: int):
         assert item.shape[1:] == self.cache.shape[1:], \
             f"item shape {item.shape} does not match cache shape {self.cache.shape}"
         self.cache[offset:offset + item.shape[0]] = item
@@ -135,9 +139,9 @@ class KVBuffer:
         if offset < 0:
             self._clean_fragment()
             offset = self._allocate(aligned_capacity, length)
-        # if offset < 0:
-        #     raise Exception(
-        #         f"No enough free space for length {length} (aligned to {aligned_capacity})")
+        if offset < 0:
+            raise Exception(
+                f"No enough free space for length {length} (aligned to {aligned_capacity})")
         return offset
 
     def _allocate(self, capacity: int, length: int = None) -> int:
@@ -334,8 +338,8 @@ class KVTransferAgent:
             cache, block_sizes=[2**i for i in range(3, 14)])
         self.req_to_kv_buffer_offset = {}
 
-    def get_kv_buffer_stats(self):
-        return self.kv_buffer.stats()
+    def get_kv_buffer_allocator(self):
+        return self.kv_buffer
 
     @nvtx.annotate("KVTransferAgent.set_kv_buffer", color="red")
     def set_kv_buffer(self, req: Req):
@@ -357,35 +361,20 @@ class KVTransferAgent:
             if offset is None:
                 raise Exception(
                     f"KV transfer fetch request {req.rid} not found")
-            self.kv_buffer.write_item(kv_cache, offset)
+            self.kv_buffer.set_item(kv_cache, offset)
 
-    def allocate_kv_buffer(self, req: Req):
-        if self.attn_tp_rank != 0:
-            return 0
-        logger.info(f"set_kv_buffer: origin input token length is {len(req.origin_input_ids)}")
-        offset = self.kv_buffer.allocate(len(req.origin_input_ids) + 1)
-        if offset < 0:
-            return -1
-        self.req_to_kv_buffer_offset[req.rid] = offset
-        return offset
-
-    def allocate_kv_buffer(self, req: Req):
-        if self.attn_tp_rank != 0:
-            return 0
-        token_ids = (req.origin_input_ids + req.output_ids)[:-1]
-        offset = self.kv_buffer.allocate(len(token_ids))
-        if offset < 0:
-            return -1
-        self.req_to_kv_buffer_offset[req.rid] = offset
-        return offset
-
-    def free_kv_buffer(self, req: Req):
-        offset = self.req_to_kv_buffer_offset.get(req.rid)
-        if offset is None:
-            raise Exception(
-                f"KV transfer fetch request {req.rid} not found")
-        self.kv_buffer.free(offset)
-        del self.req_to_kv_buffer_offset[req.rid]
+    def allocate_kv_buffer(self, req_list: List[Req]):
+        if not req_list:
+            logger.debug(f"skip allocate_kv_buffer: req_list is {req_list}")
+            return
+        for req in req_list:
+            if req.kv_cache_offset < 0:
+                logger.debug(f"allocate_kv_buffer: origin input token length is {len(req.origin_input_ids)}")
+                offset = self.kv_buffer.allocate(len(req.origin_input_ids) + 1)
+                self.req_to_kv_buffer_offset[req.rid] = offset
+                req.kv_cache_offset = offset
+            else:
+                logger.debug(f"allocate_kv_buffer: req {req.rid} already has kv_cache_offset {req.kv_cache_offset}")
 
     @nvtx.annotate("KVTransferAgent.get_kv_buffer", color="red")
     def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
@@ -417,9 +406,6 @@ class KVTransferAgent:
             dst_ptrs = []
             for req in req_list:
                 offset = self.kv_buffer.allocate(len(req.origin_input_ids))
-                if offset < 0:
-                    raise Exception(
-                        f"No enough free space for length {len(req.origin_input_ids)}")
                 dst_ptrs.append(self.kv_buffer.data_ptr(offset))
                 offsets.append(offset)
 
@@ -490,7 +476,8 @@ class KVTransferAgent:
         if not event.wait(timeout):
             with self.req_kv_transfer_lock:
                 del self.req_kv_transfer_results[batch_id]
-            raise Exception("KV transfer timeout")
+            logger.warning(f"KV transfer timeout for {kv_transfer_fetch.rids}")
+            return {}
 
         # Check results and errors
         with self.req_kv_transfer_lock:
@@ -589,8 +576,8 @@ class KVTransferAgent:
 
         with self.req_kv_transfer_lock:
             if batch_id not in self.req_kv_transfer_results:
-                raise Exception(
-                    f"KV transfer ack request {kv_transfer_ack.rids} not in req_kv_transfer_results")
+                logger.warning(f"KV transfer ack request {kv_transfer_ack.rids} not in req_kv_transfer_results")
+                return
 
             # Store the result
             self.req_kv_transfer_results[batch_id]['ack'] = kv_transfer_ack

@@ -419,6 +419,7 @@ class Req:
         self.kv_transfer_src_addr = kv_transfer_src_addr
         self.kv_transfer_src_rank = kv_transfer_src_rank
         self.kv_cache_restored = False
+        self.kv_cache_offset = -1
 
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):
