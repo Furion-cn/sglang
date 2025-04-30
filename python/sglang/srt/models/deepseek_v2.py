@@ -1431,7 +1431,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             # router_logits: (num_tokens, n_experts)
             # router_logits = self.mlp.gate(hidden_states)
             router_logits = torch.rand(
-                    (hidden_states.size(0), config.n_routed_experts),
+                    (hidden_states.size(0), self.mlp.num_experts),
                     device=hidden_states.device
                 ) 
             topk_weights, topk_idx = select_experts(
