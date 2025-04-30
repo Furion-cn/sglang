@@ -1431,7 +1431,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             # router_logits: (num_tokens, n_experts)
             # router_logits = self.mlp.gate(hidden_states)
             router_logits = torch.rand(
-                    (hidden_states.size(0), self.mlp.num_experts),
+                    (hidden_states.shape[0], self.mlp.num_experts),
                     device=hidden_states.device
                 ) 
             topk_weights, topk_idx = select_experts(
@@ -1449,16 +1449,17 @@ class DeepseekV2DecoderLayer(nn.Module):
             #     f"topk_weights.shape: {topk_weights.shape}"
             #     f"topk_idx.shape: {topk_idx.shape}"
             # )
-            flat_topk = topk_idx.flatten().cpu().numpy()
-            for idx in flat_topk:
-                while len(expert_cnt) <= idx:
-                    expert_cnt.append(0)
-                expert_cnt[idx] += 1
-            if len(expert_cnt) > 0 and sum(expert_cnt) % 100000 == 0:
-                expert_info = "\nExpert selection distribution:"
-                for i, cnt in enumerate(expert_cnt):
-                    expert_info += f"Expert {i}: {cnt} selections,"
-                logger.debug("**************" + expert_info + "**************")
+            if topk_idx is not None and topk_idx.shape[0] > 0:
+                flat_topk = topk_idx.to("cpu").flatten().cpu().numpy()
+                for idx in flat_topk:
+                    while len(expert_cnt) <= idx:
+                        expert_cnt.append(0)
+                    expert_cnt[idx] += 1
+                if len(expert_cnt) > 0 and sum(expert_cnt) % 100000 == 0:
+                    expert_info = "\nExpert selection distribution:"
+                    for i, cnt in enumerate(expert_cnt):
+                        expert_info += f"Expert {i}: {cnt} selections,"
+                    logger.debug("**************" + expert_info + "**************")
         extra_args.update(
             {
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY: topk_idx,
