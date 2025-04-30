@@ -38,7 +38,7 @@ jobs:
 
       - name: Start the benchmark
         run: |
-          ssh staging "bash -c 'export MAX_CONCURRENCIES=${{ github.event.inputs.concurrency }}; cd /root/sglang-auto/benchmark/furion-cn && ./auto_benchmark.sh'"
+          ssh staging "bash -c 'export MAX_CONCURRENCIES=${{ github.event.inputs.concurrency }}; cd /root/sglang-auto/benchmark/furion-cn && bash auto_benchmark.sh ${{ github.head_ref || github.ref_name }}'"
         env:
           MAX_CONCURRENCIES: ${{ github.event.inputs.concurrency }}
 
