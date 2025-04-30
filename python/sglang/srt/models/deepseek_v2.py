@@ -103,6 +103,8 @@ expert_distribution_recorder = ExpertDistributionRecorder()
 
 logger = logging.getLogger(__name__)
 
+expert_cnt = []
+
 class AttnForwardMethod(IntEnum):
     # Use multi-head attention
     MHA = auto()
@@ -1427,7 +1429,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             and hidden_states.shape[0] > 0
         ):
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.mlp.gate(hidden_states)
+            # router_logits = self.mlp.gate(hidden_states)
+            router_logits = torch.rand(
+                    (hidden_states.size(0), self.num_experts),
+                    device=hidden_states.device
+                ) 
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -1438,6 +1444,21 @@ class DeepseekV2DecoderLayer(nn.Module):
                 num_expert_group=self.mlp.num_expert_group,
                 correction_bias=self.mlp.correction_bias,
             )
+            logger.debug(
+                f"topk_idx: {topk_idx}, topk_weights: {topk_weights}, "
+                f"topk_weights.shape: {topk_weights.shape}"
+                f"topk_idx.shape: {topk_idx.shape}"
+            )
+            flat_topk = topk_idx.flatten().cpu().numpy()
+            for idx in flat_topk:
+                while len(expert_cnt) <= idx:
+                    expert_cnt.append(0)
+                expert_cnt[idx] += 1
+            if len(expert_cnt) > 0 and sum(expert_cnt) % 100000 == 0:
+                print("\nExpert selection distribution:")
+                for i, cnt in enumerate(expert_cnt):
+                    print(f"Expert {i}: {cnt} selections,")
+                print("-------------------------------")
         extra_args.update(
             {
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY: topk_idx,
