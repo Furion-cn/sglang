@@ -1455,10 +1455,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                     expert_cnt.append(0)
                 expert_cnt[idx] += 1
             if len(expert_cnt) > 0 and sum(expert_cnt) % 100000 == 0:
-                print("\nExpert selection distribution:")
+                expert_info = "\nExpert selection distribution:"
                 for i, cnt in enumerate(expert_cnt):
-                    print(f"Expert {i}: {cnt} selections,")
-                print("-------------------------------")
+                    expert_info += f"Expert {i}: {cnt} selections,"
+                logger.debug("**************" + expert_info + "**************")
         extra_args.update(
             {
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY: topk_idx,
