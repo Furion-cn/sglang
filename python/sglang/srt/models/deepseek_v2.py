@@ -373,7 +373,7 @@ class DeepseekV2MoE(nn.Module):
             with torch.cuda.nvtx.range("deepseek v2 moe without deepep_moe"):
                 return self.forward_normal(hidden_states)
         else:
-            with torch.cuda.nvtx.range("deepseek v2 moe with deepep_moe"):
+            with torch.cuda.nvtx.range(f"deepseek_v2_moe_with_deepep_moe tokens{hidden_states.shape[0]}"):
                 return self.forward_deepep(hidden_states, forward_mode)
 
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1433,7 +1433,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             # router_logits = torch.rand(
             #         (hidden_states.shape[0], self.mlp.num_experts),
             #         device=hidden_states.device
-            #     ) 
+            #     )
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -1449,17 +1449,17 @@ class DeepseekV2DecoderLayer(nn.Module):
             #     f"topk_weights.shape: {topk_weights.shape}"
             #     f"topk_idx.shape: {topk_idx.shape}"
             # )
-            if topk_idx is not None and topk_idx.shape[0] > 0:
-                flat_topk = topk_idx.to("cpu").flatten().cpu().numpy()
-                for idx in flat_topk:
-                    while len(expert_cnt) <= idx:
-                        expert_cnt.append(0)
-                    expert_cnt[idx] += 1
-                if len(expert_cnt) > 0 and sum(expert_cnt) % 100000 == 0:
-                    expert_info = "\nExpert selection distribution:"
-                    for i, cnt in enumerate(expert_cnt):
-                        expert_info += f"Expert {i}: {cnt} selections,"
-                    logger.debug("**************" + expert_info + "**************")
+            # if topk_idx is not None and topk_idx.shape[0] > 0:
+            #     flat_topk = topk_idx.to("cpu").flatten().cpu().numpy()
+            #     for idx in flat_topk:
+            #         while len(expert_cnt) <= idx:
+            #             expert_cnt.append(0)
+            #         expert_cnt[idx] += 1
+            #     if len(expert_cnt) > 0 and sum(expert_cnt) % 100000 == 0:
+            #         expert_info = "\nExpert selection distribution:"
+            #         for i, cnt in enumerate(expert_cnt):
+            #             expert_info += f"Expert {i}: {cnt} selections,"
+            #         logger.debug("**************" + expert_info + "**************")
         extra_args.update(
             {
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY: topk_idx,
@@ -1678,7 +1678,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         seg_indptr = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY]
         masked_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_MASKED_M_KEY]
         expected_m = extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_EXPECTED_M_KEY]
-
         final_hidden_states = (
             self.mlp.experts(
                 hidden_states=hidden_states,
@@ -1690,7 +1689,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             )
             * self.mlp.routed_scaling_factor
         )
-
         # remove used args
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_REORDER_TOPK_IDS_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_SEG_INDPTR_KEY]
@@ -1883,6 +1881,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        nvtx.push_range(f"forward_launch_dispatch_normal_{hidden_states.shape[0]}")
         if self.mlp.ep_size > 1:
             assert (
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY in extra_args
@@ -1907,7 +1906,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 self.mlp.num_experts,
                 forward_mode=forward_batch.forward_mode,
             )
-
+        nvtx.pop_range()
         return hidden_states, residual, extra_args
 
     @nvtx.annotate("forward_wait_dispatch_normal", color="green")
@@ -1961,6 +1960,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, Any]]]:
+        nvtx.push_range(f"forward_launch_combine_normal_tokens{hidden_states.shape[0]}")
         if self.mlp.ep_size > 1:
             assert (
                 MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY in extra_args
@@ -1986,6 +1986,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         # every layer should remove topk_idx and topk_weights after combine
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_IDX_KEY]
         del extra_args[MicroBatchOverlapExtraArgs.EXTRA_ARGS_TOPK_WEIGHTS_KEY]
+        nvtx.pop_range()
         return hidden_states, residual, extra_args
 
     @nvtx.annotate("forward_wait_combine_normal", color="green")
@@ -3170,84 +3171,86 @@ class DeepseekV2ForCausalLM(nn.Module):
 
 
 def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
-    if fwd_batch.batch_size == 0:
-        return 0, fwd_batch, fwd_batch
-    sub_fwd_batch0 = copy(fwd_batch)
-    sub_fwd_batch1 = copy(fwd_batch)
-    bs_joint_batch_boundary = 0
-    batch_boundary = 0
-    if fwd_batch.forward_mode.is_extend():
-        all_tokens = sum(fwd_batch.extend_seq_lens)
+    with torch.cuda.nvtx.range(f"token_balanced_batch_split"):
+        if fwd_batch.batch_size == 0:
+            return 0, fwd_batch, fwd_batch
+        sub_fwd_batch0 = copy(fwd_batch)
+        sub_fwd_batch1 = copy(fwd_batch)
+        bs_joint_batch_boundary = 0
         batch_boundary = 0
-        for batch_tokens in fwd_batch.extend_seq_lens[:-1]:
-            bs_joint_batch_boundary += batch_tokens.item()
-            batch_boundary += 1
-            if bs_joint_batch_boundary >= all_tokens.item() // 2:
-                break
+        nvtx.push_range("token_balanced_batch_split")
+        if fwd_batch.forward_mode.is_extend():
+            all_tokens = sum(fwd_batch.extend_seq_lens)
+            batch_boundary = 0
+            for batch_tokens in fwd_batch.extend_seq_lens[:-1]:
+                bs_joint_batch_boundary += batch_tokens.item()
+                batch_boundary += 1
+                if bs_joint_batch_boundary >= all_tokens.item() // 2:
+                    break
+        elif fwd_batch.forward_mode.is_decode():
+            bs_joint_batch_boundary = fwd_batch.batch_size // 2
+        elif fwd_batch.forward_mode.is_idle():
+            return 0, sub_fwd_batch0, sub_fwd_batch1
+        else:
+            assert False
+        nvtx.pop_range()
+        for key in [
+            "req_pool_indices",
+            "seq_lens",
+            "seq_lens_cpu",  # Optional[torch.Tensor]
+            # "decode_seq_lens_cpu",
+            "extend_seq_lens",
+            "extend_prefix_lens",
+            "extend_start_loc",
+            "extend_prefix_lens_cpu",
+            "extend_seq_lens_cpu",  # Optional[List[int]]
+            "extend_logprob_start_lens_cpu",
+        ]:
+            if getattr(fwd_batch, key) is not None:
+                # skip for decode mode
+                setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:batch_boundary])
+                setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[batch_boundary:])
 
-    elif fwd_batch.forward_mode.is_decode():
-        bs_joint_batch_boundary = fwd_batch.batch_size // 2
-    elif fwd_batch.forward_mode.is_idle():
-        return 0, sub_fwd_batch0, sub_fwd_batch1
-    else:
-        assert False
-    for key in [
-        "req_pool_indices",
-        "seq_lens",
-        "seq_lens_cpu",  # Optional[torch.Tensor]
-        # "decode_seq_lens_cpu",
-        "extend_seq_lens",
-        "extend_prefix_lens",
-        "extend_start_loc",
-        "extend_prefix_lens_cpu",
-        "extend_seq_lens_cpu",  # Optional[List[int]]
-        "extend_logprob_start_lens_cpu",
-    ]:
-        if getattr(fwd_batch, key) is not None:
-            # skip for decode mode
-            setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:batch_boundary])
-            setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[batch_boundary:])
+        if (
+            not fwd_batch.forward_mode.is_decode()
+            and getattr(fwd_batch, "extend_num_tokens") is not None
+        ):
+            sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary
+            sub_fwd_batch1.extend_num_tokens = (
+                fwd_batch.extend_num_tokens - sub_fwd_batch0.extend_num_tokens
+            )
 
-    if (
-        not fwd_batch.forward_mode.is_decode()
-        and getattr(fwd_batch, "extend_num_tokens") is not None
-    ):
-        sub_fwd_batch0.extend_num_tokens = bs_joint_batch_boundary
-        sub_fwd_batch1.extend_num_tokens = (
-            fwd_batch.extend_num_tokens - sub_fwd_batch0.extend_num_tokens
-        )
+        for key in [
+            "input_ids",
+            "positions",
+            "out_cache_loc",
+        ]:
+            setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:bs_joint_batch_boundary])
+            setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[bs_joint_batch_boundary:])
 
-    for key in [
-        "input_ids",
-        "positions",
-        "out_cache_loc",
-    ]:
-        setattr(sub_fwd_batch0, key, getattr(fwd_batch, key)[:bs_joint_batch_boundary])
-        setattr(sub_fwd_batch1, key, getattr(fwd_batch, key)[bs_joint_batch_boundary:])
+        if hasattr(fwd_batch, "extend_seq_lens_cpu") and hasattr(
+            fwd_batch, "global_num_tokens_cpu"
+        ):
+            sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
+            sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
 
-    if hasattr(fwd_batch, "extend_seq_lens_cpu") and hasattr(
-        fwd_batch, "global_num_tokens_cpu"
-    ):
-        sub_fwd_batch0.global_num_tokens_cpu = [sum(sub_fwd_batch0.extend_seq_lens_cpu)]
-        sub_fwd_batch1.global_num_tokens_cpu = [sum(sub_fwd_batch1.extend_seq_lens_cpu)]
+        if hasattr(fwd_batch, "extend_seq_lens") and hasattr(
+            fwd_batch, "global_num_tokens_gpu"
+        ):
+            sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(
+                0, keepdim=True
+            )
+            sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(
+                0, keepdim=True
+            )
 
-    if hasattr(fwd_batch, "extend_seq_lens") and hasattr(
-        fwd_batch, "global_num_tokens_gpu"
-    ):
-        sub_fwd_batch0.global_num_tokens_gpu = sub_fwd_batch0.extend_seq_lens.sum(
-            0, keepdim=True
-        )
-        sub_fwd_batch1.global_num_tokens_gpu = sub_fwd_batch1.extend_seq_lens.sum(
-            0, keepdim=True
-        )
+        sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
+        sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
 
-    sub_fwd_batch0.seq_lens_sum = int(sub_fwd_batch0.seq_lens_cpu.sum().item())
-    sub_fwd_batch1.seq_lens_sum = int(sub_fwd_batch1.seq_lens_cpu.sum().item())
+        sub_fwd_batch0.batch_size = batch_boundary
+        sub_fwd_batch1.batch_size = fwd_batch.batch_size - sub_fwd_batch0.batch_size
 
-    sub_fwd_batch0.batch_size = batch_boundary
-    sub_fwd_batch1.batch_size = fwd_batch.batch_size - sub_fwd_batch0.batch_size
-
-    return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
+        return bs_joint_batch_boundary, sub_fwd_batch0, sub_fwd_batch1
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
