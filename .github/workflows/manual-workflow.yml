@@ -3,11 +3,42 @@ run-name: "Deploy main code to staging env to benchmark"
 on:
   workflow_dispatch:  # 只允许手动触发
     inputs:
-      concurrency:
+      prefill_replica:
+        description: '预填充副本数'
         required: false
-        default: "16"
-        description: "最大并发数设置"
+        default: '2'
         type: string
+      prefill_tp:
+        description: '预填充 TP 值'
+        required: false
+        default: '16'
+        type: string
+      prefill_dp:
+        description: '预填充 DP 值'
+        required: false
+        default: '4'
+        type: string
+      decode_replica:
+        description: '解码副本数'
+        required: false
+        default: '2'
+        type: string
+      decode_tp:
+        description: '解码 TP 值'
+        required: false
+        default: '16'
+        type: string
+      decode_dp:
+        description: '解码 DP 值'
+        required: false
+        default: '16'
+        type: string
+      max_concurrencies:
+        description: '最大并发数（逗号分隔的多个值）'
+        required: false
+        default: '1024'
+        type: string
+      
 
 concurrency:
   group: "merge-pr-workflow"
@@ -38,9 +69,15 @@ jobs:
 
       - name: Start the benchmark
         run: |
-          ssh staging "bash -c 'export MAX_CONCURRENCIES=${{ github.event.inputs.concurrency }}; cd /root/sglang-auto/benchmark/furion-cn && ./auto_benchmark.sh'"
-        env:
-          MAX_CONCURRENCIES: ${{ github.event.inputs.concurrency }}
+          ssh staging "bash -c 'cd /root/sglang-auto/benchmark/furion-cn && \
+          python3 auto_benchmark.py run \
+          --prefill-replica ${{ github.event.inputs.prefill_replica }} \
+          --prefill-tp ${{ github.event.inputs.prefill_tp }} \
+          --prefill-dp ${{ github.event.inputs.prefill_dp }} \
+          --decode-replica ${{ github.event.inputs.decode_replica }} \
+          --decode-tp ${{ github.event.inputs.decode_tp }} \
+          --decode-dp ${{ github.event.inputs.decode_dp }} \
+          --max-concurrencies ${{ github.event.inputs.max_concurrencies }}'"
 
       - name: Clean up
         run: |
