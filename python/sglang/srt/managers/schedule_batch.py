@@ -86,6 +86,7 @@ global_server_args_dict = {
     "n_share_experts_fusion": ServerArgs.n_share_experts_fusion,
     "disable_shared_experts_fusion": ServerArgs.disable_shared_experts_fusion,
     "disable_chunked_prefix_cache": ServerArgs.disable_chunked_prefix_cache,
+    "max_req_retry_count": ServerArgs.max_req_retry_count,
 }
 
 logger = logging.getLogger(__name__)
@@ -374,6 +375,7 @@ class PDStep(IntEnum):
     PREFILL = 0
     DISPATCHING = 1
     DECODE = 2
+    DECODE_ABORTED = 3
 
 
 class Req:

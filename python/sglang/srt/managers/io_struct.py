@@ -840,7 +840,7 @@ class ExpertDistributionReqType(Enum):
 class ExpertDistributionReqInput:
     num_steps: Optional[int] = None
     output_dir: Optional[str] = None
-    
+
 @dataclass
 class ExpertDistributionReq:
     type: ExpertDistributionReqType
@@ -857,11 +857,14 @@ class PrefilledReqInput(TokenizedGenerateReqInput):
     kv_transfer_src_rank: Optional[int] = None
     output_ids: Optional[List[int]] = None
 
+@dataclass
+class RetryPrefillReq(TokenizedGenerateReqInput):
+    pass
 
 @dataclass
 class KVTransferFetch:
     # the request ids
-    rids: Optional[List[str]] = None      
+    rids: Optional[List[str]] = None
     # the number of requests
     fetch_ct: Optional[int] = None
     # the address of the prefill node which has the kv cache

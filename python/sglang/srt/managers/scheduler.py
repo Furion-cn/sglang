@@ -81,6 +81,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    RetryPrefillReq,
     RpcReqInput,
     RpcReqOutput,
     SetInternalStateReq,
@@ -447,6 +448,7 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (RpcReqInput, self.handle_rpc_request),
                 (ExpertDistributionReq, self.record_expert_distribution),
+                (RetryPrefillReq, self.handle_retry_prefill_req),
             ]
         )
 
@@ -685,6 +687,8 @@ class Scheduler(
             if len(self.aborted_reqs) > 0:
                 self.process_aborted_requests()
 
+            self.kv_transfer_agent.check_memory()
+
             if self.last_batch:
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
@@ -728,14 +732,14 @@ class Scheduler(
                     req
                     for req in recv_reqs
                     if isinstance(
-                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput)
+                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput, RetryPrefillReq)
                     )
                 ]
                 control_reqs = [
                     req
                     for req in recv_reqs
                     if not isinstance(
-                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput)
+                        req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, PrefilledReqInput, RetryPrefillReq)
                     )
                 ]
             else:
@@ -775,6 +779,11 @@ class Scheduler(
                         self.recv_from_rpc.send_pyobj(output)
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
+
+    def handle_retry_prefill_req(self, recv_req: RetryPrefillReq):
+        logger.debug(f"handle_retry_prefill_req: {recv_req}")
+        # self.kv_transfer_agent.free_kv_buffer(recv_req.rid)
+        #self.handle_generate_request(TokenizedGenerateReqInput(recv_req))
 
     def handle_generate_request(
         self,
@@ -1369,6 +1378,7 @@ class Scheduler(
             if req.rid not in kv_buffer:
                 req.finished_reason = FINISH_ABORT(message="KV cache restored failed")
                 req.output_ids = origin_output_ids[req.rid]
+                req.pd_step = PDStep.DECODE_ABORTED
                 self.aborted_reqs[req.rid] = req
             else:
                 kv_cache_restored_reqs.append(req)
@@ -1491,7 +1501,14 @@ class Scheduler(
         # prefill
         if self.server_args.kv_transfer_config is not None and self.server_args.kv_transfer_config.role == "prefill":
             logger.debug(f"get_new_batch_prefill: allocate_kv_buffer")
-            self.kv_transfer_agent.allocate_kv_buffer(can_run_list)
+            validated_reqs = self.kv_transfer_agent.allocate_kv_buffer(can_run_list)
+            attn_tp_rank_0 = self.dp_rank * self.attn_tp_size
+            validated_reqs = broadcast_pyobj(
+                validated_reqs, 
+                self.attn_tp_rank,
+                self.attn_tp_cpu_group,
+                src=attn_tp_rank_0
+            )
             can_run_list = [req for req in can_run_list if req.kv_cache_offset >= 0]
 
         if self.enable_metrics:

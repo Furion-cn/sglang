@@ -11,7 +11,7 @@ from sglang.srt.managers.io_struct import (
     BatchStrOut,
 )
 
-from sglang.srt.managers.io_struct import PrefilledReqInput, AbortReq, KVTransferFetch, KVTransferAck
+from sglang.srt.managers.io_struct import PrefilledReqInput, AbortReq, KVTransferFetch, KVTransferAck, RetryPrefillReq
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class PDDisaggregationController:
                 (PrefilledReqInput, self._handle_prefilled_req),
                 (KVTransferFetch, self._handle_kv_transfer_req),
                 (KVTransferAck, self._handle_kv_transfer_resp),
+                (RetryPrefillReq, self._handle_retry_prefill_req)
             ]
         )
 
@@ -81,3 +82,6 @@ class PDDisaggregationController:
         logger.debug(f"[PD] Dispatch prefilled request: {req.rid}")
         self.send_to_scheduler.send_pyobj(req)
         logger.debug(f"[PD] Dispatched prefilled request: {req.rid}")
+
+    def _handle_retry_prefill_req(self, req: RetryPrefillReq):
+        self.send_to_scheduler.send_pyobj(req)
