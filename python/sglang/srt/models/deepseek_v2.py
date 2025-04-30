@@ -3178,7 +3178,7 @@ def token_balanced_batch_split(fwd_batch: Optional[ForwardBatch]):
         sub_fwd_batch1 = copy(fwd_batch)
         bs_joint_batch_boundary = 0
         batch_boundary = 0
-        nvtx.push_range("token_balanced_batch_split")
+        nvtx.push_range("token_balanced_batch_split_cal")
         if fwd_batch.forward_mode.is_extend():
             all_tokens = sum(fwd_batch.extend_seq_lens)
             batch_boundary = 0
