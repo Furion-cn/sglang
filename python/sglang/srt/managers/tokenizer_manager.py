@@ -670,9 +670,17 @@ class TokenizerManager:
             raise RuntimeError(result.message)
         return result
 
-    def stop_profile(self):
+    async def stop_profile(self):
         req = ProfileReq(type=ProfileReqType.STOP_PROFILE)
-        self.send_to_scheduler.send_pyobj(req)
+        result = (await self.start_profile_communicator(req))[0]
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result
+        
+    async def get_profile_status(self):
+        req = ProfileReq(type=ProfileReqType.GET_STATUS)
+        result = (await self.start_profile_communicator(req))[0]
+        return result.save_status
 
     async def start_expert_distribution_record(self, num_steps: Optional[int] = None, output_dir: Optional[str] = None):
         req = ExpertDistributionReq(

@@ -816,6 +816,7 @@ class ProfileReqInput:
 class ProfileReqType(Enum):
     START_PROFILE = 1
     STOP_PROFILE = 2
+    GET_STATUS = 3
 
 @dataclass
 class ProfileReq:
@@ -831,6 +832,7 @@ class ProfileReq:
 class ProfileReqOutput:
     success: bool
     message: str
+    save_status: Optional[Dict[str, Any]] = None
 
 class ExpertDistributionReqType(Enum):
     START_RECORD = 1

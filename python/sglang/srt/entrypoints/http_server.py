@@ -325,23 +325,63 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
     if obj is None:
         obj = ProfileReqInput()
 
-    await _global_state.tokenizer_manager.start_profile(
+    result = await _global_state.tokenizer_manager.start_profile(
         obj.output_dir, obj.num_steps, obj.activities
     )
-    return Response(
-        content="Start profiling.\n",
-        status_code=200,
-    )
+    
+    if not result.success:
+        return Response(
+            content=f"Failed to start profiling: {result.message}\n",
+            status_code=400,
+        )
+    
+    while True:
+        status_result = await _global_state.tokenizer_manager.get_profile_status()
+        status = status_result.save_status
+        
+        if not status.get('in_progress', False):
+            if status.get('completed', False):
+                return Response(
+                    content="Profile started and data saved successfully.\n",
+                    status_code=200,
+                )
+            else:
+                return Response(
+                    content=f"Profile started but data saving failed: {status.get('error', 'Unknown error')}\n",
+                    status_code=400,
+                )
+        
+        await asyncio.sleep(1)
 
 
 @app.api_route("/stop_profile", methods=["GET", "POST"])
 async def stop_profile_async():
     """Stop profiling."""
-    _global_state.tokenizer_manager.stop_profile()
-    return Response(
-        content="Stop profiling. This will take some time.\n",
-        status_code=200,
-    )
+    result = await _global_state.tokenizer_manager.stop_profile()
+    
+    if not result.success:
+        return Response(
+            content=f"Failed to stop profiling: {result.message}\n",
+            status_code=400,
+        )
+    
+    while True:
+        status_result = await _global_state.tokenizer_manager.get_profile_status()
+        status = status_result.save_status
+        
+        if not status.get('in_progress', False):
+            if status.get('completed', False):
+                return Response(
+                    content="Profile data saved successfully.\n",
+                    status_code=200,
+                )
+            else:
+                return Response(
+                    content=f"Profile data saving failed: {status.get('error', 'Unknown error')}\n",
+                    status_code=400,
+                )
+        
+        await asyncio.sleep(1)
 
 
 @app.api_route("/start_expert_distribution_record", methods=["GET", "POST"])

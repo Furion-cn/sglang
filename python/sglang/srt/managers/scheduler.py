@@ -2072,21 +2072,42 @@ class Scheduler(
                 recv_req.with_stack,
                 recv_req.record_shapes,
             )
-        else:
+        elif recv_req.type == ProfileReqType.STOP_PROFILE:
             return self.stop_profile()
+        elif recv_req.type == ProfileReqType.GET_STATUS:
+            status = self.get_profile_status()
+            return ProfileReqOutput(
+                success=True,
+                message="Profile status retrieved successfully.",
+                save_status=status
+            )
+        else:
+            return ProfileReqOutput(
+                success=False,
+                message=f"Unknown profile request type: {recv_req.type}",
+                save_status={'in_progress': False, 'completed': False, 'error': f"Unknown request type: {recv_req.type}"}
+            )
 
     def start_profile(
         self,
-        output_dir: Optional[str],
-        num_steps: Optional[int],
-        activities: Optional[List[str]],
-        with_stack: Optional[bool],
-        record_shapes: Optional[bool],
-    ) -> None:
+        output_dir: Optional[str] = None,
+        num_steps: Optional[int] = None,
+        activities: Optional[List[str]] = None,
+        with_stack: Optional[bool] = None,
+        record_shapes: Optional[bool] = None,
+    ) -> ProfileReqOutput:
+        if hasattr(self, 'profile_save_status') and self.profile_save_status.get('in_progress', False):
+            return ProfileReqOutput(
+                success=False,
+                message="Profile data is being saved. Please wait until it completes.",
+                save_status=self.profile_save_status
+            )
+            
         if self.profiler_activities:
             return ProfileReqOutput(
                 success=False,
                 message="Profiling is already in progress. Call /stop_profile first.",
+                save_status={'in_progress': False, 'completed': False, 'error': "Profiling already in progress"}
             )
 
         if output_dir is None:
@@ -2125,48 +2146,97 @@ class Scheduler(
 
         if num_steps:
             self.profiler_target_forward_ct = self.forward_ct + num_steps
-            # The caller will be notified when reaching profiler_target_forward_ct
+            return ProfileReqOutput(
+                success=True, 
+                message="Profiling started with target steps. Will stop automatically.",
+                save_status={'in_progress': True, 'completed': False, 'error': None}
+            )
         else:
             self.profiler_target_forward_ct = None
-            return ProfileReqOutput(success=True, message="Succeeded")
+            return ProfileReqOutput(
+                success=True, 
+                message="Profiling started successfully.",
+                save_status={'in_progress': True, 'completed': False, 'error': None}
+            )
 
-    def stop_profile(self) -> None:
+    def stop_profile(self) -> ProfileReqOutput:
         if self.profiler_activities is None:
-            return
+            return ProfileReqOutput(
+                success=False, 
+                message="No profiling in progress.",
+                save_status={"in_progress": False, "completed": False, "error": "No profiling in progress"}
+            )
 
         logger.info("Stop profiling...")
-        if self.torch_profiler is not None:
-            self.torch_profiler.stop()
-            self.torch_profiler.export_chrome_trace(
-                os.path.join(
-                    self.torch_profiler_output_dir,
-                    str(time.time()) + f"-TP-{self.tp_rank}" + ".trace.json.gz",
-                )
+        
+        if not hasattr(self, 'profile_save_status'):
+            self.profile_save_status = {'in_progress': False, 'completed': False, 'error': None}
+        
+        if self.profile_save_status.get('in_progress', False):
+            return ProfileReqOutput(
+                success=True, 
+                message="Profile data is already being saved.",
+                save_status=self.profile_save_status
             )
-
-        if "MEM" in self.profiler_activities:
-            memory_profile_path = os.path.join(
-                self.torch_profiler_output_dir,
-                str(time.time()) + f"-TP-{self.tp_rank}-memory" + ".pickle",
-            )
-            torch.cuda.memory._dump_snapshot(memory_profile_path)
-            torch.cuda.memory._record_memory_history(enabled=None)
-
-        if "CUDA_PROFILER" in self.profiler_activities:
-            torch.cuda.cudart().cudaProfilerStop()
-
-        logger.info(
-            "Profiling done. Traces are saved to: %s",
-            self.torch_profiler_output_dir,
-        )
+        
+        temp_profiler = self.torch_profiler
+        temp_output_dir = self.torch_profiler_output_dir
+        temp_activities = self.profiler_activities
+        
+        self.profile_save_status = {'in_progress': True, 'completed': False, 'error': None}
+        
         self.torch_profiler = None
         self.torch_profiler_output_dir = None
         self.profiler_activities = None
+        self.profiler_target_forward_ct = None
+        
+        def save_profile_data():
+            try:
+                if temp_profiler is not None:
+                    temp_profiler.stop()
+                    temp_profiler.export_chrome_trace(
+                        os.path.join(
+                            temp_output_dir,
+                            str(time.time()) + f"-TP-{self.tp_rank}" + ".trace.json.gz",
+                        )
+                    )
 
-        if self.profiler_target_forward_ct:
-            self.send_to_tokenizer.send_pyobj(
-                ProfileReqOutput(success=True, message="Succeeded.")
-            )
+                if "MEM" in temp_activities:
+                    memory_profile_path = os.path.join(
+                        temp_output_dir,
+                        str(time.time()) + f"-TP-{self.tp_rank}-memory" + ".pickle",
+                    )
+                    torch.cuda.memory._dump_snapshot(memory_profile_path)
+                    torch.cuda.memory._record_memory_history(enabled=None)
+
+                if "CUDA_PROFILER" in temp_activities:
+                    torch.cuda.cudart().cudaProfilerStop()
+
+                logger.info(
+                    "Profiling done. Traces are saved to: %s",
+                    temp_output_dir,
+                )
+                
+                self.profile_save_status = {'in_progress': False, 'completed': True, 'error': None}
+                
+            except Exception as e:
+                logger.error(f"Error saving profile data: {e}")
+                self.profile_save_status = {'in_progress': False, 'completed': False, 'error': str(e)}
+
+        profile_thread = threading.Thread(target=save_profile_data)
+        profile_thread.daemon = True
+        profile_thread.start()
+        
+        return ProfileReqOutput(
+            success=True, 
+            message="Profile stopping in background. Data will be saved asynchronously.",
+            save_status=self.profile_save_status
+        )
+
+    def get_profile_status(self):
+        if not hasattr(self, 'profile_save_status'):
+            return {'in_progress': False, 'completed': False, 'error': "No profile saving has been initiated"}
+        return self.profile_save_status
 
     def record_expert_distribution(self, recv_req: ExpertDistributionReq):
         if recv_req.type == ExpertDistributionReqType.START_RECORD:
