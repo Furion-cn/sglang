@@ -1444,11 +1444,11 @@ class DeepseekV2DecoderLayer(nn.Module):
                 num_expert_group=self.mlp.num_expert_group,
                 correction_bias=self.mlp.correction_bias,
             )
-            logger.debug(
-                f"topk_idx: {topk_idx}, topk_weights: {topk_weights}, "
-                f"topk_weights.shape: {topk_weights.shape}"
-                f"topk_idx.shape: {topk_idx.shape}"
-            )
+            # logger.debug(
+            #     f"topk_idx: {topk_idx}, topk_weights: {topk_weights}, "
+            #     f"topk_weights.shape: {topk_weights.shape}"
+            #     f"topk_idx.shape: {topk_idx.shape}"
+            # )
             flat_topk = topk_idx.flatten().cpu().numpy()
             for idx in flat_topk:
                 while len(expert_cnt) <= idx:
