@@ -1429,14 +1429,14 @@ class DeepseekV2DecoderLayer(nn.Module):
             and hidden_states.shape[0] > 0
         ):
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.mlp.gate(hidden_states)
-            random_tensor = torch.empty_like(A)
-            random_tensor.uniform_() 
+            original_logits = self.mlp.gate(hidden_states)
+            router_logits = torch.empty_like(original_logits)
+            router_logits.uniform_() 
             logger.info(
-                f"router_logits: {router_logits}, router_logits.shape: {router_logits.shape} dtype {router_logits.dtype} device {router_logits.device}"
+                f"original_logits.shape: {original_logits.shape} dtype {original_logits.dtype} device {original_logits.device}"
             )
             logger.info(
-                f"random_tensor: {random_tensor}, random_tensor.shape: {random_tensor.shape} dtype {random_tensor.dtype} device {random_tensor.device}"
+                f"router_logits: {router_logits}, router_logits.shape: {router_logits.shape} dtype {router_logits.dtype} device {router_logits.device}"
             )
             # router_logits = torch.rand(
             #         (hidden_states.shape[0], self.mlp.num_experts),
