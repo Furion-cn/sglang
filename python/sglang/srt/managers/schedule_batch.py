@@ -86,6 +86,7 @@ global_server_args_dict = {
     "n_share_experts_fusion": ServerArgs.n_share_experts_fusion,
     "disable_shared_experts_fusion": ServerArgs.disable_shared_experts_fusion,
     "disable_chunked_prefix_cache": ServerArgs.disable_chunked_prefix_cache,
+    "max_req_retry_count": ServerArgs.max_req_retry_count,
 }
 
 logger = logging.getLogger(__name__)
@@ -374,6 +375,7 @@ class PDStep(IntEnum):
     PREFILL = 0
     DISPATCHING = 1
     DECODE = 2
+    DECODE_ABORTED = 3
 
 
 class Req:
@@ -419,6 +421,7 @@ class Req:
         self.kv_transfer_src_addr = kv_transfer_src_addr
         self.kv_transfer_src_rank = kv_transfer_src_rank
         self.kv_cache_restored = False
+        self.kv_cache_offset = -1
 
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):

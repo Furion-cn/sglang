@@ -522,6 +522,9 @@ class SchedulerOutputProcessorMixin:
                 self.kv_transfer_agent.dispatch_prefilled_req(req)
                 continue
 
+            if req.pd_step == PDStep.DECODE_ABORTED:
+                self.kv_transfer_agent.retry_prefill_req(req)
+
             if (
                 req.finished()
                 # If stream, follow the given stream_interval

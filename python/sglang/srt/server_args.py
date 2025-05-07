@@ -75,6 +75,7 @@ class ServerArgs:
     device: Optional[str] = None
     served_model_name: Optional[str] = None
     chat_template: Optional[str] = None
+    max_req_retry_count: int = 2
     completion_template: Optional[str] = None
     is_embedding: bool = False
     revision: Optional[str] = None
@@ -1176,6 +1177,13 @@ class ServerArgs:
         )
 
         # KV cache transfer
+        parser.add_argument(
+            "--max-req-retry-count",
+            type=int,
+            default=ServerArgs.max_req_retry_count,
+            help="Max number of retries for a request. Default is 2.",
+        )
+
         parser.add_argument('--kv-transfer-config',
                             type=KVTransferConfig.from_cli,
                             default=None,

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import bisect
 import nvtx
 
-from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck
+from sglang.srt.managers.io_struct import PrefilledReqInput, KVTransferFetch, KVTransferAck, RetryPrefillReq
 from sglang.srt.managers.schedule_batch import FINISH_ABORT
 from sglang.srt.managers.pd_disaggregation_controller import PD_DISAGGREGATION_PORT
 from sglang.srt.server_args import ServerArgs
@@ -105,6 +105,10 @@ class KVBuffer:
         logger.debug(
             f"KVBuffer initialized with block sizes: {self.block_sizes}")
 
+    def align_to_block_size(self, length: int) -> int:
+        """Align length to predefined block sizes"""
+        return self._align_to_block_size(length)
+
     def _align_to_block_size(self, length: int) -> int:
         """Align length to predefined block sizes"""
         if not self.block_sizes:
@@ -118,7 +122,7 @@ class KVBuffer:
         largest_block = self.block_sizes[-1]
         return ((length + largest_block - 1) // largest_block) * largest_block
 
-    def write_item(self, item: torch.Tensor, offset: int):
+    def set_item(self, item: torch.Tensor, offset: int):
         assert item.shape[1:] == self.cache.shape[1:], \
             f"item shape {item.shape} does not match cache shape {self.cache.shape}"
         self.cache[offset:offset + item.shape[0]] = item
@@ -135,9 +139,9 @@ class KVBuffer:
         if offset < 0:
             self._clean_fragment()
             offset = self._allocate(aligned_capacity, length)
-        # if offset < 0:
-        #     raise Exception(
-        #         f"No enough free space for length {length} (aligned to {aligned_capacity})")
+        if offset < 0:
+            raise Exception(
+                f"No enough free space for length {length} (aligned to {aligned_capacity})")
         return offset
 
     def _allocate(self, capacity: int, length: int = None) -> int:
@@ -218,6 +222,9 @@ class KVBuffer:
             self.blocks[curr_offset].capacity += self.blocks[next_offset].capacity
             del self.blocks[next_offset]
             self.free_slots.pop(cur_index+1)
+
+    def clean_fragment(self):
+        self._clean_fragment()
 
     # Merge fragmented blocks
     def _clean_fragment(self):
@@ -325,17 +332,32 @@ class KVTransferAgent:
 
         self.device = device
 
-        cache = torch.zeros(
-            [kv_cache_capacity, self.layer_num, 1, 576], dtype=torch.bfloat16, device=self.device, pin_memory=True)
-        self.engine = TransferEngine(
-            self.addr, server_args.kv_transfer_config.transfer_engine_metadata_server, server_args.kv_transfer_config.transfer_engine_rdma_device)
-        self.engine.register_memory(cache.data_ptr(), cache.nbytes)
-        self.kv_buffer = KVBuffer(
-            cache, block_sizes=[2**i for i in range(3, 14)])
-        self.req_to_kv_buffer_offset = {}
+        if self.attn_tp_rank == 0:
+            cache = torch.zeros(
+                [kv_cache_capacity, self.layer_num, 1, 576], dtype=torch.bfloat16, device=self.device, pin_memory=True)
+            self.engine = TransferEngine(
+                self.addr, server_args.kv_transfer_config.transfer_engine_metadata_server, server_args.kv_transfer_config.transfer_engine_rdma_device)
+            self.engine.register_memory(cache.data_ptr(), cache.nbytes)
+            self.kv_buffer = KVBuffer(
+                cache, block_sizes=[2**i for i in range(3, 14)])
+            self.req_to_kv_buffer_offset = {}
 
-    def get_kv_buffer_stats(self):
-        return self.kv_buffer.stats()
+    def get_kv_buffer_allocator(self):
+        return self.kv_buffer
+
+    def check_memory(self):
+        self.kv_buffer.clean_fragment()
+
+    def free_kv_buffer(self, rid: str):
+        if self.attn_tp_rank != 0:
+            return
+        offset = self.req_to_kv_buffer_offset.get(rid)
+        logger.debug(f"Free kv buffer for rid {rid}, offset is {offset}")
+        if offset is not None and offset > 0:
+            if rid in self.req_to_kv_buffer_offset and self.req_kv_transfer_ct[rid] > 0:
+                return
+            self.kv_buffer.free(offset)
+            del self.req_to_kv_buffer_offset[rid]
 
     @nvtx.annotate("KVTransferAgent.set_kv_buffer", color="red")
     def set_kv_buffer(self, req: Req):
@@ -345,6 +367,7 @@ class KVTransferAgent:
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
+        logger.info(f"set_kv_buffer: origin input token length is {len(req.origin_input_ids)}, output token length is {len(req.output_ids)}")
         with nvtx.annotate(message="set_stack", color="blue", category="kv_transfer_agent"):
             kv_cache = torch.stack(
                 [self.token_to_kv_pool_allocator.get_kvcache().get_key_buffer(i)[kv_indices]
@@ -356,25 +379,32 @@ class KVTransferAgent:
             if offset is None:
                 raise Exception(
                     f"KV transfer fetch request {req.rid} not found")
-            self.kv_buffer.write_item(kv_cache, offset)
+            self.kv_buffer.set_item(kv_cache, offset)
 
-    def allocate_kv_buffer(self, req: Req):
-        if self.attn_tp_rank != 0:
-            return 0
-        token_ids = (req.origin_input_ids + req.output_ids)[:-1]
-        offset = self.kv_buffer.allocate(len(token_ids))
-        if offset < 0:
-            return -1
-        self.req_to_kv_buffer_offset[req.rid] = offset
-        return offset
-
-    def free_kv_buffer(self, req: Req):
-        offset = self.req_to_kv_buffer_offset.get(req.rid)
-        if offset is None:
-            raise Exception(
-                f"KV transfer fetch request {req.rid} not found")
-        self.kv_buffer.free(offset)
-        del self.req_to_kv_buffer_offset[req.rid]
+    def allocate_kv_buffer(self, req_list: List[Req]):
+        if self.attn_tp_rank == 0:
+            validated_reqs = []
+            for req in req_list:
+                if self._can_allocate_for_req(req):
+                    validated_reqs.append(req.rid)
+        else:
+                validated_reqs = None
+        return validated_reqs
+        req_list = [req for req in req_list if req.rid in validated_reqs]
+        # if self.attn_tp_rank != 0:
+        #     logger.debug("skip allocate_kv_buffer: attn_tp_rank != 0")
+        #     return
+        # if not req_list:
+        #     logger.debug(f"skip allocate_kv_buffer: req_list is {req_list}")
+        #     return
+        # for req in req_list:
+        #     if req.kv_cache_offset < 0:
+        #         logger.debug(f"allocate_kv_buffer: origin input token length is {len(req.origin_input_ids)}")
+        #         offset = self.kv_buffer.allocate(len(req.origin_input_ids) + 1)
+        #         self.req_to_kv_buffer_offset[req.rid] = offset
+        #         req.kv_cache_offset = offset
+        #     else:
+        #         logger.debug(f"allocate_kv_buffer: req {req.rid} already has kv_cache_offset {req.kv_cache_offset}")
 
     @nvtx.annotate("KVTransferAgent.get_kv_buffer", color="red")
     def get_kv_buffer(self, req_list: List[Req]) -> dict[str, torch.Tensor]:
@@ -406,9 +436,6 @@ class KVTransferAgent:
             dst_ptrs = []
             for req in req_list:
                 offset = self.kv_buffer.allocate(len(req.origin_input_ids))
-                if offset < 0:
-                    raise Exception(
-                        f"No enough free space for length {len(req.origin_input_ids)}")
                 dst_ptrs.append(self.kv_buffer.data_ptr(offset))
                 offsets.append(offset)
 
@@ -424,24 +451,30 @@ class KVTransferAgent:
                 fetch_ct=self.attn_tp_size,
             )
 
-            self._complete_kv_transfer(kv_transfer_fetch)
-            transfered_time = time.time()
-            transfered_bytes = 0
-            for i, req in enumerate(req_list):
-                res[req.rid] = self.kv_buffer.get_item(
-                    offsets[i]).permute(1, 0, 2, 3)
-                transfered_bytes += res[req.rid].nbytes
+            if not self._complete_kv_transfer(kv_transfer_fetch):
+                logger.warning(f"KV transfer failed for {req_list} \
+                               kv_buffer_stats: {self.kv_buffer.stats()}\
+                               allocated_time: {allocated_time - start_time} seconds\
+                               transfered_time: {time.time() - allocated_time} seconds")
+                return {}
+            else:
+                transfered_time = time.time()
+                transfered_bytes = 0
+                for i, req in enumerate(req_list):
+                    res[req.rid] = self.kv_buffer.get_item(
+                        offsets[i]).permute(1, 0, 2, 3)
+                    transfered_bytes += res[req.rid].nbytes
 
-            loaded_time = time.time()
+                loaded_time = time.time()
 
-            logger.debug(
-                f"[KVTransferAgent] Received kv cache ({transfered_bytes / 1024 / 1024} MB) \
-                    allocated: {allocated_time - start_time} seconds \
-                    transfered: {transfered_time - allocated_time} seconds \
-                    loaded: {loaded_time - transfered_time} seconds \
-                    total: {time.time() - start_time} seconds \
-                    bandwidth: {transfered_bytes/1024/1024/1024 / (time.time() - start_time)} GB/s \
-                    kv_buffer_stats: {self.kv_buffer.stats()}")
+                logger.debug(
+                    f"[KVTransferAgent] Received kv cache ({transfered_bytes / 1024 / 1024} MB) \
+                        allocated: {allocated_time - start_time} seconds \
+                        transfered: {transfered_time - allocated_time} seconds \
+                        loaded: {loaded_time - transfered_time} seconds \
+                        total: {time.time() - start_time} seconds \
+                        bandwidth: {transfered_bytes/1024/1024/1024 / (time.time() - start_time)} GB/s \
+                        kv_buffer_stats: {self.kv_buffer.stats()}")
 
         except Exception as e:
             logger.error(f"[KVTransferAgent] Get batch kv buffer failed: {e}")
@@ -459,7 +492,7 @@ class KVTransferAgent:
     @nvtx.annotate("KVTransferAgent._complete_kv_transfer", color="red")
     def _complete_kv_transfer(self, kv_transfer_fetch: KVTransferFetch, timeout: int = 60):
         """Complete kv transfer.
-        If timeout, raise an exception. Default timeout is 60 seconds.
+        If timeout, return False. Default timeout is 60 seconds.
         """
         # Create an event for this group of requests
         event = threading.Event()
@@ -479,7 +512,8 @@ class KVTransferAgent:
         if not event.wait(timeout):
             with self.req_kv_transfer_lock:
                 del self.req_kv_transfer_results[batch_id]
-            raise Exception("KV transfer timeout")
+            logger.warning(f"KV transfer timeout for {kv_transfer_fetch.rids}")
+            return False
 
         # Check results and errors
         with self.req_kv_transfer_lock:
@@ -491,6 +525,32 @@ class KVTransferAgent:
                 raise Exception(
                     f"KV transfer {kv_transfer_fetch.rids} failed: {ack.error_message}")
             del self.req_kv_transfer_results[batch_id]
+
+        return True
+
+    def retry_prefill_req(self, req: Req):
+        if self.role == "prefill":
+            return
+        if self.attn_tp_rank!= 0:
+            return
+        logger.debug(
+            f"[KVTransferAgent] Retry prefilled request {req.rid}")
+        self.send_to_pd_disagg_controller.send_pyobj(RetryPrefillReq(
+            rid=req.rid,
+            input_text=req.origin_input_text,
+            input_ids=req.origin_input_ids,
+            mm_inputs=None,
+            sampling_params=req.sampling_params,
+            return_logprob=req.return_logprob,
+            logprob_start_len=req.logprob_start_len,
+            top_logprobs_num=req.top_logprobs_num,
+            token_ids_logprob=req.token_ids_logprob,
+            stream=req.stream,
+            lora_path=req.lora_path,
+            input_embeds=req.input_embeds,
+            custom_logit_processor=req.custom_logit_processor,
+            return_hidden_states=req.return_hidden_states,
+        ))
 
     def dispatch_prefilled_req(self, req: Req):
         if self.role == "decode":
@@ -511,6 +571,10 @@ class KVTransferAgent:
             logprob_start_len=req.logprob_start_len,
             top_logprobs_num=req.top_logprobs_num,
             token_ids_logprob=req.token_ids_logprob,
+            lora_path=req.lora_path,
+            input_embeds=req.input_embeds,
+            custom_logit_processor=req.custom_logit_processor,
+            return_hidden_states=req.return_hidden_states,
             stream=req.stream,
             output_ids=req.output_ids,
             kv_transfer_src_addr=self.addr,
@@ -521,6 +585,7 @@ class KVTransferAgent:
             f"[KVTransferAgent] Dispatched prefilled request {req.rid}")
 
     def _handle_kv_transfer_fetch(self, req: KVTransferFetch):
+        logger.debug(f"_handle_kv_transfer_fetch 1 {req}")
         transfered_bytes = 0
         try:
             start_time = time.time()
@@ -542,26 +607,31 @@ class KVTransferAgent:
 
                 transfered_bytes += kv_cache.nbytes
             logger.debug(
-                f"[KVTransferAgent] Transferred kv cache to RANK_{req.dst_rank} ({transfered_bytes / 1024 / 1024} MB) in {time.time() - start_time} seconds, bandwidth: {transfered_bytes/1024/1024/1024 / (time.time() - start_time)} GB/s, kv_buffer_stats: {self.kv_buffer.stats()}")
+                f"[KVTransferAgent] Transferred kv cache to RANK_{req.dst_rank} ({transfered_bytes / 1024 / 1024} MB) in {time.time() - start_time} seconds, bandwidth: {transfered_bytes/1024/1024/1024 / (time.time() - start_time)} GB/s, kv_buffer_stats: {self.kv_buffer.stats()}, req: {req}")
 
             ack_error_message = None
         except Exception as e:
             logger.error(f"[KVTransferAgent] KV transfer failed: {e}")
             ack_error_message = str(e)
 
+        logger.debug(f"_handle_kv_transfer_fetch 2 {req}")
+
         # send ack to remote addr
         self.send_to_pd_disagg_controller.send_pyobj(
             KVTransferAck(req.rids, req.dst_addr, req.dst_rank, ack_error_message))
 
+        logger.debug(f"_handle_kv_transfer_fetch 3 {req}")
+
         if ack_error_message is not None:
-            return
+            logger.debug(f"_handle_kv_transfer_fetch ack_error_message {ack_error_message}")
 
         # free buffer
         for rid in req.rids:
             if self.req_kv_transfer_ct[rid] > 0:
-                return
+                continue
             self.kv_buffer.free(self.req_to_kv_buffer_offset[rid])
             del self.req_to_kv_buffer_offset[rid]
+            del self.req_kv_transfer_ct[rid]
 
     def _handle_kv_transfer_ack(self, kv_transfer_ack: KVTransferAck):
         if len(kv_transfer_ack.rids) == 0:
@@ -572,8 +642,8 @@ class KVTransferAgent:
 
         with self.req_kv_transfer_lock:
             if batch_id not in self.req_kv_transfer_results:
-                raise Exception(
-                    f"KV transfer ack request {kv_transfer_ack.rids} not in req_kv_transfer_results")
+                logger.warning(f"KV transfer ack request {kv_transfer_ack.rids} not in req_kv_transfer_results")
+                return
 
             # Store the result
             self.req_kv_transfer_results[batch_id]['ack'] = kv_transfer_ack
