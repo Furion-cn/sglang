@@ -10,7 +10,7 @@ pip install --upgrade pip
 
 # Clean up existing installations
 pip uninstall -y sglang
-pip cache purge
+#pip cache purge
 # rm -rf /root/.cache/flashinfer
 # rm -rf /usr/local/lib/python3.10/dist-packages/flashinfer*
 # rm -rf /usr/local/lib/python3.10/dist-packages/sgl_kernel*
