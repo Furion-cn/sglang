@@ -7,7 +7,6 @@ bash "${SCRIPT_DIR}/killall_sglang.sh"
 
 # # Update pip
 # pip install --upgrade pip -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-
 # # Clean up existing installations
 # pip uninstall -y sglang
 # #pip cache purge
