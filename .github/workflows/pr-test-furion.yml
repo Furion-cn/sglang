@@ -60,6 +60,7 @@ jobs:
     env:
       HTTP_PROXY: http://43.160.193.188:3333
       HTTPS_PROXY: http://43.160.193.188:3333
+      NO_PROXY: localhost,127.0.0.1,0.0.0.0,*127.0.0.1*
     strategy:
       fail-fast: false
       matrix:
