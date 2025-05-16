@@ -16,4 +16,4 @@ pip uninstall -y sglang
 # rm -rf /usr/local/lib/python3.10/dist-packages/sgl_kernel*
 
 # Install the main package
-pip install -e "python[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python 
+HTTP_PROXY='' HTTPS_PROXY='' pip install -e "python[all]" -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
