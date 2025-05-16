@@ -6,7 +6,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 bash "${SCRIPT_DIR}/killall_sglang.sh"
 
 # Update pip
-pip install --upgrade pip
+pip install --upgrade pip -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
 # Clean up existing installations
 pip uninstall -y sglang
