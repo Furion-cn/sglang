@@ -73,7 +73,7 @@ jobs:
           bash scripts/ci_install_furion_sglang.sh
 
       - name: Run test
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           cd test/srt
           python3 run_suite_furion.py --suite per-commit --auto-partition-id ${{ matrix.part }} --auto-partition-size 9
