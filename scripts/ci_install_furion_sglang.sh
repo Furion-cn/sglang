@@ -17,17 +17,3 @@ pip uninstall -y sglang
 
 # Install the main package
 pip install -e "python[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python 
-
-# Install additional dependencies
-pip install transformers==4.51.0 timm torchaudio==2.6.0 sentence_transformers accelerate peft pandas datasets mooncake-transfer-engine==0.3.0
-
-
-# For compiling xgrammar kernels
-pip install cuda-python nvidia-cuda-nvrtc-cu12 
-
-# For lmms_evals evaluating MMMU
-git clone --branch v0.3.3 --depth 1 https://github.com/EvolvingLMMs-Lab/lmms-eval.git
-pip install -e lmms-eval/
-
-# Install hf_xet
-pip install huggingface_hub[hf_xet]

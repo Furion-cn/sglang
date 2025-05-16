@@ -33,21 +33,23 @@ from sglang.srt.utils import (
 from sglang.test.run_eval import run_eval
 from sglang.utils import get_exception_traceback
 
+FURION_MODEL_PATH_PREFIX = "/models/"
+
 # General test models
-DEFAULT_MODEL_NAME_FOR_TEST = "meta-llama/Llama-3.1-8B-Instruct"
-DEFAULT_SMALL_MODEL_NAME_FOR_TEST = "meta-llama/Llama-3.2-1B-Instruct"
-DEFAULT_MOE_MODEL_NAME_FOR_TEST = "mistralai/Mixtral-8x7B-Instruct-v0.1"
-DEFAULT_SMALL_MOE_MODEL_NAME_FOR_TEST = "Qwen/Qwen1.5-MoE-A2.7B"
+DEFAULT_MODEL_NAME_FOR_TEST = FURION_MODEL_PATH_PREFIX + "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_SMALL_MODEL_NAME_FOR_TEST = FURION_MODEL_PATH_PREFIX + "meta-llama/Llama-3.2-1B-Instruct"
+DEFAULT_MOE_MODEL_NAME_FOR_TEST = FURION_MODEL_PATH_PREFIX + "mistralai/Mixtral-8x7B-Instruct-v0.1"
+DEFAULT_SMALL_MOE_MODEL_NAME_FOR_TEST = FURION_MODEL_PATH_PREFIX + "Qwen/Qwen1.5-MoE-A2.7B"
 
 # MLA test models
-DEFAULT_MLA_MODEL_NAME_FOR_TEST = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+DEFAULT_MLA_MODEL_NAME_FOR_TEST = FURION_MODEL_PATH_PREFIX + "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
 DEFAULT_MLA_FP8_MODEL_NAME_FOR_TEST = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct-FP8"
 DEFAULT_MODEL_NAME_FOR_TEST_MLA = "lmsys/sglang-ci-dsv3-test"
 DEFAULT_MODEL_NAME_FOR_TEST_MLA_NEXTN = "lmsys/sglang-ci-dsv3-test-NextN"
 
 # FP8 models
-DEFAULT_MODEL_NAME_FOR_TEST_FP8 = "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8"
-DEFAULT_MODEL_NAME_FOR_ACCURACY_TEST_FP8 = "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8"
+DEFAULT_MODEL_NAME_FOR_TEST_FP8 = FURION_MODEL_PATH_PREFIX + "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8"
+DEFAULT_MODEL_NAME_FOR_ACCURACY_TEST_FP8 = FURION_MODEL_PATH_PREFIX + "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8"
 DEFAULT_MODEL_NAME_FOR_DYNAMIC_QUANT_ACCURACY_TEST_FP8 = (
     "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8-dynamic"
 )
@@ -56,15 +58,15 @@ DEFAULT_MODEL_NAME_FOR_MODELOPT_QUANT_ACCURACY_TEST_FP8 = (
 )
 
 # EAGLE
-DEFAULT_EAGLE_TARGET_MODEL_FOR_TEST = "meta-llama/Llama-2-7b-chat-hf"
-DEFAULT_EAGLE_DRAFT_MODEL_FOR_TEST = "lmsys/sglang-EAGLE-llama2-chat-7B"
+DEFAULT_EAGLE_TARGET_MODEL_FOR_TEST = FURION_MODEL_PATH_PREFIX + "meta-llama/Llama-2-7b-chat-hf"
+DEFAULT_EAGLE_DRAFT_MODEL_FOR_TEST = FURION_MODEL_PATH_PREFIX + "lmsys/sglang-EAGLE-llama2-chat-7B"
 DEFAULT_MODEL_NAME_FOR_TEST_EAGLE3 = "jamesliu1/sglang-EAGLE3-Llama-3.1-Instruct-8B"
 
 # Other use cases
 DEFAULT_MODEL_NAME_FOR_TEST_LOCAL_ATTENTION = (
     "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 )
-DEFAULT_SMALL_EMBEDDING_MODEL_NAME_FOR_TEST = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+DEFAULT_SMALL_EMBEDDING_MODEL_NAME_FOR_TEST = FURION_MODEL_PATH_PREFIX + "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
 DEFAULT_REASONING_MODEL_NAME_FOR_TEST = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 DEFAULT_DEEPPEP_MODEL_NAME_FOR_TEST = "deepseek-ai/DeepSeek-V3-0324"
 DEFAULT_AWQ_MOE_MODEL_NAME_FOR_TEST = (
