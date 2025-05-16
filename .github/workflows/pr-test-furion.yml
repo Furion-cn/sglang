@@ -76,7 +76,7 @@ jobs:
         timeout-minutes: 40
         run: |
           cd test/srt
-          python3 run_suite_furion.py --suite per-commit --auto-partition-id ${{ matrix.part }} --auto-partition-size 9
+          python3 run_suite_furion.py --suite per-commit --auto-partition-id ${{ matrix.part }} --auto-partition-size 5
 
   # unit-test-backend-2-gpu:
   #   if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') &&
