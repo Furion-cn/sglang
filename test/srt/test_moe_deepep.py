@@ -28,7 +28,11 @@ class TestPureTP(CustomTestCase):
                 "--tp",
                 "2",
                 "--enable-deepep-moe",
+                "--deepep-mode",
+                "low_latency",
                 "--disable-cuda-graph",
+                "--max-total-tokens",
+                "128"
             ],
         )
 

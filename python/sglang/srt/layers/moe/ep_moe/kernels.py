@@ -163,7 +163,12 @@ def run_moe_ep_preproess(topk_ids: torch.Tensor, num_experts: int):
     compute_src2dst_triton_kernel[grid](
         reorder_ids, src2dst, topk_ids.numel(), BLOCK_SIZE
     )
-    return reorder_topk_ids, src2dst, seg_indptr
+
+    if len(seg_indptr) > 1:
+        masked_m = seg_indptr[1:] - seg_indptr[:-1]
+    else:
+        masked_m = None
+    return reorder_topk_ids, src2dst, seg_indptr, masked_m
 
 
 @triton.jit
@@ -391,6 +396,112 @@ def silu_and_mul_masked_post_quant_fwd(
     )
     return
 
+@triton.jit
+def _silu_and_mul_masked_kernel(
+    input_ptr,
+    stride_input_0,
+    stride_input_1,
+    stride_input_2,
+    output_ptr,
+    stride_output_0,
+    stride_output_1,
+    stride_output_2,
+    masked_m_ptr,
+    size_n,
+    BLOCK_N: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
+):
+    expert_id = tl.program_id(2)
+    token_id = tl.program_id(1)
+    hidden_dim_block_index = tl.program_id(0)
+
+    block_num_per_expert = tl.num_programs(1)
+    token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+
+    stride_input_0 = tl.cast(stride_input_0, dtype=tl.int64)
+    stride_output_0 = tl.cast(stride_output_0, dtype=tl.int64)
+    stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
+    stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
+
+    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
+    input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
+    output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
+
+    for token_index in tl.range(
+        token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
+    ):
+        gate = tl.load(
+            input_ptr_offs + token_index * stride_input_1,
+            mask=offs_in_d < size_n,
+            other=0.0,
+        ).to(tl.float32)
+        up = tl.load(
+            input_ptr_offs + token_index * stride_input_1 + size_n,
+            mask=offs_in_d < size_n,
+            other=0.0,
+        )
+
+        gate = gate / (1 + tl.exp(-gate))
+
+        gate = gate.to(input_ptr.dtype.element_ty)
+        gate_up = up * gate
+
+        tl.store(
+            output_ptr_offs + token_index * stride_output_1,
+            gate_up,
+            mask=offs_in_d < size_n,
+        )
+
+
+def silu_and_mul_masked_fwd(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    masked_m: torch.Tensor,
+):
+    """
+    input shape [expert_num, token_num_padded, hidden_dim]
+    output shape [expert_num, token_num_padded, hidden_dim // 2], dtype bf16
+    masked_m shape [expert_num]
+    """
+    assert input.is_contiguous()
+    assert output.dtype == torch.bfloat16
+    assert output.is_contiguous()
+    assert len(input.shape) == 3
+    assert input.shape[0] == masked_m.shape[0]
+    assert input.shape[-1] % 2 == 0
+
+    size_n = input.shape[-1] // 2
+
+    expert_num = len(masked_m)
+
+    if expert_num < 4:
+        BLOCK_NUM_PER_EXPERT = 64
+    else:
+        BLOCK_NUM_PER_EXPERT = 32
+
+    BLOCK_N = 128  # 可以根据需要调整块大小
+    num_warps = 1
+    NUM_STAGES = 6
+    hidden_dim_split_block_num = triton.cdiv(size_n, BLOCK_N)
+
+    grid = (
+        hidden_dim_split_block_num,
+        BLOCK_NUM_PER_EXPERT,
+        expert_num,
+    )
+
+    _silu_and_mul_masked_kernel[grid](
+        input,
+        *input.stride(),
+        output,
+        *output.stride(),
+        masked_m,
+        size_n,
+        BLOCK_N=BLOCK_N,
+        NUM_STAGE=NUM_STAGES,
+        num_warps=num_warps,
+    )
+    return
 
 @triton.jit
 def tanh(x):
@@ -505,12 +616,23 @@ def post_reorder_triton_kernel(
                 store_ptr + offset, tl.zeros([BLOCK_SIZE], dtype=InDtype), mask=mask
             )
 
+@triton.jit
+def compute_masked_m_range(
+    expert_id,
+    pid,
+    masked_m_ptr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    m_range_start = pid * BLOCK_SIZE_M
+    m_range_end = min(tl.load(masked_m_ptr + expert_id), m_range_start + BLOCK_SIZE_M)
+    return m_range_start, m_range_end
 
 @triton.jit
 def compute_m_range(
     pid,
     batch_size,
     seg_indptr,
+    masked_m_ptr,
     weight_indices,
     m_num_tiles_indptr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -524,7 +646,10 @@ def compute_m_range(
     idx_start = tl.load(m_num_tiles_indptr + idx)
 
     m_range_start = tl.load(seg_indptr + idx) + (pid - idx_start) * BLOCK_SIZE_M
-    m_range_end = min(tl.load(seg_indptr + idx + 1), m_range_start + BLOCK_SIZE_M)
+    if masked_m_ptr is not None:
+        m_range_end = min(tl.load(seg_indptr + idx) + tl.load(masked_m_ptr + idx), m_range_start + BLOCK_SIZE_M)
+    else:
+        m_range_end = min(tl.load(seg_indptr + idx + 1), m_range_start + BLOCK_SIZE_M)
     expert_id = tl.load(weight_indices + idx)
     return m_range_start, m_range_end, expert_id
 
@@ -566,7 +691,7 @@ def grouped_gemm_triton_kernel(
         return
 
     m_range_start, m_range_end, expert_id = compute_m_range(
-        pid_m, batch_size, seg_indptr, weight_indices, m_num_tiles_indptr, BLOCK_SIZE_M
+        pid_m, batch_size, seg_indptr, None, weight_indices, m_num_tiles_indptr, BLOCK_SIZE_M
     )
     if m_range_end - m_range_start == 0:
         return
@@ -628,6 +753,14 @@ def grouped_gemm_triton_kernel(
     c_mask = (offs_cm[:, None] < m_range_end) & (offs_cn[None, :] < n_range_end)
     tl.store(c_ptr, c_tile, mask=c_mask)
 
+
+@triton.jit
+def compute_masked_num_tiles_ptr(
+    num_tiles_indptr, masked_m_ptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
+):
+    for i in range(batch_size):
+        m = tl.load(masked_m_ptr + i)
+        tl.store(num_tiles_indptr + i, tl.cdiv(m, BLOCK_SIZE_M))
 
 @triton.jit
 def compute_m_num_tiles_indptr(
@@ -719,6 +852,132 @@ def grouped_gemm_triton(
         **config,
     )
     return c
+
+def grouped_gemm_masked_triton(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    masked_m: Optional[torch.Tensor] = None,
+    c_dtype=None,
+):
+    assert len(a.shape) == 3
+    assert a.is_contiguous()
+    assert b.is_contiguous()
+
+    config = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 128,
+    }
+
+    num_tiles_ptr = torch.zeros(a.shape[0] + 1, device=a.device, dtype=torch.int64)
+    compute_masked_num_tiles_ptr[(1,)](
+        num_tiles_ptr, masked_m, a.shape[0], config["BLOCK_SIZE_M"]
+    )
+
+    if c is None:
+        assert c_dtype is not None
+        c = torch.empty(a.shape[0], a.shape[1], b.shape[1], device=a.device, dtype=c_dtype)
+
+    grid = lambda META: (
+        a.shape[0],
+        triton.cdiv(a.size(0), META["BLOCK_SIZE_M"]) + a.shape[0],
+        triton.cdiv(b.size(1), META["BLOCK_SIZE_N"]),
+    )
+
+    grouped_gemm_masked_triton_kernel[grid](
+        a,
+        b,
+        c,
+        b.size(1),
+        b.size(2),
+        masked_m,
+        num_tiles_ptr,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        **config,
+    )
+    return c
+
+# (e, m, k) * (e, n, k) -> (e, m, n)
+@triton.jit
+def grouped_gemm_masked_triton_kernel(
+    a,
+    b,
+    c,
+    N,
+    K,
+    masked_m,
+    num_tiles_ptr,
+    a_stride_0: tl.constexpr,
+    a_stride_1: tl.constexpr,
+    b_stride_0: tl.constexpr,
+    b_stride_1: tl.constexpr,
+    c_stride_0: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    c_dtype = c.dtype.element_ty
+
+    expert_id = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    pid_n = tl.program_id(2)
+    total_m_block = tl.load(num_tiles_ptr + expert_id)
+    if pid_m >= total_m_block:
+        return
+
+    m_range_start, m_range_end = compute_masked_m_range(
+        expert_id, pid_m, masked_m, BLOCK_SIZE_M
+    )
+    if m_range_end - m_range_start <= 0:
+        return
+
+    n_range_start = pid_n * BLOCK_SIZE_N
+    n_range_end = min(n_range_start + BLOCK_SIZE_N, N)
+
+    offs_am = tl.arange(0, BLOCK_SIZE_M)
+    offs_bn = tl.arange(0, BLOCK_SIZE_N)
+
+    offs_am = tl.where(offs_am < m_range_end - m_range_start, offs_am, 0)
+    offs_bn = tl.where(offs_bn < n_range_end - n_range_start, offs_bn, 0)
+    offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+    a_ptr = a + (
+        (expert_id * a_stride_0) 
+        + (m_range_start + offs_am[:, None]) * a_stride_1 
+        + offs_k[None, :])
+    b_ptr = b + (
+        (expert_id * b_stride_0)
+        + (n_range_start + offs_bn[:, None]) * b_stride_1
+        + offs_k[None, :]
+    )
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a_tile = tl.load(
+            a_ptr, mask=offs_k[None, :] < (K - k * BLOCK_SIZE_K), other=0.0
+        )
+        b_tile = tl.load(
+            b_ptr, mask=offs_k[None, :] < (K - k * BLOCK_SIZE_K), other=0.0
+        )
+
+        accumulator = tl.dot(a_tile, b_tile.T, accumulator)
+        a_ptr += BLOCK_SIZE_K
+        b_ptr += BLOCK_SIZE_K
+
+    c_tile = accumulator.to(c_dtype)
+
+    offs_cm = m_range_start + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = n_range_start + tl.arange(0, BLOCK_SIZE_N)
+    c_ptr = c + (expert_id * c_stride_0) + offs_cm[:, None] * N + offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < m_range_end) & (offs_cn[None, :] < n_range_end)
+    tl.store(c_ptr, c_tile, mask=c_mask)
 
 
 @triton.jit
