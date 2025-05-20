@@ -946,6 +946,7 @@ class DeepEPMoE(EPMoE):
 
         # GroupGemm-0
         if hidden_states.shape[0] > 0:
+            logger.info(f"forward_normal compute gateup_output shapes: hidden_states={hidden_states.shape}, w13_weight={self.w13_weight.shape}, seg_indptr={seg_indptr.shape}, weight_indices_cur_rank={weight_indices_cur_rank.shape}, w13_input_scale={self.w13_input_scale.shape if hasattr(self.w13_input_scale, 'shape') else None}, w13_weight_scale_inv={self.w13_weight_scale_inv.shape if self.use_block_quant else self.w13_weight_scale.shape}")
             gateup_output = self.grouped_gemm_runner(
                 a=hidden_states,
                 b=self.w13_weight,
@@ -1014,6 +1015,7 @@ class DeepEPMoE(EPMoE):
             dtype=hidden_states_dtype,
         )
         if down_input.shape[0] > 0:
+            logger.info(f"forward_normal compute down_output shapes: down_input={down_input.shape}, down_output={down_output.shape}, seg_indptr={seg_indptr.shape}, weight_indices_cur_rank={weight_indices_cur_rank.shape}, w2_input_scale={self.w2_input_scale.shape}")
             down_output = self.grouped_gemm_runner(
                 a=down_input,
                 b=self.w2_weight,
@@ -1157,6 +1159,7 @@ class DeepEPMoE(EPMoE):
         gateup_output = torch.empty(
             (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
         )
+        logger.info(f"forward_deepgemm_masked compute gateup_output: m={m}, n={n}, k={k}, hidden_states_fp8.shape={hidden_states_fp8[0].shape}, w13_weight_fp8.shape={self.w13_weight_fp8.shape if self.w13_weight_fp8 is not None and hasattr(self.w13_weight_fp8, 'shape') else None}, gateup_output.shape={gateup_output.shape}, masked_m={masked_m}, expected_m={expected_m}")
         m_grouped_gemm_fp8_fp8_bf16_nt_masked(
             hidden_states_fp8, self.w13_weight_fp8, gateup_output, masked_m, expected_m
         )
