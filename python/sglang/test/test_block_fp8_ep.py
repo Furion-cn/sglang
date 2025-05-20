@@ -52,7 +52,7 @@ def ep_moe(
         custom_routing_function=custom_routing_function,
     )
 
-    reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(topk_ids, num_experts)
+    reorder_topk_ids, src2dst, seg_indptr, masked_m = run_moe_ep_preproess(topk_ids, num_experts)
 
     gateup_input = torch.empty(
         (int(hidden_states.shape[0] * top_k), hidden_states.shape[1]),
@@ -87,6 +87,7 @@ def ep_moe(
     )
 
     seg_indptr_cur_rank = seg_indptr[start_expert_id : end_expert_id + 2]
+    masked_m_cur_rank = masked_m[start_expert_id : end_expert_id + 1]
     weight_indices_cur_rank = torch.arange(
         0,
         num_experts_per_partition,
@@ -109,6 +110,7 @@ def ep_moe(
         batch_size=num_experts_per_partition,
         weight_column_major=True,
         seg_indptr=seg_indptr_cur_rank,
+        masked_m=masked_m_cur_rank,
         weight_indices=weight_indices_cur_rank,
         use_fp8_w8a8=use_fp8_w8a8,
         scale_a=w1_input_scale,
@@ -162,6 +164,7 @@ def ep_moe(
         batch_size=num_experts_per_partition,
         weight_column_major=True,
         seg_indptr=seg_indptr_cur_rank,
+        masked_m=masked_m_cur_rank,
         weight_indices=weight_indices_cur_rank,
         use_fp8_w8a8=use_fp8_w8a8,
         scale_a=w2_input_scale,
