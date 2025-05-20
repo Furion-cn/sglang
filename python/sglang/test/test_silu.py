@@ -28,7 +28,7 @@ class TestSiluAndMulMaskedFwd(unittest.TestCase):
         input = torch.randn(expert_num, token_num, hidden_dim, dtype=torch.bfloat16, device=self.device)
         # 创建输出张量
         output = torch.empty(expert_num, token_num, hidden_dim // 2, dtype=torch.bfloat16, device=self.device)
-        # 创建masked_m张量
+        # 创建 masked_m 张量
         masked_m = torch.tensor([token_num] * expert_num, device=self.device)
 
         # 运行kernel

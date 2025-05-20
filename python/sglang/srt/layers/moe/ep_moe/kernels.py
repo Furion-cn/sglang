@@ -770,6 +770,14 @@ def compute_masked_num_tiles_ptr(
 
 
 @triton.jit
+def compute_masked_num_tiles_ptr(
+    num_tiles_indptr, masked_m_ptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
+):
+    for i in range(batch_size):
+        m = tl.load(masked_m_ptr + i)
+        tl.store(num_tiles_indptr + i, tl.cdiv(m, BLOCK_SIZE_M))
+
+@triton.jit
 def compute_m_num_tiles_indptr(
     m_num_tiles_indptr, seg_indptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
 ):
@@ -961,8 +969,8 @@ def grouped_gemm_masked_triton_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     a_ptr = a + (
-        (expert_id * a_stride_0)
-        + (m_range_start + offs_am[:, None]) * a_stride_1
+        (expert_id * a_stride_0) 
+        + (m_range_start + offs_am[:, None]) * a_stride_1 
         + offs_k[None, :])
     b_ptr = b + (
         (expert_id * b_stride_0)
@@ -990,6 +998,7 @@ def grouped_gemm_masked_triton_kernel(
     c_ptr = c + (expert_id * c_stride_0) + offs_cm[:, None] * N + offs_cn[None, :]
     c_mask = (offs_cm[:, None] < m_range_end) & (offs_cn[None, :] < n_range_end)
     tl.store(c_ptr, c_tile, mask=c_mask)
+
 
 @triton.jit
 def _fwd_kernel_ep_scatter_1(
