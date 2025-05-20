@@ -39,11 +39,13 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     gelu_and_mul_triton_kernel,
     grouped_gemm_triton,
     grouped_gemm_masked_triton,
+    grouped_gemm_masked_triton,
     post_reorder_triton_kernel,
     pre_reorder_triton_kernel,
     run_moe_ep_preproess,
     silu_and_mul_masked_post_quant_fwd,
     silu_and_mul_triton_kernel,
+    silu_and_mul_masked_fwd,
     silu_and_mul_masked_fwd,
     tma_align_input_scale,
 )
@@ -101,8 +103,11 @@ class GroupedGemmRunner(torch.nn.Module):
         c: torch.Tensor,
         batch_size: Optional[int] = None,
         weight_column_major: Optional[bool] = True,
+        batch_size: Optional[int] = None,
+        weight_column_major: Optional[bool] = True,
         seg_indptr: Optional[torch.Tensor] = None,
         weight_indices: Optional[torch.Tensor] = None,
+        masked_m: Optional[torch.Tensor] = None,
         masked_m: Optional[torch.Tensor] = None,
         use_fp8_w8a8: bool = False,
         scale_a: torch.Tensor = None,
@@ -120,6 +125,14 @@ class GroupedGemmRunner(torch.nn.Module):
                 weight_column_major=weight_column_major,
                 seg_indptr=seg_indptr,
                 weight_indices=weight_indices,
+            )
+        elif masked_m is not None:
+            c = grouped_gemm_masked_triton(
+                a,
+                b,
+                c,
+                masked_m,
+                c_dtype=c_dtype,
             )
         elif masked_m is not None:
             c = grouped_gemm_masked_triton(
@@ -169,6 +182,7 @@ class EPMoE(torch.nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
         tp_rank: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         prefix: str = "",
         correction_bias: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
@@ -182,6 +196,9 @@ class EPMoE(torch.nn.Module):
 
         self.tp_size = (
             tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        )
+        self.tp_rank = (
+            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
         )
         self.tp_rank = (
             tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
@@ -266,6 +283,7 @@ class EPMoE(torch.nn.Module):
             ),
         )
 
+        reorder_topk_ids, src2dst, seg_indptr, masked_m = run_moe_ep_preproess(
         reorder_topk_ids, src2dst, seg_indptr, masked_m = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
@@ -872,6 +890,7 @@ class DeepEPMoE(EPMoE):
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
         tp_rank: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         prefix: str = "",
         correction_bias: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
@@ -893,12 +912,14 @@ class DeepEPMoE(EPMoE):
             quant_config,
             tp_size,
             tp_rank,
+            tp_rank,
             prefix,
             correction_bias,
             custom_routing_function,
             activation,
             routed_scaling_factor,
         )
+
 
         self.deepep_mode = deepep_mode
         self.w13_weight_fp8 = (
@@ -935,6 +956,7 @@ class DeepEPMoE(EPMoE):
             else:
                 return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:
+            return self.forward_masked_with_runner(hidden_states, masked_m, expected_m)
             return self.forward_masked_with_runner(hidden_states, masked_m, expected_m)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
