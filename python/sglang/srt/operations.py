@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ _ENABLE_PROFILE = bool(int(os.environ.get("SGLANG_OPERATIONS_ENABLE_PROFILE", "0
 if _ENABLE_PROFILE:
     import nvtx
 
+logger = logging.getLogger(__name__)
 
 def execute_operations(inputs, operations):
     stages = _convert_operations_to_stages(decorate_operations(operations))
@@ -49,6 +51,7 @@ class _StageExecutor:
 
         with _annotate_region(debug_name=f"{self._debug_name}{self._index}"):
             for op in stage:
+                logger.info(f"Executing operation: {op.debug_name}")
                 with _annotate_region(debug_name=op.debug_name):
                     self._stage_output = op.fn(
                         state=self._stage_state,

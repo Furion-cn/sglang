@@ -659,13 +659,17 @@ class Scheduler(
         self.result_queue = deque()
 
         while True:
+            logger.info("event_loop_overlap new loop, begin to recv requests")
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+            logger.info("recv requests done")
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            logger.info("get next batch to run done")
 
             if batch:
+                logger.info("batch is not None, launch the batch")
                 batch.launch_done = threading.Event()
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
@@ -681,6 +685,7 @@ class Scheduler(
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
 
             if self.last_batch:
+                logger.info("last batch is not None, process the results of the last batch")
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
                 tmp_batch.next_batch_sampling_info = (

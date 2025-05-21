@@ -96,6 +96,7 @@ from sglang.srt.utils import (
     is_hip,
     log_info_on_rank0,
 )
+import nvtx
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -312,6 +313,7 @@ class DeepseekV2MoE(nn.Module):
         return global_server_args_dict["enable_deepep_moe"]
 
     def op_gate(self, state):
+        nvtx.push_range("op_gate", color="green")
         if (not self._enable_deepep_moe) or is_non_idle_and_non_empty(
             state.forward_batch.forward_mode, state.hidden_states_mlp_input
         ):
@@ -319,8 +321,10 @@ class DeepseekV2MoE(nn.Module):
             state.router_logits = self.gate(state.hidden_states_mlp_input)
         else:
             state.router_logits = None
+        nvtx.pop_range()
 
     def op_shared_experts(self, state):
+        nvtx.push_range("op_shared_experts", color="red")
         if (self.n_share_experts_fusion == 0) and (
             (not self._enable_deepep_moe)
             or is_non_idle_and_non_empty(
@@ -330,8 +334,10 @@ class DeepseekV2MoE(nn.Module):
             state.shared_output = self.shared_experts(state.hidden_states_mlp_input)
         else:
             state.shared_output = None
+        nvtx.pop_range()
 
     def op_select_experts(self, state):
+        nvtx.push_range("op_select_experts", color="blue")
         router_logits = state.router_logits
         hidden_states = state.hidden_states_mlp_input
 
@@ -358,8 +364,10 @@ class DeepseekV2MoE(nn.Module):
                 state.topk_weights_local = torch.empty(
                     (0, self.top_k), dtype=torch.float32, device=hidden_states.device
                 )
+        nvtx.pop_range()
 
     def op_dispatch_a(self, state):
+        nvtx.push_range("op_dispatch_a", color="yellow")
         if self._enable_deepep_moe and (self.ep_size > 1):
             # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
             self.deepep_dispatcher.dispatch_a(
@@ -368,8 +376,10 @@ class DeepseekV2MoE(nn.Module):
                 topk_weights=state.pop("topk_weights_local"),
                 forward_mode=state.forward_batch.forward_mode,
             )
+        nvtx.pop_range()
 
     def op_dispatch_b(self, state):
+        nvtx.push_range("op_dispatch_b", color="purple")
         if self._enable_deepep_moe and (self.ep_size > 1):
             (
                 state.hidden_states_experts_input,
@@ -381,8 +391,10 @@ class DeepseekV2MoE(nn.Module):
                 state.masked_m,
                 state.expected_m,
             ) = self.deepep_dispatcher.dispatch_b()
+        nvtx.pop_range()
 
     def op_experts(self, state):
+        nvtx.push_range("op_experts", color="red")
         if self._enable_deepep_moe:
             state.pop("router_logits")
             state.hidden_states_experts_output = self.experts(
@@ -401,8 +413,10 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=state.pop("hidden_states_mlp_input"),
                 router_logits=state.pop("router_logits"),
             )
+        nvtx.pop_range()
 
     def op_combine_a(self, state):
+        nvtx.push_range("op_combine_a", color="green")
         if self._enable_deepep_moe and (self.ep_size > 1):
             self.deepep_dispatcher.combine_a(
                 state.pop("hidden_states_experts_output"),
@@ -410,12 +424,16 @@ class DeepseekV2MoE(nn.Module):
                 topk_weights=state.pop("topk_weights_dispatched"),
                 forward_mode=state.forward_batch.forward_mode,
             )
+        nvtx.pop_range()
 
     def op_combine_b(self, state):
+        nvtx.push_range("op_combine_b", color="blue")
         if self._enable_deepep_moe and (self.ep_size > 1):
             state.hidden_states_after_combine = self.deepep_dispatcher.combine_b()
+        nvtx.pop_range()        
 
     def op_output(self, state):
+        nvtx.push_range("op_output", color="red")
         final_hidden_states = (
             state.pop("hidden_states_after_combine")
             if self._enable_deepep_moe
@@ -431,7 +449,7 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         state.hidden_states_mlp_output = final_hidden_states
-
+        nvtx.pop_range()
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     import math
@@ -1252,6 +1270,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         zero_allocator: BumpAllocator,
     ):
+        nvtx.push_range("op_comm_prepare_attn", color="green")
         state.hidden_states_after_comm_pre_attn, state.residual_after_input_ln = (
            self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
                 )
@@ -1262,16 +1281,20 @@ class DeepseekV2DecoderLayer(nn.Module):
                 zero_allocator=zero_allocator,
             )
         )
+        nvtx.pop_range()
 
     def op_attn(self, state):
+        nvtx.push_range("op_attn", color="blue")
         state.hidden_states_after_attn = self.self_attn(
             positions=state.positions,
             hidden_states=state.pop("hidden_states_after_comm_pre_attn"),
             forward_batch=state.forward_batch,
             zero_allocator=state.zero_allocator,
         )
+        nvtx.pop_range()
 
     def op_comm_prepare_mlp(self, state):
+        nvtx.push_range("op_comm_prepare_mlp", color="yellow")
         state.hidden_states_mlp_input, state.residual_after_comm_pre_mlp = (
             self.layer_communicator.prepare_mlp(
                 state.pop("hidden_states_after_attn"),
@@ -1279,8 +1302,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                 state.forward_batch,
             )
         )
+        nvtx.pop_range()
 
     def op_mlp(self, state):
+        nvtx.push_range("op_mlp", color="red")
         hidden_states = state.pop("hidden_states_mlp_input")
         if not (
             enable_moe_dense_fully_dp()
@@ -1292,14 +1317,16 @@ class DeepseekV2DecoderLayer(nn.Module):
             )
         else:
             state.hidden_states_mlp_output = hidden_states
+        nvtx.pop_range()
 
     def op_comm_postprocess_layer(self, state):
+        nvtx.push_range("op_comm_postprocess_layer", color="purple")
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             state.pop("hidden_states_mlp_output"),
             state.pop("residual_after_comm_pre_mlp"),
             state.forward_batch,
         )
-
+        nvtx.pop_range()
         state.clear(expect_keys={"positions", "forward_batch", "zero_allocator"})
         return hidden_states, residual
 
@@ -1366,11 +1393,13 @@ class DeepseekV2Model(nn.Module):
 
         residual = None
         for i in range(len(self.layers)):
+            nvtx.push_range(f"layer {i}")
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 layer = self.layers[i]
                 hidden_states, residual = layer(
                     positions, hidden_states, forward_batch, residual, zero_allocator
                 )
+            nvtx.pop_range()
         if not forward_batch.forward_mode.is_idle():
             if residual is None:
                 hidden_states = self.norm(hidden_states)

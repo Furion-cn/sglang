@@ -517,20 +517,24 @@ class SchedulerDisaggregationDecodeMixin:
         self.last_batch_in_queue = False  # last batch is modified in-place, so we need another variable to track if it's extend
 
         while True:
+            logger.info("event_loop_overlap_disagg_decode begin to recv requests")
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+            logger.info("process_input_requests done")  
             # polling and allocating kv cache
             self.process_decode_queue()
+            logger.info("process_decode_queue done")
             batch = self.get_next_disagg_decode_batch_to_run()
             self.cur_batch = batch
             last_batch_in_queue = False
-
+            logger.info("get_next_disagg_decode_batch_to_run done")
             prepare_dp_attn_flag = (
                 self.server_args.enable_dp_attention
                 or self.server_args.enable_sp_layernorm
             )
 
             if batch:
+                logger.info("batch is not None, launch the batch")
                 # Generate fake extend output.
                 if batch.forward_mode.is_extend():
                     # Note: Logprobs should be handled on the prefill engine.
@@ -543,12 +547,14 @@ class SchedulerDisaggregationDecodeMixin:
                             result_queue.append((batch_.copy(), result))
                             last_batch_in_queue = True
                 else:
+                    logger.info("batch is not extend, launch the batch")
                     if prepare_dp_attn_flag:
                         self.prepare_dp_attn_batch(batch)
                     result = self.run_batch(batch)
                     result_queue.append((batch.copy(), result))
                     last_batch_in_queue = True
             elif prepare_dp_attn_flag:
+                logger.info("prepare_dp_attn_flag is True, prepare the idle batch")
                 batch, result = self._prepare_idle_batch_and_run(
                     None, delay_process=True
                 )
@@ -558,6 +564,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             # Process the results of the previous batch but skip if the last batch is extend
             if self.last_batch and self.last_batch_in_queue:
+                logger.info("process the results of the previous batch")
                 tmp_batch, tmp_result = result_queue.popleft()
                 self.process_batch_result(tmp_batch, tmp_result)
 
