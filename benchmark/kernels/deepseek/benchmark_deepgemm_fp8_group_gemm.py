@@ -7,7 +7,7 @@ import triton.language as tl
 from deep_gemm import calc_diff, get_col_major_tma_aligned_tensor
 
 # Import shared functionality from the regular GEMM benchmark
-from sglang.benchmark.kernels.deepseek.benchmark_deepgemm_fp8_gemm import (
+from benchmark_deepgemm_fp8_gemm import (
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
 )

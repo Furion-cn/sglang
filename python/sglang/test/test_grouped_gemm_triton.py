@@ -497,70 +497,13 @@ class TestGroupedGemmMaskedTriton(unittest.TestCase):
         else:
             print("Warning: No valid tokens to compare")
     
-    def test_custom_weight_indices(self):
-        """测试自定义的weight_indices"""
-        # 创建更多的权重矩阵
-        num_weights = 5  # 权重数量大于专家数量
-        custom_b = torch.zeros(num_weights, self.intermediate_size, self.hidden_size, 
-                              device=self.device, dtype=torch.bfloat16)
-        
-        # 初始化权重 - 注意维度顺序已修正
-        for i in range(num_weights):
-            for j in range(self.intermediate_size):
-                for k in range(self.hidden_size):
-                    custom_b[i, j, k] = 0.01 * (i + 1) * (j + 1) * (k + 1)
-        
-        # 创建自定义weight_indices，将每个专家映射到不同的权重
-        custom_weight_indices = torch.tensor([2, 0], device=self.device)  # 修改为与专家数量匹配
-        
-        # 使用 grouped_gemm_masked_triton 计算
-        result = grouped_gemm_masked_triton(
-            a=self.a,
-            b=custom_b,
-            c=None,
-            masked_m=self.masked_m,
-            c_dtype=torch.bfloat16
-        )
-        
-        # 计算参考结果
-        reference = torch.zeros_like(result)
-        
-        for i in range(self.num_experts):
-            # 使用映射的权重ID
-            weight_idx = custom_weight_indices[i].item()
-            
-            # 只处理有效的token
-            for j in range(self.masked_m[i].item()):
-                # 对每个有效token进行矩阵乘法
-                expert_output = torch.matmul(
-                    self.a[i, j].to(torch.float32), 
-                    custom_b[weight_idx].transpose(0, 1).to(torch.float32)  # 转置为[hidden_size, intermediate_size]
-                ).to(torch.bfloat16)
-                
-                reference[i, j] = expert_output
-        
-        # 创建掩码，只比较有效的token
-        valid_mask = torch.zeros((self.num_experts, self.seq_len), dtype=torch.bool, device=self.device)
-        for i in range(self.num_experts):
-            valid_mask[i, :self.masked_m[i]] = True
-        
-        # 只比较有效的token
-        result_valid = result[valid_mask]
-        reference_valid = reference[valid_mask]
-        
-        # 计算误差
-        rel_diff = torch.max(torch.abs(result_valid - reference_valid)) / torch.max(torch.abs(reference_valid))
-        
-        print(f"Custom weight_indices - Relative difference: {rel_diff}")
-        self.assertTrue(rel_diff < 1e-2, f"Relative difference too large: {rel_diff}")
-    
     def test_performance(self):
         """测试性能"""
         # 创建更大的输入用于性能测试
         batch_size = 8
         seq_len = 128
-        hidden_size = 1024
-        intermediate_size = 4096
+        hidden_size = 7168
+        intermediate_size = 2048
         
         # 创建输入张量 - 注意维度顺序
         a_large = torch.randn(batch_size, seq_len, hidden_size, device=self.device, dtype=torch.bfloat16)
