@@ -1522,7 +1522,7 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
-
+        logger.info(f"Scheduler.run_batch forward_ct: batch_size{batch.batch_size} ")
         # Check profiler
         if (
             self.profiler_target_forward_ct
@@ -1538,6 +1538,7 @@ class Scheduler(
         if self.is_generation:
             if self.spec_algorithm.is_none():
                 model_worker_batch = batch.get_model_worker_batch()
+                logger.info(f"model_worker_batch seq_lens_sum : {model_worker_batch.seq_lens_sum}")
                 if self.pp_group.is_last_rank:
                     logits_output, next_token_ids, can_run_cuda_graph = (
                         self.tp_worker.forward_batch_generation(model_worker_batch)
@@ -1563,7 +1564,7 @@ class Scheduler(
 
             if self.pp_group.is_last_rank:
                 batch.output_ids = next_token_ids
-
+            logger.info(f"Scheduler.run_batch batch_size{batch.batch_size} next_token_ids: {next_token_ids}")
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that
             # we can use the correct values in output processing.

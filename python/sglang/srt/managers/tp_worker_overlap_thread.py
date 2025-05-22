@@ -206,6 +206,7 @@ class TpModelWorkerClient:
     def forward_batch_generation(
         self, model_worker_batch: ModelWorkerBatch
     ) -> Tuple[None, torch.Tensor, bool]:
+        logger.info(f"TpModelWorkerClient.forward_batch_generation start seq_lens_sum {model_worker_batch.seq_lens_sum}")
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info
         sampling_info.update_penalties()
@@ -234,6 +235,7 @@ class TpModelWorkerClient:
         self.future_token_ids_ct = (
             self.future_token_ids_ct + bs
         ) % self.future_token_ids_limit
+        logger.info(f"TpModelWorkerClient.forward_batch_generation end future_token_ids_ct: {self.future_token_ids_ct}")
         return None, future_next_token_ids, False
 
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
