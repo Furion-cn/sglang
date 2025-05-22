@@ -1297,10 +1297,10 @@ class DeepEPMoE(EPMoE):
             down_input,
             masked_m=masked_m,
         )
+        
         del gateup_output
 
         # GroupGemm-1
-        n = self.w2_weight.size(1)
         down_output = self.grouped_gemm_runner(
             a=down_input,
             b=self.w2_weight,
