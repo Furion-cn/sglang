@@ -2019,6 +2019,28 @@ class DisposibleTensor:
         assert not self.is_disposed
         return self._value
 
+    def stride(self, dim=None):
+        assert not self.is_disposed, "Cannot get stride from disposed tensor"
+        return self._value.stride(dim)
+
+    def size(self, dim=None):
+        assert not self.is_disposed, "Cannot get size from disposed tensor"
+        if dim is None:
+            return self._value.size()
+        else:
+            return self._value.size(dim)
+
+    def data_ptr(self):
+        assert not self.is_disposed, "Cannot get data_ptr from disposed tensor"
+        return self._value.data_ptr()
+
+    @staticmethod
+    def maybe_unwrap(tensor):
+        if isinstance(tensor, DisposibleTensor):
+            assert not tensor.is_disposed, "Cannot unwrap disposed tensor"
+            return tensor._value
+        return tensor
+
     def dispose(self, backup_metadata: bool = True):
         assert not self.is_disposed
 
