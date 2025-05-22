@@ -1277,8 +1277,6 @@ class DeepEPMoE(EPMoE):
                 (num_groups, m, n), device=hidden_states.device, dtype=torch.bfloat16
             )
 
-        logger.info(f"{gateup_output.shape=}")
-
         # Act
         down_input = torch.empty(
             (
@@ -1295,9 +1293,6 @@ class DeepEPMoE(EPMoE):
             down_input,
             masked_m=masked_m,
         )
-
-        logger.info(f"{gateup_output.shape=}")
-
         del gateup_output
 
         # GroupGemm-1
@@ -1309,7 +1304,6 @@ class DeepEPMoE(EPMoE):
             c_dtype=torch.bfloat16,
             masked_m=masked_m,
         )
-        logger.info(f"{down_input.shape=} {down_output.shape=}")
         return down_output
 
 @contextmanager
