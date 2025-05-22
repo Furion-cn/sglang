@@ -517,7 +517,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_idx,
-            use_fp8=True,
+            use_fp8=False,
         )
         return (
             hidden_states,
@@ -608,7 +608,6 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 return_recv_hook=self.return_recv_hook,
             )
         )
-        packed_recv_hidden = [DisposibleTensor(x) for x in packed_recv_hidden]
         return packed_recv_hidden, packed_recv_count, event, hook
 
     def combine_a(

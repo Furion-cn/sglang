@@ -2037,8 +2037,8 @@ class DisposibleTensor:
 
     @staticmethod
     def maybe_unwrap(value: "MaybeDisposibleTensor") -> torch.Tensor:
-        if isinstance(value, DisposibleTensor):
-            return value.value
+        while isinstance(value, DisposibleTensor):
+            value = value.value
         return value
 
     @staticmethod
