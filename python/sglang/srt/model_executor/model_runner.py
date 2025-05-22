@@ -1157,6 +1157,8 @@ class ModelRunner:
                 pp_proxy_tensors=pp_proxy_tensors,
             )
             logger.info(f"run_cuda_graph replay use time: {time.time() - now}")
+            logger.info(f"run_cuda_graph replay ret:hidden_states{ret.hidden_states}")
+            logger.info(f"run_cuda_graph replay ret:next_token_logits{ret.next_token_logits}")
         elif forward_batch.forward_mode.is_decode():
             now = time.time()
             logger.info(f"run_decode start_time{now}")
