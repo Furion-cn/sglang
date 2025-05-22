@@ -13,9 +13,125 @@
 # ==============================================================================
 """Utilities for Prometheus Metrics Collection."""
 
+import json
 import time
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Dict, Union, Optional
+
+@dataclass
+class EPLBManagerStats:
+    rebalance_total_time: float
+    rebalance_compute_time: float
+    rebalance_update_time: float
+    num_physical_experts: int
+    num_logical_experts: int
+    num_redundant_experts: int
+    load_cv: float
+    load_max: float
+    load_min: float
+    load_mean: float
+    physical_to_logical_map_summary: Optional[Dict] = None
+    logical_to_physical_map_summary: Optional[Dict] = None
+    gpu_expert_stats: Optional[Dict] = None
+
+
+class EPLBMetricsCollector:
+    def __init__(self, labels: Dict[str, str]) -> None:
+        from prometheus_client import Gauge, Histogram, Info
+        
+        self.labels = labels
+        
+        self.rebalance_time = Histogram(
+            name="sglang:eplb_rebalance_time_seconds",
+            documentation="Histogram of EPLB rebalance time in seconds",
+            labelnames=list(labels.keys()) + ["stage"], 
+            buckets=[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0],
+        )
+        
+        self.num_experts = Gauge(
+            name="sglang:eplb_num_experts",
+            documentation="Number of experts",
+            labelnames=list(labels.keys()) + ["type"],
+            multiprocess_mode="mostrecent",
+        )
+        
+        self.load_stats = Gauge(
+            name="sglang:eplb_load_stats",
+            documentation="Expert load statistics",
+            labelnames=list(labels.keys()) + ["metric"],
+            multiprocess_mode="mostrecent",
+        )
+        
+        self.expert_maps = Info(
+            name="sglang:eplb_expert_maps",
+            documentation="Expert distribution maps",
+            labelnames=list(labels.keys()) + ["map_type"],
+        )
+        
+        self.gpu_expert_stats = Gauge(
+            name="sglang:eplb_gpu_expert_stats",
+            documentation="Expert statistics per GPU",
+            labelnames=list(labels.keys()) + ["gpu_id", "layer_id", "metric"],
+            multiprocess_mode="mostrecent",
+        )
+        
+        self.logical_expert_replicas = Gauge(
+            name="sglang:eplb_logical_expert_replicas",
+            documentation="Number of physical expert replicas for each logical expert",
+            labelnames=list(labels.keys()) + ["gpu_id", "layer_id", "logical_expert_id"],
+            multiprocess_mode="mostrecent",
+        )
+    
+    def _log_gauge(self, gauge, data: Union[int, float], extra_labels: Dict[str, str] = None) -> None:
+        labels = self.labels.copy()
+        if extra_labels:
+            labels.update(extra_labels)
+        gauge.labels(**labels).set(data)
+    
+    def log_stats(self, stats: EPLBManagerStats) -> None:
+        self.rebalance_time.labels(**self.labels, stage="total").observe(stats.rebalance_total_time)
+        self.rebalance_time.labels(**self.labels, stage="compute").observe(stats.rebalance_compute_time)
+        self.rebalance_time.labels(**self.labels, stage="update").observe(stats.rebalance_update_time)
+        
+        self._log_gauge(self.num_experts, stats.num_physical_experts, {"type": "physical"})
+        self._log_gauge(self.num_experts, stats.num_logical_experts, {"type": "logical"})
+        self._log_gauge(self.num_experts, stats.num_redundant_experts, {"type": "redundant"})
+        
+        self._log_gauge(self.load_stats, stats.load_cv, {"metric": "cv"})
+        self._log_gauge(self.load_stats, stats.load_max, {"metric": "max"})
+        self._log_gauge(self.load_stats, stats.load_min, {"metric": "min"})
+        self._log_gauge(self.load_stats, stats.load_mean, {"metric": "mean"})
+        
+        if stats.physical_to_logical_map_summary:
+            self.expert_maps.labels(**self.labels, map_type="physical_to_logical").info(
+                {"data": json.dumps(stats.physical_to_logical_map_summary)}
+            )
+        
+        if stats.logical_to_physical_map_summary:
+            self.expert_maps.labels(**self.labels, map_type="logical_to_physical").info(
+                {"data": json.dumps(stats.logical_to_physical_map_summary)}
+            )
+            
+        if stats.gpu_expert_stats:
+            for gpu_id, layer_stats in stats.gpu_expert_stats.items():
+                for layer_id, metrics in layer_stats.items():
+                    for metric_name, value in metrics.items():
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            self.gpu_expert_stats.labels(
+                                **self.labels, 
+                                gpu_id=str(gpu_id), 
+                                layer_id=str(layer_id), 
+                                metric=metric_name
+                            ).set(value)
+                    
+                    if "logical_expert_counts" in metrics:
+                        for logical_id, count in metrics["logical_expert_counts"].items():
+                            self.logical_expert_replicas.labels(
+                                **self.labels,
+                                gpu_id=str(gpu_id),
+                                layer_id=str(layer_id),
+                                logical_expert_id=str(logical_id)
+                            ).set(count)
 
 
 @dataclass
