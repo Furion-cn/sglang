@@ -139,9 +139,15 @@ class DecodePreallocQueue:
         """Add a request to the pending queue."""
 
         kv_receiver_class = get_kv_class(self.transfer_backend, KVClassType.RECEIVER)
+        port = 8998
+        if req.bootstrap_port is not None:
+            port = req.bootstrap_port
+        else:
+            port = 8998
+
         kv_receiver = kv_receiver_class(
             mgr=self.kv_manager,
-            bootstrap_addr=f"{req.bootstrap_host}:{req.bootstrap_port}",
+            bootstrap_addr=f"{req.bootstrap_host}:{port}",
             bootstrap_room=req.bootstrap_room,
         )
         self.queue.append(DecodeRequest(req=req, kv_receiver=kv_receiver))

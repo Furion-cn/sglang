@@ -117,6 +117,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
 )
+import nvtx
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -218,7 +219,9 @@ class MoEGate(nn.Module):
             self.e_score_correction_bias = None
 
     def forward(self, hidden_states):
+        nvtx.push_range("MoEGate", color="red")
         logits = F.linear(hidden_states, self.weight, None)
+        nvtx.pop_range()
         return logits
 
 
@@ -355,6 +358,7 @@ class DeepseekV2MoE(nn.Module):
             return self.forward_deepep(hidden_states, forward_mode)
 
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        nvtx.push_range("forward_normal", color="green")
         shared_output = self._forward_shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states)
@@ -366,6 +370,7 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        nvtx.pop_range()
         return final_hidden_states
 
     def forward_deepep(
@@ -383,6 +388,7 @@ class DeepseekV2MoE(nn.Module):
         else:
             router_logits = None
 
+        nvtx.push_range("forward_deepep_dispatch_a", color="yellow")
         self._forward_deepep_dispatch_a(
             self.deepep_dispatcher, forward_mode, hidden_states, router_logits
         )
@@ -396,7 +402,9 @@ class DeepseekV2MoE(nn.Module):
             masked_m,
             expected_m,
         ) = self.deepep_dispatcher.dispatch_b()
+        nvtx.pop_range()
 
+        nvtx.push_range("forward_deepep_experts", color="purple")
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             topk_idx=topk_idx,
@@ -408,14 +416,17 @@ class DeepseekV2MoE(nn.Module):
             num_recv_tokens_per_expert=num_recv_tokens_per_expert,
             forward_mode=forward_mode,
         )
+        nvtx.pop_range()
 
         if self.ep_size > 1:
+            nvtx.push_range("forward_deepep_dispatcher_combine", color="orange")
             final_hidden_states = self.deepep_dispatcher.combine(
                 hidden_states=final_hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
                 forward_mode=forward_mode,
             )
+            nvtx.pop_range()
         final_hidden_states *= self.routed_scaling_factor
 
         if shared_output is not None:
@@ -525,9 +536,12 @@ class DeepseekV2MoE(nn.Module):
     # ----------------------------------------- TBO-related --------------------------------------------
 
     def _forward_tbo_op_gate(self, state):
+        nvtx.push_range("forward_tbo_op_gate", color="red")
         state.router_logits = self.gate(state.hidden_states_after_post_attn_ln)
+        nvtx.pop_range()
 
     def _forward_tbo_op_mlp(self, state):
+        nvtx.push_range("forward_tbo_op_mlp", color="blue")
         state.expert_output_hidden_states = self.experts(
             hidden_states=state.pop("hidden_states_from_dispatch"),
             topk_idx=state.topk_idx_from_dispatch,
@@ -541,15 +555,19 @@ class DeepseekV2MoE(nn.Module):
             ),
             forward_mode=state.forward_batch.forward_mode,
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_dispatch_a_part_one(self, state):
+        nvtx.push_range("forward_tbo_op_dispatch_a_part_one", color="green")
         state.topk_weights, state.topk_idx = self._forward_deepep_dispatch_a_part_one(
             forward_mode=state.forward_batch.forward_mode,
             hidden_states=state.hidden_states_after_post_attn_ln,
             router_logits=state.pop("router_logits"),
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_dispatch_a_part_two(self, state):
+        nvtx.push_range("forward_tbo_op_dispatch_a_part_two", color="green")
         self._forward_deepep_dispatch_a_part_two(
             chosen_deepep_dispatcher=self.tbo_deepep_dispatchers[
                 state.tbo_subbatch_index
@@ -559,8 +577,10 @@ class DeepseekV2MoE(nn.Module):
             topk_idx=state.pop("topk_idx"),
             topk_weights=state.pop("topk_weights"),
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_dispatch_b(self, state, tbo_child_index: int):
+        nvtx.push_range("forward_tbo_op_dispatch_b", color="red")
         dispatcher = self.tbo_deepep_dispatchers[state.tbo_subbatch_index]
         with get_global_expert_distribution_recorder().with_current_layer(
             self.layer_id
@@ -577,23 +597,29 @@ class DeepseekV2MoE(nn.Module):
                 state.masked_m_from_dispatch,
                 state.expected_m_from_dispatch,
             ) = dispatcher.dispatch_b()
+        nvtx.pop_range()
 
     def _forward_tbo_op_combine_a(self, state):
+        nvtx.push_range("forward_tbo_op_combine_a", color="green")
         self.tbo_deepep_dispatchers[state.tbo_subbatch_index].combine_a(
             hidden_states=state.pop("expert_output_hidden_states"),
             topk_idx=state.pop("topk_idx_from_dispatch"),
             topk_weights=state.pop("topk_weights_from_dispatch"),
             forward_mode=state.forward_batch.forward_mode,
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_combine_b(self, state):
+        nvtx.push_range("forward_tbo_op_combine_b", color="green")
         dispatcher = self.tbo_deepep_dispatchers[state.tbo_subbatch_index]
         hidden_states = dispatcher.combine_b()
         # hidden_states *= self.routed_scaling_factor
         # state.hidden_states_from_combine = hidden_states
         state.hidden_states_from_combine_without_scaling = hidden_states
+        nvtx.pop_range()
 
     def _forward_tbo_op_shared(self, state):
+        nvtx.push_range("forward_tbo_op_shared", color="green")
         if get_bool_env_var("SGLANG_HACK_SLOW_BETWEEN_COMMUNICATION", "false"):
             for i in range(3):
                 self.shared_experts(state.hidden_states_after_post_attn_ln)
@@ -602,12 +628,15 @@ class DeepseekV2MoE(nn.Module):
             state.forward_batch.forward_mode,
             state.pop("hidden_states_after_post_attn_ln"),
         )
+        nvtx.pop_range()
 
     def _forward_shared_experts(self, hidden_states):
+        nvtx.push_range("forward_shared_experts", color="blue")
         if self.n_share_experts_fusion == 0:
             return self.shared_experts(hidden_states)
         else:
             return None
+        nvtx.pop_range()
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -871,6 +900,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        nvtx.push_range("forward_normal", color="green")
         if self.q_lora_rank is not None:
             q, latent_cache = self.fused_qkv_a_proj_with_mqa(hidden_states)[0].split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -908,6 +938,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
+        nvtx.pop_range()
         return output
 
     def forward_absorb(
@@ -1278,6 +1309,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        nvtx.push_range("forward_normal_chunked_kv", color="green")
         # In normal mha, the k and v tensors will become overly large when the prefix length is long.
         # To avoid this, we split the kv cache into chunks and process them one after another.
         # Since mha is compute friendly, the for loop induced here will not introduce significant overhead.
@@ -1341,6 +1373,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
+        nvtx.pop_range()
         return output
 
 
@@ -1556,6 +1589,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         zero_allocator: BumpAllocator,
     ) -> torch.Tensor:
+        nvtx.push_range("forward_ffn_with_scattered_input", color="green")
         # print(
         #     f"hi [{get_tensor_model_parallel_rank()}, {self.layer_id}, {self.__class__.__name__}] forward_ffn_with_scattered_input start {hidden_states.shape=}")
         # print(f"hi [{get_tensor_model_parallel_rank()}, {self.__class__.__name__}] forward_deepep start {self.layer_id=} {self.mlp.__class__.__name__=} "
@@ -1627,6 +1661,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 list(hidden_states.tensor_split(self.attn_tp_size)), local_hidden_states
             )
 
+        nvtx.pop_range()
         # print(
         #     f"hi [{get_tensor_model_parallel_rank()}, {self.layer_id}, {self.__class__.__name__}] forward_ffn_with_scattered_input end {hidden_states.shape=}")
         # print(f"hi [{get_tensor_model_parallel_rank()}, {self.__class__.__name__}] forward_deepep end {self.layer_id=} {self.mlp.__class__.__name__=} "
@@ -1703,6 +1738,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         tbo_subbatch_index: int,
     ):
+        nvtx.push_range("forward_tbo_op_input_layernorm", color="red")
         # print(
         #     f"hi [{get_tensor_model_parallel_rank()}, {self.layer_id}] _forward_tbo_op_input_layernorm start {forward_batch.input_ids.shape=} {hidden_states.shape=}")
 
@@ -1737,8 +1773,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                 tbo_subbatch_index=tbo_subbatch_index,
             )
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_prefill_attn(self, state):
+        nvtx.push_range("forward_tbo_op_prefill_attn", color="yellow")
         state.hidden_states_after_attn = self.self_attn(
             positions=state.positions,
             hidden_states=state.pop("hidden_states_after_input_ln"),
@@ -1748,8 +1786,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                 buffer_size=2, dtype=torch.float32, device="cuda"
             ),
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_decode_attn_0(self, state):
+        nvtx.push_range("forward_tbo_op_decode_attn_0", color="blue")
         state.self_attn_state = self.self_attn.forward_absorb_stage_prepare(
             positions=state.positions,
             hidden_states=state.pop("hidden_states_after_input_ln"),
@@ -1758,9 +1798,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             zero_allocator=BumpAllocator(
                 buffer_size=2, dtype=torch.float32, device="cuda"
             ),
-        )
+        )   
+        nvtx.pop_range()
 
     def _forward_tbo_op_decode_attn_1(self, state):
+        nvtx.push_range("forward_tbo_op_decode_attn_1", color="green")
         assert (
             (get_tensor_model_parallel_world_size() > 1)
             and global_server_args_dict["enable_dp_attention"]
@@ -1774,8 +1816,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                 buffer_size=2, dtype=torch.float32, device="cuda"
             ),
         )
+        nvtx.pop_range()
 
     def _forward_tbo_op_post_attn_layernorm(self, state):
+        nvtx.push_range("forward_tbo_op_post_attn_layernorm", color="green")
         hidden_states, residual = (
             state.pop("hidden_states_after_attn"),
             state.pop("residual_after_input_ln"),
@@ -1810,9 +1854,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states,
             residual,
         )
+        nvtx.pop_range()
 
     # TODO some logic should be in MLP, refactor this
     def _forward_tbo_op_compute_layer_output(self, state):
+        nvtx.push_range("forward_tbo_op_compute_layer_output", color="purple")
         hidden_states = state.pop("hidden_states_from_combine_without_scaling")
         residual = state.pop("residual_after_post_attn_ln")
 
@@ -1846,6 +1892,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             tbo_subbatch_index=state.tbo_subbatch_index,
         )
         state.clear(expect_keys={"positions", "forward_batch", "tbo_subbatch_index"})
+        nvtx.pop_range()
         return output
 
 
