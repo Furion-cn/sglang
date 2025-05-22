@@ -1146,6 +1146,7 @@ class ModelRunner:
             and self.cuda_graph_runner
             and self.cuda_graph_runner.can_run(forward_batch)
         )
+        logger.info(f"forward_batch: batch_size{forward_batch.batch_size} seq_len{forward_batch.seq_lens} seq_lens_sum{forward_batch.seq_lens_sum}")
         logger.info(f"can_run_cuda_graph: {can_run_cuda_graph}")
         if can_run_cuda_graph:
             now = time.time()
