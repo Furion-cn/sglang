@@ -174,8 +174,7 @@ class EPLBManager:
         
         logger.info(f"EPLBManager: Rebalance metrics - "
                    f"time={total_time:.2f}s, "
-                   f"experts={metadata.num_logical_experts}/{metadata.num_physical_experts}, "
-                   f"load_cv={load_stats.get('load_cv', 0.0):.4f}")
+                   f"experts={metadata.num_logical_experts}/{metadata.num_physical_experts}")
     
     def _compute_gpu_expert_stats(self, metadata: ExpertLocationMetadata):
         gpu_expert_stats = {}
