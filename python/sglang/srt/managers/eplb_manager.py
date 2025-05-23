@@ -207,7 +207,7 @@ class EPLBManager:
         
         return gpu_expert_stats
     
-    def _compute_load_balance_metrics(self, snapshot: Optional[Dict[str, Any]]) -> torch.Tensor:
+    def _compute_load_balance_metrics(self, snapshot: Dict[str, Any]) -> torch.Tensor:
         if snapshot is None:
             return {}
             
