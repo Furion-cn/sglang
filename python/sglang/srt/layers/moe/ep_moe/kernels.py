@@ -753,15 +753,6 @@ def grouped_gemm_triton_kernel(
     c_mask = (offs_cm[:, None] < m_range_end) & (offs_cn[None, :] < n_range_end)
     tl.store(c_ptr, c_tile, mask=c_mask)
 
-
-@triton.jit
-def compute_masked_num_tiles_ptr(
-    num_tiles_indptr, masked_m_ptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
-):
-    for i in range(batch_size):
-        m = tl.load(masked_m_ptr + i)
-        tl.store(num_tiles_indptr + i, tl.cdiv(m, BLOCK_SIZE_M))
-
 @triton.jit
 def compute_m_num_tiles_indptr(
     m_num_tiles_indptr, seg_indptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
@@ -861,19 +852,9 @@ def grouped_gemm_masked_triton(
     c_dtype=None,
 ):
     assert len(a.shape) == 3
+    assert len(b.shape) == 3
     assert a.is_contiguous()
     assert b.is_contiguous()
-
-    config = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
-        "BLOCK_SIZE_K": 128,
-    }
-
-    num_tiles_ptr = torch.zeros(a.shape[0] + 1, device=a.device, dtype=torch.int64)
-    compute_masked_num_tiles_ptr[(1,)](
-        num_tiles_ptr, masked_m, a.shape[0], config["BLOCK_SIZE_M"]
-    )
 
     if c is None:
         assert c_dtype is not None
@@ -881,37 +862,46 @@ def grouped_gemm_masked_triton(
 
     grid = lambda META: (
         a.shape[0],
-        triton.cdiv(a.size(0), META["BLOCK_SIZE_M"]) + a.shape[0],
-        triton.cdiv(b.size(1), META["BLOCK_SIZE_N"]),
+        triton.cdiv(a.shape[1], META["BLOCK_SIZE_M"]) + a.shape[0],
+        triton.cdiv(b.shape[1], META["BLOCK_SIZE_N"]),
     )
 
     grouped_gemm_masked_triton_kernel[grid](
         a,
         b,
         c,
-        b.size(1),
-        b.size(2),
+        a.shape[1],
+        b.shape[1],
+        b.shape[2],
         masked_m,
-        num_tiles_ptr,
         a.stride(0),
         a.stride(1),
         b.stride(0),
         b.stride(1),
         c.stride(0),
-        **config,
     )
     return c
 
 # (e, m, k) * (e, n, k) -> (e, m, n)
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128}),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128}),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128}),
+    ],
+    key=['M', 'N', 'K'],
+)
 @triton.jit
 def grouped_gemm_masked_triton_kernel(
     a,
     b,
     c,
+    M,
     N,
     K,
-    masked_m,
-    num_tiles_ptr,
+    masked_m_ptr,
     a_stride_0: tl.constexpr,
     a_stride_1: tl.constexpr,
     b_stride_0: tl.constexpr,
@@ -926,12 +916,13 @@ def grouped_gemm_masked_triton_kernel(
     expert_id = tl.program_id(0)
     pid_m = tl.program_id(1)
     pid_n = tl.program_id(2)
-    total_m_block = tl.load(num_tiles_ptr + expert_id)
-    if pid_m >= total_m_block:
+    len_m = tl.load(masked_m_ptr + expert_id)
+    block_num_m = tl.cdiv(len_m, BLOCK_SIZE_M)
+    if pid_m >= block_num_m:
         return
 
     m_range_start, m_range_end = compute_masked_m_range(
-        expert_id, pid_m, masked_m, BLOCK_SIZE_M
+        expert_id, pid_m, masked_m_ptr, BLOCK_SIZE_M
     )
     if m_range_end - m_range_start <= 0:
         return
