@@ -46,11 +46,11 @@ class EPLBMetricsCollector:
             buckets=[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0],
         )
 
-        self.expert_tokens = Histogram(
+        self.expert_tokens = Gauge(
             name="sglang:eplb_expert_tokens",
-            documentation="Histogram of EPLB expert tokens",
+            documentation="Number of EPLB expert tokens",
             labelnames=list(labels.keys()) + ["layer_id", "expert_id"], 
-            buckets=[64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+            multiprocess_mode="mostrecent",
         )
         
         self.num_experts = Gauge(
@@ -121,10 +121,10 @@ class EPLBMetricsCollector:
         
         for layer_id in range(stats.logical_count.shape[0]):
             for logical_expert_id in range(stats.logical_count.shape[1]):
-                 tokens_count = stats.logical_count[layer_id, logical_expert_id].item()
-                 # each layer each expert has a different number of tokens
-                 self.expert_tokens.labels(**self.labels, layer_id=str(layer_id), expert_id=str(logical_expert_id)).observe(tokens_count)
-                 
+                tokens_count = stats.logical_count[layer_id, logical_expert_id].item()
+                # each layer each expert has a different number of tokens
+                #  self.expert_tokens.labels(**self.labels, layer_id=str(layer_id), expert_id=str(logical_expert_id)).observe(tokens_count)
+                self._log_gauge(self.expert_tokens, tokens_count, {"layer_id": str(layer_id), "expert_id": str(logical_expert_id)})
 
         if stats.physical_to_logical_map_summary:
             self.expert_maps.labels(**self.labels, map_type="physical_to_logical").info(
