@@ -45,6 +45,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     run_moe_ep_preproess,
     silu_and_mul_masked_post_quant_fwd,
     silu_and_mul_triton_kernel,
+    silu_and_mul_masked_fwd,
     tma_align_input_scale,
 )
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
@@ -1256,6 +1257,7 @@ class DeepEPMoE(EPMoE):
     ):
         assert self.quant_method is not None
         assert self.activation == "silu"
+        
         if self.grouped_gemm_runner is None:
             self.grouped_gemm_runner = GroupedGemmRunner(
                 hidden_states.device,
@@ -1295,10 +1297,10 @@ class DeepEPMoE(EPMoE):
             down_input,
             masked_m=masked_m,
         )
+        
         del gateup_output
 
         # GroupGemm-1
-        n = self.w2_weight.size(1)
         down_output = self.grouped_gemm_runner(
             a=down_input,
             b=self.w2_weight,
