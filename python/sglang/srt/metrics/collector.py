@@ -17,6 +17,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Dict, Union, Optional
+import torch
 
 @dataclass
 class EPLBManagerStats:
@@ -26,10 +27,7 @@ class EPLBManagerStats:
     num_physical_experts: int
     num_logical_experts: int
     num_redundant_experts: int
-    load_cv: float
-    load_max: float
-    load_min: float
-    load_mean: float
+    logical_count: torch.Tensor
     physical_to_logical_map_summary: Optional[Dict] = None
     logical_to_physical_map_summary: Optional[Dict] = None
     gpu_expert_stats: Optional[Dict] = None
@@ -46,6 +44,13 @@ class EPLBMetricsCollector:
             documentation="Histogram of EPLB rebalance time in seconds",
             labelnames=list(labels.keys()) + ["stage"], 
             buckets=[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0],
+        )
+
+        self.expert_tokens = Histogram(
+            name="sglang:eplb_expert_tokens",
+            documentation="Histogram of EPLB expert tokens",
+            labelnames=list(labels.keys()) + ["layer_id", "expert_id"], 
+            buckets=[64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
         )
         
         self.num_experts = Gauge(
@@ -97,11 +102,30 @@ class EPLBMetricsCollector:
         self._log_gauge(self.num_experts, stats.num_logical_experts, {"type": "logical"})
         self._log_gauge(self.num_experts, stats.num_redundant_experts, {"type": "redundant"})
         
-        self._log_gauge(self.load_stats, stats.load_cv, {"metric": "cv"})
-        self._log_gauge(self.load_stats, stats.load_max, {"metric": "max"})
-        self._log_gauge(self.load_stats, stats.load_min, {"metric": "min"})
-        self._log_gauge(self.load_stats, stats.load_mean, {"metric": "mean"})
+        mean_load = stats.logical_count.float().mean()
+        std_load = stats.logical_count.float().std()
+        cv = std_load / mean_load if mean_load > 0 else 0
+        max_load = stats.logical_count.max().item()
+        min_load = stats.logical_count.min().item()
         
+        load_cv = float(cv) if isinstance(cv, torch.Tensor) else cv
+        load_max = max_load
+        load_min = min_load
+        load_mean = float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
+
+        self._log_gauge(self.load_stats, load_cv, {"metric": "cv"})
+        self._log_gauge(self.load_stats, load_max, {"metric": "max"})
+        self._log_gauge(self.load_stats, load_min, {"metric": "min"})
+        self._log_gauge(self.load_stats, load_mean, {"metric": "mean"})
+    
+        
+        for layer_id in range(stats.logical_count.shape[0]):
+            for logical_expert_id in range(stats.logical_count.shape[1]):
+                 tokens_count = stats.logical_count[layer_id, logical_expert_id].item()
+                 # each layer each expert has a different number of tokens
+                 self.expert_tokens.labels(**self.labels, layer_id=str(layer_id), expert_id=str(logical_expert_id)).observe(tokens_count)
+                 
+
         if stats.physical_to_logical_map_summary:
             self.expert_maps.labels(**self.labels, map_type="physical_to_logical").info(
                 {"data": json.dumps(stats.physical_to_logical_map_summary)}

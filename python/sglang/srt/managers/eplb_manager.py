@@ -149,9 +149,7 @@ class EPLBManager:
         update_time: float
     ):
         snapshot = self._expert_distribution_storage.get_last_snapshot()
-        
-        load_stats = self._compute_load_balance_metrics(metadata, snapshot)
-        
+                
         p2l_map_summary = self._create_map_summary(metadata.physical_to_logical_map)
         l2p_map_summary = self._create_map_summary(metadata.logical_to_all_physical_map)
         
@@ -164,10 +162,7 @@ class EPLBManager:
             num_physical_experts=metadata.num_physical_experts,
             num_logical_experts=metadata.num_logical_experts,
             num_redundant_experts=metadata.num_physical_experts - metadata.num_logical_experts,
-            load_cv=load_stats.get("load_cv", 0.0),
-            load_max=load_stats.get("max_load", 0.0),
-            load_min=load_stats.get("min_load", 0.0),
-            load_mean=load_stats.get("mean_load", 0.0),
+            logical_count=self._compute_load_balance_metrics(snapshot),
             physical_to_logical_map_summary=p2l_map_summary,
             logical_to_physical_map_summary=l2p_map_summary,
             gpu_expert_stats=gpu_expert_stats
@@ -212,7 +207,7 @@ class EPLBManager:
         
         return gpu_expert_stats
     
-    def _compute_load_balance_metrics(self, metadata: ExpertLocationMetadata, snapshot):
+    def _compute_load_balance_metrics(self, snapshot: Optional[Dict[str, Any]]) -> torch.Tensor:
         if snapshot is None:
             return {}
             
@@ -220,19 +215,21 @@ class EPLBManager:
         
         if not isinstance(logical_count, torch.Tensor):
             logical_count = torch.tensor(logical_count)
+
+
+        return logical_count
+        # mean_load = logical_count.float().mean()
+        # std_load = logical_count.float().std()
+        # cv = std_load / mean_load if mean_load > 0 else 0
+        # max_load = logical_count.max().item()
+        # min_load = logical_count.min().item()
         
-        mean_load = logical_count.float().mean()
-        std_load = logical_count.float().std()
-        cv = std_load / mean_load if mean_load > 0 else 0
-        max_load = logical_count.max().item()
-        min_load = logical_count.min().item()
-        
-        return {
-            "load_cv": float(cv) if isinstance(cv, torch.Tensor) else cv,
-            "max_load": max_load,
-            "min_load": min_load,
-            "mean_load": float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
-        }
+        # return {
+        #     "load_cv": float(cv) if isinstance(cv, torch.Tensor) else cv,
+        #     "max_load": max_load,
+        #     "min_load": min_load,
+        #     "mean_load": float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
+        # }
     
     def _create_map_summary(self, tensor_map):
         if tensor_map is None:
