@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Dict
 import numpy as np
 import torch
 
+from typing import Any, Dict
+
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.managers import deepseek_eplb
 from sglang.srt.managers.expert_distribution_storage import ExpertDistributionStorage
