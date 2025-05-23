@@ -1266,7 +1266,7 @@ class DeepEPMoE(EPMoE):
         n = self.w13_weight.size(1)
         if hidden_states.shape[0] > 0:
             gateup_output = self.grouped_gemm_runner(
-                a=hidden_states,
+                a=DisposibleTensor.maybe_unwrap(hidden_states),
                 b=self.w13_weight,
                 c=None,
                 c_dtype=hidden_states.dtype,
@@ -1276,7 +1276,9 @@ class DeepEPMoE(EPMoE):
             gateup_output = torch.empty(
                 (num_groups, m, n), device=hidden_states.device, dtype=torch.bfloat16
             )
-
+        
+        DisposibleTensor.maybe_dispose(hidden_states)
+        
         # Act
         down_input = torch.empty(
             (

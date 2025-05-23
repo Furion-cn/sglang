@@ -608,6 +608,10 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 return_recv_hook=self.return_recv_hook,
             )
         )
+        if isinstance(packed_recv_hidden, tuple):
+            packed_recv_hidden = [DisposibleTensor(x) for x in packed_recv_hidden]
+        else:
+            packed_recv_hidden = DisposibleTensor(packed_recv_hidden)
         return packed_recv_hidden, packed_recv_count, event, hook
 
     def combine_a(
