@@ -207,10 +207,7 @@ class EPLBManager:
         
         return gpu_expert_stats
     
-    def _compute_load_balance_metrics(self, snapshot: Dict[str, Any]) -> torch.Tensor:
-        if snapshot is None:
-            return {}
-            
+    def _compute_load_balance_metrics(self, snapshot: Dict[str, Any]) -> torch.Tensor:  
         logical_count = snapshot["logical_count"]
         
         if not isinstance(logical_count, torch.Tensor):
@@ -218,18 +215,6 @@ class EPLBManager:
 
 
         return logical_count
-        # mean_load = logical_count.float().mean()
-        # std_load = logical_count.float().std()
-        # cv = std_load / mean_load if mean_load > 0 else 0
-        # max_load = logical_count.max().item()
-        # min_load = logical_count.min().item()
-        
-        # return {
-        #     "load_cv": float(cv) if isinstance(cv, torch.Tensor) else cv,
-        #     "max_load": max_load,
-        #     "min_load": min_load,
-        #     "mean_load": float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
-        # }
     
     def _create_map_summary(self, tensor_map):
         if tensor_map is None:
