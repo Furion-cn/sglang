@@ -1127,9 +1127,6 @@ class ModelRunner:
     def _forward_raw(
         self, forward_batch: ForwardBatch, skip_attn_backend_init: bool
     ) -> LogitsProcessorOutput:
-        print(
-            f"hi forward_raw tp_rank={get_tensor_model_parallel_rank()} {forward_batch.forward_mode=} {forward_batch.batch_size=} {forward_batch.tbo_split_seq_index=} {forward_batch.seq_lens_sum=} {self.forward_pass_id=}"
-        )
         if (
             forward_batch.forward_mode.is_cuda_graph()
             and self.cuda_graph_runner
@@ -1137,16 +1134,6 @@ class ModelRunner:
         ):
             return self.cuda_graph_runner.replay(
                 forward_batch, skip_attn_backend_init=skip_attn_backend_init
-            )
-
-        if not forward_batch.forward_mode.is_extend():
-            print(
-                f"hi WARN! not using cuda graph for non-extend! "
-                f"{sum(forward_batch.global_num_tokens_cpu)=} "
-                f"{forward_batch.can_run_dp_cuda_graph=} "
-                f"{self.server_args.disable_cuda_graph_padding=} "
-                f"{forward_batch.can_run_tbo=} "
-                f"{forward_batch.forward_mode=}"
             )
 
         if forward_batch.forward_mode.is_decode():
