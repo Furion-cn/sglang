@@ -65,6 +65,7 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
+import torch.compiler
 
 from sglang.srt.layers.moe.ep_moe.kernels import (
     deepep_permute_triton_kernel,
@@ -528,7 +529,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             event,
             hook,
         )
-
+    @torch.compiler.disable
     def dispatch_b(
         self,
         hidden_states,
@@ -627,6 +628,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         )
         return hidden_states, event, hook
 
+    @torch.compiler.disable
     def combine_b(self, hidden_states, event, hook):
         hook() if self.return_recv_hook else event.current_stream_wait()
         return hidden_states
