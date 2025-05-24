@@ -1064,13 +1064,64 @@ def set_prometheus_multiproc_dir():
 def add_prometheus_middleware(app):
     # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
     from prometheus_client import CollectorRegistry, make_asgi_app, multiprocess
+    import logging
+    from starlette.responses import Response
+    import sys
+
+    def get_eplb_metrics_collector():
+        try:
+            from sglang.srt.metrics.collector import eplb_metrics_collector
+            return eplb_metrics_collector
+        except ImportError:
+            return None
+        except AttributeError:
+            return None
+
+    logger = logging.getLogger(__name__)
 
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    
+    async def custom_metrics_handler(request):
+        eplb_collector = get_eplb_metrics_collector()
+        
+        logger.debug(f"custom_metrics_handler called, eplb_collector: {eplb_collector is not None}")
+        
+        if eplb_collector is not None and hasattr(eplb_collector, 'generate_custom_metrics'):
+            try:
+                logger.debug("Using custom metrics generator for EPLB metrics")
+                metrics_data = eplb_collector.generate_custom_metrics()
+                logger.debug(f"Custom metrics generated, length: {len(metrics_data)} chars")
+                return Response(metrics_data, media_type="text/plain; charset=utf-8")
+            except Exception as e:
+                logger.error(f"Error generating custom metrics: {e}", exc_info=True)
+                import traceback
+                stack_trace = traceback.format_exc()
+                logger.error(f"Stack trace: {stack_trace}")
+                logger.debug("Falling back to standard metrics generation")
+        else:
+            logger.info("No EPLB collector found or no generate_custom_metrics method, using standard generation")
+        
+        try:
+            from prometheus_client import generate_latest
+            metrics_data = generate_latest(registry)
+            logger.info(f"Standard metrics generated, length: {len(metrics_data)} chars")
+            return Response(metrics_data, media_type="text/plain; charset=utf-8")
+        except Exception as e:
+            logger.error(f"Error generating standard metrics: {e}", exc_info=True)
+            error_reason = str(e).replace('"', "'")  # 避免引号问题
+            return Response(
+                f"# HELP metrics_error Error generating metrics\n"
+                f"# TYPE metrics_error gauge\n"
+                f"metrics_error{{reason=\"{error_reason}\"}} 1",
+                media_type="text/plain; charset=utf-8",
+                status_code=500
+            )
+
+    from starlette.routing import Route
+    metrics_route = Route("/metrics", custom_metrics_handler)
 
     # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
     app.routes.append(metrics_route)
 
 

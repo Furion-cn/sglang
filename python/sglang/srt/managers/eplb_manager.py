@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Dict
 import numpy as np
 import torch
 
+from typing import Any, Dict
+
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.managers import deepseek_eplb
 from sglang.srt.managers.expert_distribution_storage import ExpertDistributionStorage
@@ -19,7 +21,7 @@ from sglang.srt.managers.io_struct import (
     EplbRebalanceReqInput,
     UpdateExpertLocationReqInput,
 )
-from sglang.srt.metrics.collector import EPLBManagerStats, EPLBMetricsCollector
+from sglang.srt.metrics.collector import EPLBManagerStats, EPLBMetricsCollector, create_eplb_metrics_collector
 from sglang.srt.server_args import ServerArgs
 
 if TYPE_CHECKING:
@@ -36,7 +38,7 @@ class EPLBManager:
             dir_data=Path(self._server_args.eplb_storage_dir)
             / "expert_distribution_storage"
         )
-        self._metrics_collector = EPLBMetricsCollector(
+        self._metrics_collector = create_eplb_metrics_collector(
             labels={"model": server_args.served_model_name, "node_rank": str(server_args.node_rank)}
         )
         self._expert_location_metadata = None
@@ -118,6 +120,8 @@ class EPLBManager:
             f"redundant_experts={metadata.num_physical_experts - metadata.num_logical_experts}"
         )
         
+
+        
         physical_expert_counts = {}
         for layer_id in range(metadata.num_layers):
             for rank_id in range(metadata.num_physical_experts // metadata.num_local_physical_experts):
@@ -133,13 +137,6 @@ class EPLBManager:
                 if replicas not in replica_counts:
                     replica_counts[replicas] = 0
                 replica_counts[replicas] += 1
-        
-        # logger.info(f"EPLBManager: Expert replica distribution: {json.dumps(replica_counts)}")
-        # p2l_map = {f"rank_{i}": row.tolist() for i, row in enumerate(metadata.physical_to_logical_map)}
-        # logger.info(f"EPLBManager: Expert physical_to_logical_map: {json.dumps(p2l_map)}")
-        
-        # l2p_map = {f"expert_{i}": row.tolist() for i, row in enumerate(metadata.logical_to_all_physical_map)}
-        # logger.info(f"EPLBManager: Expert logical_to_all_physical_map: {json.dumps(l2p_map)}")
     
     def _collect_and_report_metrics(
         self, 
@@ -149,9 +146,7 @@ class EPLBManager:
         update_time: float
     ):
         snapshot = self._expert_distribution_storage.get_last_snapshot()
-        
-        load_stats = self._compute_load_balance_metrics(metadata, snapshot)
-        
+                
         p2l_map_summary = self._create_map_summary(metadata.physical_to_logical_map)
         l2p_map_summary = self._create_map_summary(metadata.logical_to_all_physical_map)
         
@@ -164,10 +159,7 @@ class EPLBManager:
             num_physical_experts=metadata.num_physical_experts,
             num_logical_experts=metadata.num_logical_experts,
             num_redundant_experts=metadata.num_physical_experts - metadata.num_logical_experts,
-            load_cv=load_stats.get("load_cv", 0.0),
-            load_max=load_stats.get("max_load", 0.0),
-            load_min=load_stats.get("min_load", 0.0),
-            load_mean=load_stats.get("mean_load", 0.0),
+            logical_count=self._compute_load_balance_metrics(snapshot),
             physical_to_logical_map_summary=p2l_map_summary,
             logical_to_physical_map_summary=l2p_map_summary,
             gpu_expert_stats=gpu_expert_stats
@@ -175,10 +167,16 @@ class EPLBManager:
         
         self._metrics_collector.log_stats(stats)
         
+        total_replica_metrics = 0
+        for gpu_id, layer_stats in gpu_expert_stats.items():
+            for layer_id, metrics in layer_stats.items():
+                if "logical_expert_counts" in metrics:
+                    total_replica_metrics += len(metrics["logical_expert_counts"])
+        
         logger.info(f"EPLBManager: Rebalance metrics - "
                    f"time={total_time:.2f}s, "
                    f"experts={metadata.num_logical_experts}/{metadata.num_physical_experts}, "
-                   f"load_cv={load_stats.get('load_cv', 0.0):.4f}")
+                   f"total_replica_metrics={total_replica_metrics}")
     
     def _compute_gpu_expert_stats(self, metadata: ExpertLocationMetadata):
         gpu_expert_stats = {}
@@ -198,41 +196,29 @@ class EPLBManager:
                 unique_logical_experts = torch.unique(physical_to_logical)
                 
                 logical_expert_counts = {}
+                
                 for logical_id in unique_logical_experts.tolist():
-                    if logical_id >= 0: 
+                    if logical_id >= 0:
                         count = torch.sum(physical_to_logical == logical_id).item()
                         logical_expert_counts[logical_id] = count
                     
                 gpu_expert_stats[gpu_id][layer_id] = {
                     "num_physical_experts": metadata.num_local_physical_experts,
-                    "num_unique_logical_experts": len(unique_logical_experts),
-                    "utilization_ratio": len(unique_logical_experts) / metadata.num_local_physical_experts,
+                    "num_unique_logical_experts": len([x for x in unique_logical_experts.tolist() if x >= 0]),
+                    "utilization_ratio": len([x for x in unique_logical_experts.tolist() if x >= 0]) / metadata.num_local_physical_experts,
                     "logical_expert_counts": logical_expert_counts
                 }
         
         return gpu_expert_stats
     
-    def _compute_load_balance_metrics(self, metadata: ExpertLocationMetadata, snapshot):
-        if snapshot is None:
-            return {}
-            
+    def _compute_load_balance_metrics(self, snapshot: Dict[str, Any]) -> torch.Tensor:  
         logical_count = snapshot["logical_count"]
         
         if not isinstance(logical_count, torch.Tensor):
             logical_count = torch.tensor(logical_count)
-        
-        mean_load = logical_count.float().mean()
-        std_load = logical_count.float().std()
-        cv = std_load / mean_load if mean_load > 0 else 0
-        max_load = logical_count.max().item()
-        min_load = logical_count.min().item()
-        
-        return {
-            "load_cv": float(cv) if isinstance(cv, torch.Tensor) else cv,
-            "max_load": max_load,
-            "min_load": min_load,
-            "mean_load": float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
-        }
+
+
+        return logical_count
     
     def _create_map_summary(self, tensor_map):
         if tensor_map is None:

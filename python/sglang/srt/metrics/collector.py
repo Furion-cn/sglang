@@ -17,6 +17,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Dict, Union, Optional
+import torch
 
 @dataclass
 class EPLBManagerStats:
@@ -26,10 +27,7 @@ class EPLBManagerStats:
     num_physical_experts: int
     num_logical_experts: int
     num_redundant_experts: int
-    load_cv: float
-    load_max: float
-    load_min: float
-    load_mean: float
+    logical_count: torch.Tensor
     physical_to_logical_map_summary: Optional[Dict] = None
     logical_to_physical_map_summary: Optional[Dict] = None
     gpu_expert_stats: Optional[Dict] = None
@@ -41,11 +39,20 @@ class EPLBMetricsCollector:
         
         self.labels = labels
         
+        self._current_logical_expert_data = {}
+        
         self.rebalance_time = Histogram(
             name="sglang:eplb_rebalance_time_seconds",
             documentation="Histogram of EPLB rebalance time in seconds",
             labelnames=list(labels.keys()) + ["stage"], 
             buckets=[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0],
+        )
+
+        self.expert_tokens = Gauge(
+            name="sglang:eplb_expert_tokens",
+            documentation="Number of EPLB expert tokens",
+            labelnames=list(labels.keys()) + ["layer_id", "expert_id"], 
+            multiprocess_mode="mostrecent",
         )
         
         self.num_experts = Gauge(
@@ -60,12 +67,6 @@ class EPLBMetricsCollector:
             documentation="Expert load statistics",
             labelnames=list(labels.keys()) + ["metric"],
             multiprocess_mode="mostrecent",
-        )
-        
-        self.expert_maps = Info(
-            name="sglang:eplb_expert_maps",
-            documentation="Expert distribution maps",
-            labelnames=list(labels.keys()) + ["map_type"],
         )
         
         self.gpu_expert_stats = Gauge(
@@ -88,31 +89,135 @@ class EPLBMetricsCollector:
             labels.update(extra_labels)
         gauge.labels(**labels).set(data)
     
+    def generate_custom_metrics(self):
+        from prometheus_client import generate_latest, REGISTRY
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        logger.debug(f"generate_custom_metrics called, _current_logical_expert_data has {len(self._current_logical_expert_data)} entries")
+        if self._current_logical_expert_data:
+            logger.info(f"Sample entries: {list(self._current_logical_expert_data.items())[:3]}")
+        
+        all_metrics = generate_latest(REGISTRY).decode('utf-8')
+        
+        has_original_metric = 'sglang:eplb_logical_expert_replicas' in all_metrics
+        logger.debug(f"Original metrics contains logical_expert_replicas: {has_original_metric}")
+        
+        metrics_blocks = {}
+        current_block = []
+        current_name = None
+        
+        for line in all_metrics.split('\n'):
+            if line.startswith('# HELP '):
+                if current_name and current_block:
+                    metrics_blocks[current_name] = current_block
+                current_name = line.split(' ')[2]
+                current_block = [line]
+            elif line.strip():
+                if current_block is not None:
+                    current_block.append(line)
+        
+        if current_name and current_block:
+            metrics_blocks[current_name] = current_block
+        
+        expert_metrics_count = 0
+        if 'sglang:eplb_logical_expert_replicas' in metrics_blocks:
+            logger.debug("Found existing logical_expert_replicas block, replacing it")
+            help_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][0]
+            type_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][1]
+            
+            new_lines = [help_line, type_line]
+            
+            for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
+                label_parts = [
+                    f'gpu_id="{gpu_id}"',
+                    f'layer_id="{layer_id}"',
+                    f'logical_expert_id="{logical_id}"'
+                ]
+                for label_name, label_value in self.labels.items():
+                    label_parts.append(f'{label_name}="{label_value}"')
+                labels_str = ','.join(label_parts)
+                
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {float(value)}')
+                expert_metrics_count += 1
+            
+            metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
+        else:
+            logger.info("No existing logical_expert_replicas block found, creating new one")
+            new_lines = [
+                "# HELP sglang:eplb_logical_expert_replicas Number of physical expert replicas for each logical expert",
+                "# TYPE sglang:eplb_logical_expert_replicas gauge"
+            ]
+            
+            for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
+                label_parts = [
+                    f'gpu_id="{gpu_id}"',
+                    f'layer_id="{layer_id}"',
+                    f'logical_expert_id="{logical_id}"'
+                ]
+                for label_name, label_value in self.labels.items():
+                    label_parts.append(f'{label_name}="{label_value}"')
+                labels_str = ','.join(label_parts)
+                
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {float(value)}')
+                expert_metrics_count += 1
+            
+            metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
+        
+        total_metrics_count = sum(len(block) - 2 for block in metrics_blocks.values())  # 减去每个块的HELP和TYPE行
+        logger.debug(f"Generated custom metrics: {len(metrics_blocks)} metric types, "
+                    f"{total_metrics_count} total data points, "
+                    f"{expert_metrics_count} logical expert replica metrics")
+        
+        output_lines = []
+        for block_name, block_lines in metrics_blocks.items():
+            output_lines.extend(block_lines)
+        
+        return '\n'.join(output_lines)
+    
     def log_stats(self, stats: EPLBManagerStats) -> None:
         self.rebalance_time.labels(**self.labels, stage="total").observe(stats.rebalance_total_time)
         self.rebalance_time.labels(**self.labels, stage="compute").observe(stats.rebalance_compute_time)
         self.rebalance_time.labels(**self.labels, stage="update").observe(stats.rebalance_update_time)
         
+        self.num_experts._metrics.clear()
         self._log_gauge(self.num_experts, stats.num_physical_experts, {"type": "physical"})
         self._log_gauge(self.num_experts, stats.num_logical_experts, {"type": "logical"})
         self._log_gauge(self.num_experts, stats.num_redundant_experts, {"type": "redundant"})
         
-        self._log_gauge(self.load_stats, stats.load_cv, {"metric": "cv"})
-        self._log_gauge(self.load_stats, stats.load_max, {"metric": "max"})
-        self._log_gauge(self.load_stats, stats.load_min, {"metric": "min"})
-        self._log_gauge(self.load_stats, stats.load_mean, {"metric": "mean"})
+        if stats.logical_count is not None:
+            mean_load = stats.logical_count.float().mean()
+            std_load = stats.logical_count.float().std()
+            cv = std_load / mean_load if mean_load > 0 else 0
+            max_load = stats.logical_count.max().item()
+            min_load = stats.logical_count.min().item()
+            
+            load_cv = float(cv) if isinstance(cv, torch.Tensor) else cv
+            load_max = max_load
+            load_min = min_load
+            load_mean = float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
+
+            self.load_stats._metrics.clear()
+            self._log_gauge(self.load_stats, load_cv, {"metric": "cv"})
+            self._log_gauge(self.load_stats, load_max, {"metric": "max"})
+            self._log_gauge(self.load_stats, load_min, {"metric": "min"})
+            self._log_gauge(self.load_stats, load_mean, {"metric": "mean"})
         
-        if stats.physical_to_logical_map_summary:
-            self.expert_maps.labels(**self.labels, map_type="physical_to_logical").info(
-                {"data": json.dumps(stats.physical_to_logical_map_summary)}
-            )
-        
-        if stats.logical_to_physical_map_summary:
-            self.expert_maps.labels(**self.labels, map_type="logical_to_physical").info(
-                {"data": json.dumps(stats.logical_to_physical_map_summary)}
-            )
+            self.expert_tokens._metrics.clear()
+            for layer_id in range(stats.logical_count.shape[0]):
+                for logical_expert_id in range(stats.logical_count.shape[1]):
+                    tokens_count = stats.logical_count[layer_id, logical_expert_id].item()
+                    # each layer each expert has a different number of tokens
+                    self._log_gauge(self.expert_tokens, tokens_count, {"layer_id": str(layer_id), "expert_id": str(logical_expert_id)})
             
         if stats.gpu_expert_stats:
+            self._current_logical_expert_data = {}
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"log_stats called with gpu_expert_stats containing {len(stats.gpu_expert_stats)} GPUs")
+            
             for gpu_id, layer_stats in stats.gpu_expert_stats.items():
                 for layer_id, metrics in layer_stats.items():
                     for metric_name, value in metrics.items():
@@ -125,13 +230,16 @@ class EPLBMetricsCollector:
                             ).set(value)
                     
                     if "logical_expert_counts" in metrics:
-                        for logical_id, count in metrics["logical_expert_counts"].items():
-                            self.logical_expert_replicas.labels(
-                                **self.labels,
-                                gpu_id=str(gpu_id),
-                                layer_id=str(layer_id),
-                                logical_expert_id=str(logical_id)
-                            ).set(count)
+                        for logical_id, local_count in metrics["logical_expert_counts"].items():
+                            self._current_logical_expert_data[(str(gpu_id), str(layer_id), str(logical_id))] = local_count
+            
+            logger.info(f"Updated _current_logical_expert_data with {len(self._current_logical_expert_data)} entries")
+            if self._current_logical_expert_data:
+                logger.info(f"Sample entries: {list(self._current_logical_expert_data.items())[:3]}")
+        else:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("log_stats called but stats.gpu_expert_stats is None or empty")
 
 
 @dataclass
@@ -374,3 +482,10 @@ class TokenizerMetricsCollector:
             if adjusted_interval <= bound:
                 his._buckets[i].inc(num_new_tokens)
                 break
+
+eplb_metrics_collector = None
+
+def create_eplb_metrics_collector(labels: Dict[str, str]) -> EPLBMetricsCollector:
+    global eplb_metrics_collector
+    eplb_metrics_collector = EPLBMetricsCollector(labels)
+    return eplb_metrics_collector
