@@ -93,12 +93,65 @@ class EPLBMetricsCollector:
             labels.update(extra_labels)
         gauge.labels(**labels).set(data)
     
+    def _recreate_logical_expert_replicas(self) -> None:
+        """原地重新创建logical_expert_replicas，保持固定名称但清空历史数据"""
+        try:
+            from prometheus_client import Gauge, REGISTRY
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # 步骤1：尝试从registry中移除旧的collector
+            collectors_to_remove = []
+            for collector in list(REGISTRY._collector_to_names.keys()):
+                # 检查是否是我们的logical_expert_replicas
+                if hasattr(collector, '_name') and collector._name == 'sglang:eplb_logical_expert_replicas':
+                    collectors_to_remove.append(collector)
+                elif hasattr(collector, 'describe'):
+                    try:
+                        for metric_family in collector.describe():
+                            if metric_family.name == 'sglang:eplb_logical_expert_replicas':
+                                collectors_to_remove.append(collector)
+                                break
+                    except:
+                        pass
+            
+            # 移除旧的collectors
+            for collector in collectors_to_remove:
+                try:
+                    REGISTRY.unregister(collector)
+                    logger.info("Successfully unregistered old logical_expert_replicas")
+                except Exception as e:
+                    logger.debug(f"Failed to unregister: {e}")
+            
+            # 步骤2：创建全新的logical_expert_replicas
+            self.logical_expert_replicas = Gauge(
+                name="sglang:eplb_logical_expert_replicas",
+                documentation="Number of physical expert replicas for each logical expert (recreated)",
+                labelnames=list(self.labels.keys()) + ["gpu_id", "layer_id", "logical_expert_id"],
+                multiprocess_mode="mostrecent",
+            )
+            
+            logger.info("Successfully recreated logical_expert_replicas with fixed name")
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to recreate logical_expert_replicas: {e}. Trying fallback method.")
+            
+            # fallback：如果上面的方法失败，至少清空内部状态
+            try:
+                if hasattr(self.logical_expert_replicas, '_metrics'):
+                    self.logical_expert_replicas._metrics.clear()
+                logger.info("Used fallback: cleared internal metrics state")
+            except:
+                logger.error("All cleanup methods failed")
+    
     def log_stats(self, stats: EPLBManagerStats) -> None:
         self.rebalance_time.labels(**self.labels, stage="total").observe(stats.rebalance_total_time)
         self.rebalance_time.labels(**self.labels, stage="compute").observe(stats.rebalance_compute_time)
         self.rebalance_time.labels(**self.labels, stage="update").observe(stats.rebalance_update_time)
         
-        self.num_experts.clear()
+        self.num_experts._metrics.clear()
         self._log_gauge(self.num_experts, stats.num_physical_experts, {"type": "physical"})
         self._log_gauge(self.num_experts, stats.num_logical_experts, {"type": "logical"})
         self._log_gauge(self.num_experts, stats.num_redundant_experts, {"type": "redundant"})
@@ -114,13 +167,13 @@ class EPLBMetricsCollector:
         load_min = min_load
         load_mean = float(mean_load) if isinstance(mean_load, torch.Tensor) else mean_load
 
-        self.load_stats.clear()
+        self.load_stats._metrics.clear()
         self._log_gauge(self.load_stats, load_cv, {"metric": "cv"})
         self._log_gauge(self.load_stats, load_max, {"metric": "max"})
         self._log_gauge(self.load_stats, load_min, {"metric": "min"})
         self._log_gauge(self.load_stats, load_mean, {"metric": "mean"})
     
-        self.expert_tokens.clear()
+        self.expert_tokens._metrics.clear()
         for layer_id in range(stats.logical_count.shape[0]):
             for logical_expert_id in range(stats.logical_count.shape[1]):
                 tokens_count = stats.logical_count[layer_id, logical_expert_id].item()
@@ -139,11 +192,9 @@ class EPLBMetricsCollector:
             )
             
         if stats.gpu_expert_stats:
-            self.logical_expert_replicas.clear()
-            self.gpu_expert_stats.clear()
-            
-            # 收集新的标签组合
-            new_labels = set()
+            # 原地重新创建 logical_expert_replicas，保持固定名称
+            self._recreate_logical_expert_replicas()
+            self.gpu_expert_stats._metrics.clear()
             
             for gpu_id, layer_stats in stats.gpu_expert_stats.items():
                 for layer_id, metrics in layer_stats.items():
@@ -158,9 +209,6 @@ class EPLBMetricsCollector:
                     
                     if "logical_expert_counts" in metrics:
                         for logical_id, local_count in metrics["logical_expert_counts"].items():
-                            label_combo = (str(gpu_id), str(layer_id), str(logical_id))
-                            new_labels.add(label_combo)
-                            
                             self.logical_expert_replicas.labels(
                                 **self.labels,
                                 gpu_id=str(gpu_id),
