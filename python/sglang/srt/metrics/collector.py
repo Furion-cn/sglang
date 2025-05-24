@@ -164,7 +164,7 @@ class EPLBMetricsCollector:
                 labels_str = ','.join(label_parts)
                 
                 # 添加指标行（移除时间戳，让Prometheus自动处理）
-                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value}')
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {float(value)}')
                 expert_metrics_count += 1
             
             # 替换原始块（即使new_lines只有HELP和TYPE行）
@@ -190,7 +190,7 @@ class EPLBMetricsCollector:
                 labels_str = ','.join(label_parts)
                 
                 # 添加指标行（移除时间戳，让Prometheus自动处理）
-                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value}')
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {float(value)}')
                 expert_metrics_count += 1
             
             metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
