@@ -150,22 +150,21 @@ class EPLBMetricsCollector:
             
             # 使用我们的当前数据生成新的指标行
             new_lines = [help_line, type_line]
-            timestamp_ms = int(time.time() * 1000)
             
             for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
-                # 构建标签字符串
-                label_parts = []
-                for label_name, label_value in self.labels.items():
-                    label_parts.append(f'{label_name}="{label_value}"')
-                label_parts.extend([
+                # 构建标签字符串，保持与其他指标一致的顺序
+                label_parts = [
                     f'gpu_id="{gpu_id}"',
                     f'layer_id="{layer_id}"',
                     f'logical_expert_id="{logical_id}"'
-                ])
+                ]
+                # 添加基础标签
+                for label_name, label_value in self.labels.items():
+                    label_parts.append(f'{label_name}="{label_value}"')
                 labels_str = ','.join(label_parts)
                 
-                # 添加指标行
-                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value} {timestamp_ms}')
+                # 添加指标行（移除时间戳，让Prometheus自动处理）
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value}')
                 expert_metrics_count += 1
             
             # 替换原始块（即使new_lines只有HELP和TYPE行）
@@ -177,22 +176,21 @@ class EPLBMetricsCollector:
                 "# HELP sglang:eplb_logical_expert_replicas Number of physical expert replicas for each logical expert",
                 "# TYPE sglang:eplb_logical_expert_replicas gauge"
             ]
-            timestamp_ms = int(time.time() * 1000)
             
             for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
-                # 构建标签字符串
-                label_parts = []
-                for label_name, label_value in self.labels.items():
-                    label_parts.append(f'{label_name}="{label_value}"')
-                label_parts.extend([
+                # 构建标签字符串，保持与其他指标一致的顺序
+                label_parts = [
                     f'gpu_id="{gpu_id}"',
                     f'layer_id="{layer_id}"',
                     f'logical_expert_id="{logical_id}"'
-                ])
+                ]
+                # 添加基础标签
+                for label_name, label_value in self.labels.items():
+                    label_parts.append(f'{label_name}="{label_value}"')
                 labels_str = ','.join(label_parts)
                 
-                # 添加指标行
-                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value} {timestamp_ms}')
+                # 添加指标行（移除时间戳，让Prometheus自动处理）
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value}')
                 expert_metrics_count += 1
             
             metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
