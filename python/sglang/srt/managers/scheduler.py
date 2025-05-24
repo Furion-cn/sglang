@@ -1127,7 +1127,9 @@ class Scheduler(
         gap_latency = time.perf_counter() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.perf_counter()
         self.last_input_throughput = self.num_prefill_tokens / gap_latency
-        self.num_prefill_tokens = 0
+        self.num_prefill_tokens = sum(
+            [len(req.origin_input_ids) for req in can_run_list]
+        )
 
         num_used = self.max_total_num_tokens - (
             self.token_to_kv_pool_allocator.available_size()
@@ -1138,7 +1140,8 @@ class Scheduler(
         f = (
             f"Prefill batch. "
             f"#new-seq: {num_new_seq}, "
-            f"#prefill-length: {sum([len(req.origin_input_ids) for req in can_run_list])}, "
+            f"#input-throughput: {self.last_input_throughput:.2f}, "
+            f"#prefill-length: {self.num_prefill_tokens}, "
             f"#new-token: {adder.log_input_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
