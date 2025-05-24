@@ -39,7 +39,6 @@ class EPLBMetricsCollector:
         
         self.labels = labels
         
-        # 存储当前的logical_expert_replicas数据，用于自定义输出
         self._current_logical_expert_data = {}
         
         self.rebalance_time = Histogram(
@@ -91,31 +90,20 @@ class EPLBMetricsCollector:
         gauge.labels(**labels).set(data)
     
     def generate_custom_metrics(self):
-        """
-        生成自定义的Prometheus格式metrics文本，包含所有metrics指标。
-        对于logical_expert_replicas指标，使用我们存储的当前数据，过滤掉历史数据。
-        对于其他指标，直接使用Prometheus客户端库生成的文本。
-        """
-        import time
         from prometheus_client import generate_latest, REGISTRY
         import logging
         
-        # 获取日志记录器
         logger = logging.getLogger(__name__)
         
-        # 调试：检查当前数据
         logger.info(f"generate_custom_metrics called, _current_logical_expert_data has {len(self._current_logical_expert_data)} entries")
         if self._current_logical_expert_data:
             logger.info(f"Sample entries: {list(self._current_logical_expert_data.items())[:3]}")
         
-        # 从Prometheus客户端库生成所有指标的文本
         all_metrics = generate_latest(REGISTRY).decode('utf-8')
         
-        # 调试：检查原始metrics中是否有这个指标
         has_original_metric = 'sglang:eplb_logical_expert_replicas' in all_metrics
         logger.info(f"Original metrics contains logical_expert_replicas: {has_original_metric}")
         
-        # 分割指标文本为不同的指标块
         metrics_blocks = {}
         current_block = []
         current_name = None
@@ -130,72 +118,58 @@ class EPLBMetricsCollector:
                 if current_block is not None:
                     current_block.append(line)
         
-        # 添加最后一个块
         if current_name and current_block:
             metrics_blocks[current_name] = current_block
         
-        # 替换logical_expert_replicas指标块
         expert_metrics_count = 0
         if 'sglang:eplb_logical_expert_replicas' in metrics_blocks:
             logger.info("Found existing logical_expert_replicas block, replacing it")
-            # 保留HELP和TYPE行
             help_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][0]
             type_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][1]
             
-            # 使用我们的当前数据生成新的指标行
             new_lines = [help_line, type_line]
             
             for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
-                # 构建标签字符串，保持与其他指标一致的顺序
                 label_parts = [
                     f'gpu_id="{gpu_id}"',
                     f'layer_id="{layer_id}"',
                     f'logical_expert_id="{logical_id}"'
                 ]
-                # 添加基础标签
                 for label_name, label_value in self.labels.items():
                     label_parts.append(f'{label_name}="{label_value}"')
                 labels_str = ','.join(label_parts)
                 
-                # 添加指标行（移除时间戳，让Prometheus自动处理）
                 new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {float(value)}')
                 expert_metrics_count += 1
             
-            # 替换原始块（即使new_lines只有HELP和TYPE行）
             metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
         else:
             logger.info("No existing logical_expert_replicas block found, creating new one")
-            # 如果原始输出中没有这个指标块，创建一个新的
             new_lines = [
                 "# HELP sglang:eplb_logical_expert_replicas Number of physical expert replicas for each logical expert",
                 "# TYPE sglang:eplb_logical_expert_replicas gauge"
             ]
             
             for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
-                # 构建标签字符串，保持与其他指标一致的顺序
                 label_parts = [
                     f'gpu_id="{gpu_id}"',
                     f'layer_id="{layer_id}"',
                     f'logical_expert_id="{logical_id}"'
                 ]
-                # 添加基础标签
                 for label_name, label_value in self.labels.items():
                     label_parts.append(f'{label_name}="{label_value}"')
                 labels_str = ','.join(label_parts)
                 
-                # 添加指标行（移除时间戳，让Prometheus自动处理）
                 new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {float(value)}')
                 expert_metrics_count += 1
             
             metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
         
-        # 记录处理的指标数量
         total_metrics_count = sum(len(block) - 2 for block in metrics_blocks.values())  # 减去每个块的HELP和TYPE行
         logger.info(f"Generated custom metrics: {len(metrics_blocks)} metric types, "
                     f"{total_metrics_count} total data points, "
                     f"{expert_metrics_count} logical expert replica metrics")
         
-        # 重新组合所有指标块
         output_lines = []
         for block_name, block_lines in metrics_blocks.items():
             output_lines.extend(block_lines)
@@ -212,7 +186,6 @@ class EPLBMetricsCollector:
         self._log_gauge(self.num_experts, stats.num_logical_experts, {"type": "logical"})
         self._log_gauge(self.num_experts, stats.num_redundant_experts, {"type": "redundant"})
         
-        # 检查logical_count是否为None
         if stats.logical_count is not None:
             mean_load = stats.logical_count.float().mean()
             std_load = stats.logical_count.float().std()
@@ -236,18 +209,15 @@ class EPLBMetricsCollector:
                 for logical_expert_id in range(stats.logical_count.shape[1]):
                     tokens_count = stats.logical_count[layer_id, logical_expert_id].item()
                     # each layer each expert has a different number of tokens
-                    #  self.expert_tokens.labels(**self.labels, layer_id=str(layer_id), expert_id=str(logical_expert_id)).observe(tokens_count)
                     self._log_gauge(self.expert_tokens, tokens_count, {"layer_id": str(layer_id), "expert_id": str(logical_expert_id)})
             
         if stats.gpu_expert_stats:
-            # 清空当前的logical_expert_data
             self._current_logical_expert_data = {}
             
             import logging
             logger = logging.getLogger(__name__)
             logger.info(f"log_stats called with gpu_expert_stats containing {len(stats.gpu_expert_stats)} GPUs")
             
-            # 设置新数据
             for gpu_id, layer_stats in stats.gpu_expert_stats.items():
                 for layer_id, metrics in layer_stats.items():
                     for metric_name, value in metrics.items():
@@ -261,16 +231,7 @@ class EPLBMetricsCollector:
                     
                     if "logical_expert_counts" in metrics:
                         for logical_id, local_count in metrics["logical_expert_counts"].items():
-                            # 更新用于自定义输出的数据结构
                             self._current_logical_expert_data[(str(gpu_id), str(layer_id), str(logical_id))] = local_count
-                            
-                            # 不再直接更新Prometheus指标，只通过generate_custom_metrics输出
-                            # self.logical_expert_replicas.labels(
-                            #     **self.labels,
-                            #     gpu_id=str(gpu_id),
-                            #     layer_id=str(layer_id),
-                            #     logical_expert_id=str(logical_id)
-                            # ).set(local_count)
             
             logger.info(f"Updated _current_logical_expert_data with {len(self._current_logical_expert_data)} entries")
             if self._current_logical_expert_data:
