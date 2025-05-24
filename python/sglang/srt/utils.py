@@ -1064,13 +1064,65 @@ def set_prometheus_multiproc_dir():
 def add_prometheus_middleware(app):
     # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
     from prometheus_client import CollectorRegistry, make_asgi_app, multiprocess
+    import logging
+    from starlette.responses import Response
+    import sys
+
+    # 获取全局的EPLBMetricsCollector实例，如果存在的话
+    def get_eplb_metrics_collector():
+        for module_name, module in sys.modules.items():
+            if 'sglang.srt.metrics.collector' in module_name:
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if attr_name == 'eplb_metrics_collector' and attr is not None:
+                        return attr
+        return None
+
+    # 获取日志记录器
+    logger = logging.getLogger(__name__)
 
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    
+    # 创建自定义的metrics处理程序
+    async def custom_metrics_handler(request):
+        eplb_collector = get_eplb_metrics_collector()
+        
+        if eplb_collector is not None and hasattr(eplb_collector, 'generate_custom_metrics'):
+            try:
+                # 使用自定义的metrics生成函数
+                logger.debug("Using custom metrics generator for EPLB metrics")
+                metrics_data = eplb_collector.generate_custom_metrics()
+                return Response(metrics_data, media_type="text/plain; charset=utf-8")
+            except Exception as e:
+                logger.error(f"Error generating custom metrics: {e}", exc_info=True)
+                # 记录更详细的错误信息
+                import traceback
+                stack_trace = traceback.format_exc()
+                logger.error(f"Stack trace: {stack_trace}")
+                logger.debug("Falling back to standard metrics generation")
+        
+        # 如果没有自定义生成器或出错，则使用标准方法
+        try:
+            from prometheus_client import generate_latest
+            metrics_data = generate_latest(registry)
+            return Response(metrics_data, media_type="text/plain; charset=utf-8")
+        except Exception as e:
+            # 如果标准方法也失败，返回一个简单的错误消息
+            logger.error(f"Error generating standard metrics: {e}", exc_info=True)
+            return Response(
+                f"# HELP metrics_error Error generating metrics\n"
+                f"# TYPE metrics_error gauge\n"
+                f"metrics_error{{reason=\"{str(e).replace('\"', '\\\\\\"')}\"}} 1",
+                media_type="text/plain; charset=utf-8",
+                status_code=500
+            )
+
+    # 使用自定义的处理程序
+    from starlette.routing import Route
+    metrics_route = Route("/metrics", custom_metrics_handler)
 
     # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
     app.routes.append(metrics_route)
 
 
