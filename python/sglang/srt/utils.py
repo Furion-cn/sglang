@@ -1070,13 +1070,13 @@ def add_prometheus_middleware(app):
 
     # 获取全局的EPLBMetricsCollector实例，如果存在的话
     def get_eplb_metrics_collector():
-        for module_name, module in sys.modules.items():
-            if 'sglang.srt.metrics.collector' in module_name:
-                for attr_name in dir(module):
-                    attr = getattr(module, attr_name)
-                    if attr_name == 'eplb_metrics_collector' and attr is not None:
-                        return attr
-        return None
+        try:
+            from sglang.srt.metrics.collector import eplb_metrics_collector
+            return eplb_metrics_collector
+        except ImportError:
+            return None
+        except AttributeError:
+            return None
 
     # 获取日志记录器
     logger = logging.getLogger(__name__)
