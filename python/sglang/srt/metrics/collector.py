@@ -148,9 +148,16 @@ class EPLBMetricsCollector:
                                 metric=metric_name
                             ).set(value)
                     
-                    # 使用每个GPU上的本地副本数
                     if "logical_expert_counts" in metrics:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        
                         for logical_id, local_count in metrics["logical_expert_counts"].items():
+                            # 记录每个被设置的标签组合
+                            logger.info(f"EPLBMetrics: Setting replica metric - "
+                                       f"gpu_id={gpu_id}, layer_id={layer_id}, "
+                                       f"logical_expert_id={logical_id}, count={local_count}")
+                            
                             self.logical_expert_replicas.labels(
                                 **self.labels,
                                 gpu_id=str(gpu_id),

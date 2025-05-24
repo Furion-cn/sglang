@@ -184,9 +184,17 @@ class EPLBManager:
         
         self._metrics_collector.log_stats(stats)
         
+        # 统计总共有多少个replica metrics
+        total_replica_metrics = 0
+        for gpu_id, layer_stats in gpu_expert_stats.items():
+            for layer_id, metrics in layer_stats.items():
+                if "logical_expert_counts" in metrics:
+                    total_replica_metrics += len(metrics["logical_expert_counts"])
+        
         logger.info(f"EPLBManager: Rebalance metrics - "
                    f"time={total_time:.2f}s, "
-                   f"experts={metadata.num_logical_experts}/{metadata.num_physical_experts}")
+                   f"experts={metadata.num_logical_experts}/{metadata.num_physical_experts}, "
+                   f"total_replica_metrics={total_replica_metrics}")
     
     def _compute_gpu_expert_stats(self, metadata: ExpertLocationMetadata):
         gpu_expert_stats = {}
