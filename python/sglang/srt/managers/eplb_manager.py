@@ -193,16 +193,19 @@ class EPLBManager:
                 
                 unique_logical_experts = torch.unique(physical_to_logical)
                 
+                # 计算每个逻辑专家在当前GPU上的本地副本数
                 logical_expert_counts = {}
+                
                 for logical_id in unique_logical_experts.tolist():
-                    if logical_id >= 0: 
+                    if logical_id >= 0:
+                        # 当前GPU上的本地副本数
                         count = torch.sum(physical_to_logical == logical_id).item()
                         logical_expert_counts[logical_id] = count
                     
                 gpu_expert_stats[gpu_id][layer_id] = {
                     "num_physical_experts": metadata.num_local_physical_experts,
-                    "num_unique_logical_experts": len(unique_logical_experts),
-                    "utilization_ratio": len(unique_logical_experts) / metadata.num_local_physical_experts,
+                    "num_unique_logical_experts": len([x for x in unique_logical_experts.tolist() if x >= 0]),
+                    "utilization_ratio": len([x for x in unique_logical_experts.tolist() if x >= 0]) / metadata.num_local_physical_experts,
                     "logical_expert_counts": logical_expert_counts
                 }
         

@@ -148,14 +148,15 @@ class EPLBMetricsCollector:
                                 metric=metric_name
                             ).set(value)
                     
+                    # 使用每个GPU上的本地副本数
                     if "logical_expert_counts" in metrics:
-                        for logical_id, count in metrics["logical_expert_counts"].items():
+                        for logical_id, local_count in metrics["logical_expert_counts"].items():
                             self.logical_expert_replicas.labels(
                                 **self.labels,
                                 gpu_id=str(gpu_id),
                                 layer_id=str(layer_id),
                                 logical_expert_id=str(logical_id)
-                            ).set(count)
+                            ).set(local_count)
 
 
 @dataclass
