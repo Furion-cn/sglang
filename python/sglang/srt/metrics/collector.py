@@ -70,12 +70,6 @@ class EPLBMetricsCollector:
             multiprocess_mode="mostrecent",
         )
         
-        self.expert_maps = Info(
-            name="sglang:eplb_expert_maps",
-            documentation="Expert distribution maps",
-            labelnames=list(labels.keys()) + ["map_type"],
-        )
-        
         self.gpu_expert_stats = Gauge(
             name="sglang:eplb_gpu_expert_stats",
             documentation="Expert statistics per GPU",
@@ -244,16 +238,6 @@ class EPLBMetricsCollector:
                     # each layer each expert has a different number of tokens
                     #  self.expert_tokens.labels(**self.labels, layer_id=str(layer_id), expert_id=str(logical_expert_id)).observe(tokens_count)
                     self._log_gauge(self.expert_tokens, tokens_count, {"layer_id": str(layer_id), "expert_id": str(logical_expert_id)})
-
-        if stats.physical_to_logical_map_summary:
-            self.expert_maps.labels(**self.labels, map_type="physical_to_logical").info(
-                {"data": json.dumps(stats.physical_to_logical_map_summary)}
-            )
-        
-        if stats.logical_to_physical_map_summary:
-            self.expert_maps.labels(**self.labels, map_type="logical_to_physical").info(
-                {"data": json.dumps(stats.logical_to_physical_map_summary)}
-            )
             
         if stats.gpu_expert_stats:
             # 清空当前的logical_expert_data
