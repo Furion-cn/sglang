@@ -1,0 +1,793 @@
+{
+    "annotations": {
+      "list": [
+        {
+          "builtIn": 1,
+          "datasource": {
+            "type": "grafana",
+            "uid": "-- Grafana --"
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "type": "dashboard"
+        }
+      ]
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 0,
+    "id": 1,
+    "links": [],
+    "liveNow": false,
+    "panels": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "id": 1,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "expr": "sglang:eplb_num_experts",
+            "legendFormat": "{{type}}",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "专家数",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "id": 6,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "text": {
+            "titleSize": 50,
+            "valueSize": 40
+          },
+          "textMode": "auto"
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "expr": "sglang:eplb_load_stats",
+            "legendFormat": "{{metric}}",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "专家平衡度（cv 值越大越不平衡）",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "scaleDistribution": {
+                "type": "linear"
+              }
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 11,
+          "w": 12,
+          "x": 0,
+          "y": 6
+        },
+        "id": 2,
+        "options": {
+          "calculate": false,
+          "cellGap": 1,
+          "color": {
+            "exponent": 0.5,
+            "fill": "dark-orange",
+            "mode": "scheme",
+            "reverse": false,
+            "scale": "exponential",
+            "scheme": "Oranges",
+            "steps": 64
+          },
+          "exemplars": {
+            "color": "rgba(255,0,255,0.7)"
+          },
+          "filterValues": {
+            "le": 1e-9
+          },
+          "legend": {
+            "show": true
+          },
+          "rowsFrame": {
+            "layout": "auto"
+          },
+          "tooltip": {
+            "show": true,
+            "yHistogram": false
+          },
+          "yAxis": {
+            "axisPlacement": "left",
+            "reverse": false,
+            "unit": "s"
+          }
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "expr": "sum by (le) (sglang:eplb_rebalance_time_seconds_bucket{stage=\"$rebalance_stage\"})",
+            "format": "heatmap",
+            "legendFormat": "__auto",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "rebalance 耗时",
+        "type": "heatmap"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 11,
+          "w": 12,
+          "x": 12,
+          "y": 6
+        },
+        "id": 32,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "expr": "sglang:eplb_load_stats{metric=\"cv\"}",
+            "format": "heatmap",
+            "legendFormat": "{{stage}}",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "专家平衡度",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 11,
+          "w": 12,
+          "x": 12,
+          "y": 17
+        },
+        "id": 7,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "expr": "increase(sglang:eplb_rebalance_time_seconds_count[1m])",
+            "format": "heatmap",
+            "legendFormat": "{{stage}}",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "rebalance 次数",
+        "type": "timeseries"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 28
+        },
+        "id": 5,
+        "panels": [],
+        "repeat": "layer_id",
+        "repeatDirection": "h",
+        "title": "node_rank [$node_rank] | layer_id [$layer_id] 专家 token 分布",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "custom": {
+              "fillOpacity": 77,
+              "lineWidth": 2
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "percentage",
+              "steps": [
+                {
+                  "color": "super-light-green",
+                  "value": null
+                },
+                {
+                  "color": "light-green",
+                  "value": 30
+                },
+                {
+                  "color": "green",
+                  "value": 60
+                },
+                {
+                  "color": "semi-dark-green",
+                  "value": 90
+                },
+                {
+                  "color": "dark-green",
+                  "value": 120
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 47,
+          "w": 24,
+          "x": 0,
+          "y": 29
+        },
+        "id": 4,
+        "options": {
+          "colWidth": 0.96,
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "rowHeight": 0.92,
+          "showValue": "auto",
+          "tooltip": {
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "exemplar": false,
+            "expr": "sglang:eplb_expert_tokens{layer_id=\"$layer_id\"}",
+            "format": "time_series",
+            "instant": false,
+            "legendFormat": "{{expert_id}}",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "专家获得的 token 数",
+        "type": "status-history"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 76
+        },
+        "id": 8,
+        "panels": [],
+        "repeat": "gpu_id",
+        "repeatDirection": "h",
+        "title": "node_rank [$node_rank] | layer_id [$layer_id] | gpu_id [$gpu_id] 专家数分布",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 9,
+          "w": 12,
+          "x": 0,
+          "y": 77
+        },
+        "id": 9,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "expr": "sglang:eplb_gpu_expert_stats{node_rank=\"$node_rank\", layer_id=\"$layer_id\", gpu_id=\"$gpu_id\", metric!=\"utilization_ratio\"}",
+            "legendFormat": "{{metric}}",
+            "range": true,
+            "refId": "A"
+          }
+        ],
+        "title": "物理专家与逻辑专家数",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 9,
+          "w": 12,
+          "x": 12,
+          "y": 77
+        },
+        "id": 10,
+        "options": {
+          "displayMode": "lcd",
+          "minVizHeight": 10,
+          "minVizWidth": 0,
+          "orientation": "vertical",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showUnfilled": true,
+          "valueMode": "color"
+        },
+        "pluginVersion": "9.5.20",
+        "targets": [
+          {
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+            },
+            "editorMode": "code",
+            "exemplar": false,
+            "expr": "sglang:eplb_logical_expert_replicas{node_rank=\"$node_rank\", layer_id=\"$layer_id\", gpu_id=\"$gpu_id\"}",
+            "instant": true,
+            "legendFormat": "{{logical_expert_id}}",
+            "range": false,
+            "refId": "A"
+          }
+        ],
+        "title": "逻辑专家复制副本数",
+        "type": "bargauge"
+      }
+    ],
+    "refresh": "5s",
+    "schemaVersion": 38,
+    "style": "dark",
+    "tags": [],
+    "templating": {
+      "list": [
+        {
+          "current": {
+            "selected": false,
+            "text": [
+              "0"
+            ],
+            "value": [
+              "0"
+            ]
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+          },
+          "definition": "label_values(sglang:eplb_gpu_expert_stats,node_rank)",
+          "hide": 0,
+          "includeAll": true,
+          "multi": true,
+          "name": "node_rank",
+          "options": [],
+          "query": {
+            "query": "label_values(sglang:eplb_gpu_expert_stats,node_rank)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1,
+          "type": "query"
+        },
+        {
+          "current": {
+            "selected": true,
+            "text": "20",
+            "value": "20"
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+          },
+          "definition": "label_values(sglang:eplb_gpu_expert_stats,layer_id)",
+          "hide": 0,
+          "includeAll": false,
+          "multi": false,
+          "name": "layer_id",
+          "options": [],
+          "query": {
+            "query": "label_values(sglang:eplb_gpu_expert_stats,layer_id)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1,
+          "type": "query"
+        },
+        {
+          "current": {
+            "selected": false,
+            "text": [
+              "All"
+            ],
+            "value": [
+              "$__all"
+            ]
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ccc1ef21-7539-4251-913d-8cc28af5fcef"
+          },
+          "definition": "label_values(sglang:eplb_gpu_expert_stats,gpu_id)",
+          "hide": 0,
+          "includeAll": true,
+          "multi": true,
+          "name": "gpu_id",
+          "options": [],
+          "query": {
+            "query": "label_values(sglang:eplb_gpu_expert_stats,gpu_id)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1,
+          "type": "query"
+        },
+        {
+          "current": {
+            "selected": true,
+            "text": "total",
+            "value": "total"
+          },
+          "definition": "label_values(sglang:eplb_rebalance_time_seconds_bucket,stage)",
+          "hide": 0,
+          "includeAll": false,
+          "multi": false,
+          "name": "rebalance_stage",
+          "options": [],
+          "query": {
+            "query": "label_values(sglang:eplb_rebalance_time_seconds_bucket,stage)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 0,
+          "type": "query"
+        }
+      ]
+    },
+    "time": {
+      "from": "now-5m",
+      "to": "now"
+    },
+    "timepicker": {},
+    "timezone": "",
+    "title": "EPLB",
+    "uid": "cecd8ce0-9d6b-4155-b946-859a31980cae",
+    "version": 32,
+    "weekStart": ""
+  }
