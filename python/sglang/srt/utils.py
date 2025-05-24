@@ -1088,11 +1088,14 @@ def add_prometheus_middleware(app):
     async def custom_metrics_handler(request):
         eplb_collector = get_eplb_metrics_collector()
         
+        logger.info(f"custom_metrics_handler called, eplb_collector: {eplb_collector is not None}")
+        
         if eplb_collector is not None and hasattr(eplb_collector, 'generate_custom_metrics'):
             try:
                 # 使用自定义的metrics生成函数
-                logger.debug("Using custom metrics generator for EPLB metrics")
+                logger.info("Using custom metrics generator for EPLB metrics")
                 metrics_data = eplb_collector.generate_custom_metrics()
+                logger.info(f"Custom metrics generated, length: {len(metrics_data)} chars")
                 return Response(metrics_data, media_type="text/plain; charset=utf-8")
             except Exception as e:
                 logger.error(f"Error generating custom metrics: {e}", exc_info=True)
@@ -1101,19 +1104,23 @@ def add_prometheus_middleware(app):
                 stack_trace = traceback.format_exc()
                 logger.error(f"Stack trace: {stack_trace}")
                 logger.debug("Falling back to standard metrics generation")
+        else:
+            logger.info("No EPLB collector found or no generate_custom_metrics method, using standard generation")
         
         # 如果没有自定义生成器或出错，则使用标准方法
         try:
             from prometheus_client import generate_latest
             metrics_data = generate_latest(registry)
+            logger.info(f"Standard metrics generated, length: {len(metrics_data)} chars")
             return Response(metrics_data, media_type="text/plain; charset=utf-8")
         except Exception as e:
             # 如果标准方法也失败，返回一个简单的错误消息
             logger.error(f"Error generating standard metrics: {e}", exc_info=True)
+            error_reason = str(e).replace('"', "'")  # 避免引号问题
             return Response(
                 f"# HELP metrics_error Error generating metrics\n"
                 f"# TYPE metrics_error gauge\n"
-                f"metrics_error{{reason=\"{str(e).replace('\"', '\\\\\\"')}\"}} 1",
+                f"metrics_error{{reason=\"{error_reason}\"}} 1",
                 media_type="text/plain; charset=utf-8",
                 status_code=500
             )

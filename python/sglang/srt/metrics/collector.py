@@ -109,8 +109,17 @@ class EPLBMetricsCollector:
         # 获取日志记录器
         logger = logging.getLogger(__name__)
         
+        # 调试：检查当前数据
+        logger.info(f"generate_custom_metrics called, _current_logical_expert_data has {len(self._current_logical_expert_data)} entries")
+        if self._current_logical_expert_data:
+            logger.info(f"Sample entries: {list(self._current_logical_expert_data.items())[:3]}")
+        
         # 从Prometheus客户端库生成所有指标的文本
         all_metrics = generate_latest(REGISTRY).decode('utf-8')
+        
+        # 调试：检查原始metrics中是否有这个指标
+        has_original_metric = 'sglang:eplb_logical_expert_replicas' in all_metrics
+        logger.info(f"Original metrics contains logical_expert_replicas: {has_original_metric}")
         
         # 分割指标文本为不同的指标块
         metrics_blocks = {}
@@ -134,6 +143,7 @@ class EPLBMetricsCollector:
         # 替换logical_expert_replicas指标块
         expert_metrics_count = 0
         if 'sglang:eplb_logical_expert_replicas' in metrics_blocks:
+            logger.info("Found existing logical_expert_replicas block, replacing it")
             # 保留HELP和TYPE行
             help_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][0]
             type_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][1]
@@ -161,15 +171,35 @@ class EPLBMetricsCollector:
             # 替换原始块（即使new_lines只有HELP和TYPE行）
             metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
         else:
-            # 如果原始输出中没有这个指标块，也要创建一个空的
-            metrics_blocks['sglang:eplb_logical_expert_replicas'] = [
+            logger.info("No existing logical_expert_replicas block found, creating new one")
+            # 如果原始输出中没有这个指标块，创建一个新的
+            new_lines = [
                 "# HELP sglang:eplb_logical_expert_replicas Number of physical expert replicas for each logical expert",
                 "# TYPE sglang:eplb_logical_expert_replicas gauge"
             ]
+            timestamp_ms = int(time.time() * 1000)
+            
+            for (gpu_id, layer_id, logical_id), value in self._current_logical_expert_data.items():
+                # 构建标签字符串
+                label_parts = []
+                for label_name, label_value in self.labels.items():
+                    label_parts.append(f'{label_name}="{label_value}"')
+                label_parts.extend([
+                    f'gpu_id="{gpu_id}"',
+                    f'layer_id="{layer_id}"',
+                    f'logical_expert_id="{logical_id}"'
+                ])
+                labels_str = ','.join(label_parts)
+                
+                # 添加指标行
+                new_lines.append(f'sglang:eplb_logical_expert_replicas{{{labels_str}}} {value} {timestamp_ms}')
+                expert_metrics_count += 1
+            
+            metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
         
         # 记录处理的指标数量
         total_metrics_count = sum(len(block) - 2 for block in metrics_blocks.values())  # 减去每个块的HELP和TYPE行
-        logger.debug(f"Generated custom metrics: {len(metrics_blocks)} metric types, "
+        logger.info(f"Generated custom metrics: {len(metrics_blocks)} metric types, "
                     f"{total_metrics_count} total data points, "
                     f"{expert_metrics_count} logical expert replica metrics")
         
@@ -231,6 +261,10 @@ class EPLBMetricsCollector:
             # 清空当前的logical_expert_data
             self._current_logical_expert_data = {}
             
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"log_stats called with gpu_expert_stats containing {len(stats.gpu_expert_stats)} GPUs")
+            
             # 设置新数据
             for gpu_id, layer_stats in stats.gpu_expert_stats.items():
                 for layer_id, metrics in layer_stats.items():
@@ -255,6 +289,14 @@ class EPLBMetricsCollector:
                             #     layer_id=str(layer_id),
                             #     logical_expert_id=str(logical_id)
                             # ).set(local_count)
+            
+            logger.info(f"Updated _current_logical_expert_data with {len(self._current_logical_expert_data)} entries")
+            if self._current_logical_expert_data:
+                logger.info(f"Sample entries: {list(self._current_logical_expert_data.items())[:3]}")
+        else:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("log_stats called but stats.gpu_expert_stats is None or empty")
 
 
 @dataclass
