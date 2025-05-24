@@ -21,7 +21,7 @@ from sglang.srt.managers.io_struct import (
     EplbRebalanceReqInput,
     UpdateExpertLocationReqInput,
 )
-from sglang.srt.metrics.collector import EPLBManagerStats, EPLBMetricsCollector
+from sglang.srt.metrics.collector import EPLBManagerStats, EPLBMetricsCollector, create_eplb_metrics_collector
 from sglang.srt.server_args import ServerArgs
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ class EPLBManager:
             dir_data=Path(self._server_args.eplb_storage_dir)
             / "expert_distribution_storage"
         )
-        self._metrics_collector = EPLBMetricsCollector(
+        self._metrics_collector = create_eplb_metrics_collector(
             labels={"model": server_args.served_model_name, "node_rank": str(server_args.node_rank)}
         )
         self._expert_location_metadata = None
