@@ -170,7 +170,9 @@ class ServerArgs:
     enable_ep_moe: bool = False
     enable_deepep_moe: bool = False
     deepep_mode: Optional[Literal["auto", "normal", "low_latency"]] = "auto"
-    ep_dispatch_algorithm: Optional[Literal["static", "dynamic"]] = None
+    ep_dispatch_algorithm: Optional[
+        Literal["static", "dynamic", "fake_uniform", "fake_grouped_uniform"]
+    ] = None
     init_expert_location: str = "trivial"
     expert_distribution_recorder_mode: Optional[
         Literal["stat", "per_pass", "per_token"]

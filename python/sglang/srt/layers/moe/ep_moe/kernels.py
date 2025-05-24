@@ -396,6 +396,7 @@ def silu_and_mul_masked_post_quant_fwd(
     )
     return
 
+
 @triton.jit
 def _silu_and_mul_masked_kernel(
     input_ptr,
@@ -502,6 +503,7 @@ def silu_and_mul_masked_fwd(
         num_warps=num_warps,
     )
     return
+
 
 @triton.jit
 def tanh(x):
@@ -616,6 +618,7 @@ def post_reorder_triton_kernel(
                 store_ptr + offset, tl.zeros([BLOCK_SIZE], dtype=InDtype), mask=mask
             )
 
+
 @triton.jit
 def compute_masked_m_range(
     expert_id,
@@ -626,6 +629,7 @@ def compute_masked_m_range(
     m_range_start = pid * BLOCK_SIZE_M
     m_range_end = min(tl.load(masked_m_ptr + expert_id), m_range_start + BLOCK_SIZE_M)
     return m_range_start, m_range_end
+
 
 @triton.jit
 def compute_m_range(
@@ -647,7 +651,10 @@ def compute_m_range(
 
     m_range_start = tl.load(seg_indptr + idx) + (pid - idx_start) * BLOCK_SIZE_M
     if masked_m_ptr is not None:
-        m_range_end = min(tl.load(seg_indptr + idx) + tl.load(masked_m_ptr + idx), m_range_start + BLOCK_SIZE_M)
+        m_range_end = min(
+            tl.load(seg_indptr + idx) + tl.load(masked_m_ptr + idx),
+            m_range_start + BLOCK_SIZE_M,
+        )
     else:
         m_range_end = min(tl.load(seg_indptr + idx + 1), m_range_start + BLOCK_SIZE_M)
     expert_id = tl.load(weight_indices + idx)
@@ -691,7 +698,13 @@ def grouped_gemm_triton_kernel(
         return
 
     m_range_start, m_range_end, expert_id = compute_m_range(
-        pid_m, batch_size, seg_indptr, None, weight_indices, m_num_tiles_indptr, BLOCK_SIZE_M
+        pid_m,
+        batch_size,
+        seg_indptr,
+        None,
+        weight_indices,
+        m_num_tiles_indptr,
+        BLOCK_SIZE_M,
     )
     if m_range_end - m_range_start == 0:
         return
@@ -753,6 +766,7 @@ def grouped_gemm_triton_kernel(
     c_mask = (offs_cm[:, None] < m_range_end) & (offs_cn[None, :] < n_range_end)
     tl.store(c_ptr, c_tile, mask=c_mask)
 
+
 @triton.jit
 def compute_m_num_tiles_indptr(
     m_num_tiles_indptr, seg_indptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
@@ -798,8 +812,8 @@ def grouped_gemm_triton(
     # TODO: adjust config or tune kernel
     # Reduce block size to prevent L40 shared memory overflow.
     config = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
     }
 
@@ -844,6 +858,7 @@ def grouped_gemm_triton(
     )
     return c
 
+
 def grouped_gemm_masked_triton(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -858,7 +873,9 @@ def grouped_gemm_masked_triton(
 
     if c is None:
         assert c_dtype is not None
-        c = torch.empty(a.shape[0], a.shape[1], b.shape[1], device=a.device, dtype=c_dtype)
+        c = torch.empty(
+            a.shape[0], a.shape[1], b.shape[1], device=a.device, dtype=c_dtype
+        )
 
     grid = lambda META: (
         a.shape[0],
@@ -882,16 +899,17 @@ def grouped_gemm_masked_triton(
     )
     return c
 
+
 # (e, m, k) * (e, n, k) -> (e, m, n)
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128}),
+        triton.Config({"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 128}),
+        triton.Config({"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 128}),
+        triton.Config({"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128}),
+        triton.Config({"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128}),
+        triton.Config({"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128}),
     ],
-    key=['M', 'N', 'K'],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def grouped_gemm_masked_triton_kernel(
@@ -940,9 +958,10 @@ def grouped_gemm_masked_triton_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     a_ptr = a + (
-        (expert_id * a_stride_0) 
-        + (m_range_start + offs_am[:, None]) * a_stride_1 
-        + offs_k[None, :])
+        (expert_id * a_stride_0)
+        + (m_range_start + offs_am[:, None]) * a_stride_1
+        + offs_k[None, :]
+    )
     b_ptr = b + (
         (expert_id * b_stride_0)
         + (n_range_start + offs_bn[:, None]) * b_stride_1
