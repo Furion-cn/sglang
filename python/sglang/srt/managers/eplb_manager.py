@@ -120,17 +120,7 @@ class EPLBManager:
             f"redundant_experts={metadata.num_physical_experts - metadata.num_logical_experts}"
         )
         
-        # 添加调试信息：检查physical_to_logical_map的形状
-        logger.info(
-            f"EPLBManager Debug: physical_to_logical_map shape={metadata.physical_to_logical_map.shape}, "
-            f"ep_size={metadata.ep_size}, "
-            f"num_local_physical_experts={metadata.num_local_physical_experts}"
-        )
-        
-        # 检查layer 26的映射
-        if metadata.num_layers > 26:
-            layer_26_map = metadata.physical_to_logical_map[26].tolist()
-            logger.info(f"EPLBManager Debug: Layer 26 physical_to_logical_map={layer_26_map}")
+
         
         physical_expert_counts = {}
         for layer_id in range(metadata.num_layers):
@@ -202,11 +192,6 @@ class EPLBManager:
         num_gpus = metadata.ep_size
         num_layers = metadata.num_layers
         
-        # 添加调试信息
-        logger.info(f"EPLBManager Debug: num_gpus={num_gpus}, num_layers={num_layers}, "
-                   f"num_physical_experts={metadata.num_physical_experts}, "
-                   f"num_local_physical_experts={metadata.num_local_physical_experts}")
-        
         for gpu_id in range(num_gpus):
             gpu_expert_stats[gpu_id] = {}
             
@@ -215,13 +200,6 @@ class EPLBManager:
                 end_idx = start_idx + metadata.num_local_physical_experts
                 
                 physical_to_logical = metadata.physical_to_logical_map[layer_id, start_idx:end_idx]
-                
-                # 添加调试信息
-                if gpu_id == 7 and layer_id == 26:
-                    logger.info(f"EPLBManager Debug: GPU {gpu_id} Layer {layer_id} - "
-                               f"start_idx={start_idx}, end_idx={end_idx}, "
-                               f"physical_to_logical_shape={physical_to_logical.shape}, "
-                               f"physical_to_logical={physical_to_logical.tolist()}")
                 
                 unique_logical_experts = torch.unique(physical_to_logical)
                 
@@ -233,12 +211,6 @@ class EPLBManager:
                         # 当前GPU上的本地副本数
                         count = torch.sum(physical_to_logical == logical_id).item()
                         logical_expert_counts[logical_id] = count
-                    
-                # 添加调试信息
-                if gpu_id == 7 and layer_id == 26:
-                    logger.info(f"EPLBManager Debug: GPU {gpu_id} Layer {layer_id} - "
-                               f"unique_logical_experts={unique_logical_experts.tolist()}, "
-                               f"logical_expert_counts={logical_expert_counts}")
                     
                 gpu_expert_stats[gpu_id][layer_id] = {
                     "num_physical_experts": metadata.num_local_physical_experts,

@@ -86,12 +86,120 @@ class EPLBMetricsCollector:
             labelnames=list(labels.keys()) + ["gpu_id", "layer_id", "logical_expert_id"],
             multiprocess_mode="mostrecent",
         )
+        
+        # 记录当前活跃的metrics标签组合，用于清理
+        self._current_replica_labels = set()
     
     def _log_gauge(self, gauge, data: Union[int, float], extra_labels: Dict[str, str] = None) -> None:
         labels = self.labels.copy()
         if extra_labels:
             labels.update(extra_labels)
         gauge.labels(**labels).set(data)
+    
+    def _clear_old_replica_metrics(self) -> None:
+        """强制清理并重新创建logical_expert_replicas metrics"""
+        try:
+            from prometheus_client import Gauge, REGISTRY
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # 强制从registry中移除所有相关的metrics
+            collectors_to_remove = []
+            for collector in list(REGISTRY._collector_to_names.keys()):
+                # 检查是否是我们要清理的metrics
+                if hasattr(collector, '_name') and collector._name == 'sglang:eplb_logical_expert_replicas':
+                    collectors_to_remove.append(collector)
+                elif hasattr(collector, 'describe'):
+                    # 检查metrics的描述中是否包含我们的名称
+                    try:
+                        for metric_family in collector.describe():
+                            if metric_family.name == 'sglang:eplb_logical_expert_replicas':
+                                collectors_to_remove.append(collector)
+                                break
+                    except:
+                        pass
+            
+            # 移除找到的collectors
+            for collector in collectors_to_remove:
+                try:
+                    REGISTRY.unregister(collector)
+                    logger.info("Successfully removed old logical_expert_replicas collector")
+                except Exception as e:
+                    logger.debug(f"Failed to unregister collector: {e}")
+            
+            # 强制清理现有对象的内部状态
+            if hasattr(self, 'logical_expert_replicas'):
+                old_metric = self.logical_expert_replicas
+                if hasattr(old_metric, '_metrics'):
+                    old_metric._metrics.clear()
+                if hasattr(old_metric, '_value'):
+                    old_metric._value.clear()
+                
+            # 重新创建metrics对象
+            self.logical_expert_replicas = Gauge(
+                name="sglang:eplb_logical_expert_replicas",
+                documentation="Number of physical expert replicas for each logical expert (recreated)",
+                labelnames=list(self.labels.keys()) + ["gpu_id", "layer_id", "logical_expert_id"],
+                multiprocess_mode="mostrecent",
+            )
+            
+            logger.info("Successfully recreated logical_expert_replicas metrics")
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to completely clear replica metrics: {e}. Continuing with existing metrics.")
+    
+    def _clear_gpu_expert_stats(self) -> None:
+        """清理GPU专家统计metrics"""
+        try:
+            from prometheus_client import Gauge, REGISTRY
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # 清理gpu_expert_stats metrics
+            collectors_to_remove = []
+            for collector in list(REGISTRY._collector_to_names.keys()):
+                if hasattr(collector, '_name') and collector._name == 'sglang:eplb_gpu_expert_stats':
+                    collectors_to_remove.append(collector)
+                elif hasattr(collector, 'describe'):
+                    try:
+                        for metric_family in collector.describe():
+                            if metric_family.name == 'sglang:eplb_gpu_expert_stats':
+                                collectors_to_remove.append(collector)
+                                break
+                    except:
+                        pass
+            
+            for collector in collectors_to_remove:
+                try:
+                    REGISTRY.unregister(collector)
+                    logger.info("Successfully removed old gpu_expert_stats collector")
+                except Exception as e:
+                    logger.debug(f"Failed to unregister gpu_expert_stats collector: {e}")
+            
+            # 强制清理现有对象的内部状态
+            if hasattr(self, 'gpu_expert_stats'):
+                old_metric = self.gpu_expert_stats
+                if hasattr(old_metric, '_metrics'):
+                    old_metric._metrics.clear()
+                if hasattr(old_metric, '_value'):
+                    old_metric._value.clear()
+            
+            # 重新创建gpu_expert_stats
+            self.gpu_expert_stats = Gauge(
+                name="sglang:eplb_gpu_expert_stats",
+                documentation="Expert statistics per GPU (recreated)",
+                labelnames=list(self.labels.keys()) + ["gpu_id", "layer_id", "metric"],
+                multiprocess_mode="mostrecent",
+            )
+            
+            logger.info("Successfully recreated gpu_expert_stats metrics")
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Failed to clear gpu_expert_stats: {e}")
     
     def log_stats(self, stats: EPLBManagerStats) -> None:
         self.rebalance_time.labels(**self.labels, stage="total").observe(stats.rebalance_total_time)
@@ -137,6 +245,15 @@ class EPLBMetricsCollector:
             )
             
         if stats.gpu_expert_stats:
+            # 强制清理旧的replica metrics（完全重新创建）
+            self._clear_old_replica_metrics()
+            
+            # 同时清理GPU专家统计metrics
+            self._clear_gpu_expert_stats()
+            
+            # 收集新的标签组合
+            new_labels = set()
+            
             for gpu_id, layer_stats in stats.gpu_expert_stats.items():
                 for layer_id, metrics in layer_stats.items():
                     for metric_name, value in metrics.items():
@@ -149,14 +266,10 @@ class EPLBMetricsCollector:
                             ).set(value)
                     
                     if "logical_expert_counts" in metrics:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        
                         for logical_id, local_count in metrics["logical_expert_counts"].items():
-                            # 记录每个被设置的标签组合
-                            logger.info(f"EPLBMetrics: Setting replica metric - "
-                                       f"gpu_id={gpu_id}, layer_id={layer_id}, "
-                                       f"logical_expert_id={logical_id}, count={local_count}")
+                            # 构建标签组合
+                            label_combo = (str(gpu_id), str(layer_id), str(logical_id))
+                            new_labels.add(label_combo)
                             
                             self.logical_expert_replicas.labels(
                                 **self.labels,
@@ -164,6 +277,13 @@ class EPLBMetricsCollector:
                                 layer_id=str(layer_id),
                                 logical_expert_id=str(logical_id)
                             ).set(local_count)
+            
+            # 更新当前活跃的标签组合
+            self._current_replica_labels = new_labels
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"EPLBMetrics: Successfully set {len(new_labels)} logical_expert_replicas metrics after cleanup")
 
 
 @dataclass
