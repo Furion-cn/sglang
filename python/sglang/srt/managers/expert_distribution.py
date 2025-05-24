@@ -185,7 +185,9 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
         )
 
     def _on_hook(self, hook_name: str, **kwargs):
-        if not (self._recording or torch.cuda.is_current_stream_capturing()):
+        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+        
+        if not (self._recording or get_is_capture_mode()):
             return
         gatherer = self._single_pass_gatherers[
             self._accumulator.get_single_pass_gatherer_key(
