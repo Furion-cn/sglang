@@ -1085,13 +1085,13 @@ def add_prometheus_middleware(app):
     async def custom_metrics_handler(request):
         eplb_collector = get_eplb_metrics_collector()
         
-        logger.info(f"custom_metrics_handler called, eplb_collector: {eplb_collector is not None}")
+        logger.debug(f"custom_metrics_handler called, eplb_collector: {eplb_collector is not None}")
         
         if eplb_collector is not None and hasattr(eplb_collector, 'generate_custom_metrics'):
             try:
-                logger.info("Using custom metrics generator for EPLB metrics")
+                logger.debug("Using custom metrics generator for EPLB metrics")
                 metrics_data = eplb_collector.generate_custom_metrics()
-                logger.info(f"Custom metrics generated, length: {len(metrics_data)} chars")
+                logger.debug(f"Custom metrics generated, length: {len(metrics_data)} chars")
                 return Response(metrics_data, media_type="text/plain; charset=utf-8")
             except Exception as e:
                 logger.error(f"Error generating custom metrics: {e}", exc_info=True)

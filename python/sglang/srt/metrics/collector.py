@@ -95,14 +95,14 @@ class EPLBMetricsCollector:
         
         logger = logging.getLogger(__name__)
         
-        logger.info(f"generate_custom_metrics called, _current_logical_expert_data has {len(self._current_logical_expert_data)} entries")
+        logger.debug(f"generate_custom_metrics called, _current_logical_expert_data has {len(self._current_logical_expert_data)} entries")
         if self._current_logical_expert_data:
             logger.info(f"Sample entries: {list(self._current_logical_expert_data.items())[:3]}")
         
         all_metrics = generate_latest(REGISTRY).decode('utf-8')
         
         has_original_metric = 'sglang:eplb_logical_expert_replicas' in all_metrics
-        logger.info(f"Original metrics contains logical_expert_replicas: {has_original_metric}")
+        logger.debug(f"Original metrics contains logical_expert_replicas: {has_original_metric}")
         
         metrics_blocks = {}
         current_block = []
@@ -123,7 +123,7 @@ class EPLBMetricsCollector:
         
         expert_metrics_count = 0
         if 'sglang:eplb_logical_expert_replicas' in metrics_blocks:
-            logger.info("Found existing logical_expert_replicas block, replacing it")
+            logger.debug("Found existing logical_expert_replicas block, replacing it")
             help_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][0]
             type_line = metrics_blocks['sglang:eplb_logical_expert_replicas'][1]
             
@@ -166,7 +166,7 @@ class EPLBMetricsCollector:
             metrics_blocks['sglang:eplb_logical_expert_replicas'] = new_lines
         
         total_metrics_count = sum(len(block) - 2 for block in metrics_blocks.values())  # 减去每个块的HELP和TYPE行
-        logger.info(f"Generated custom metrics: {len(metrics_blocks)} metric types, "
+        logger.debug(f"Generated custom metrics: {len(metrics_blocks)} metric types, "
                     f"{total_metrics_count} total data points, "
                     f"{expert_metrics_count} logical expert replica metrics")
         
