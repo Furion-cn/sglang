@@ -137,13 +137,6 @@ class EPLBManager:
                 if replicas not in replica_counts:
                     replica_counts[replicas] = 0
                 replica_counts[replicas] += 1
-        
-        # logger.info(f"EPLBManager: Expert replica distribution: {json.dumps(replica_counts)}")
-        # p2l_map = {f"rank_{i}": row.tolist() for i, row in enumerate(metadata.physical_to_logical_map)}
-        # logger.info(f"EPLBManager: Expert physical_to_logical_map: {json.dumps(p2l_map)}")
-        
-        # l2p_map = {f"expert_{i}": row.tolist() for i, row in enumerate(metadata.logical_to_all_physical_map)}
-        # logger.info(f"EPLBManager: Expert logical_to_all_physical_map: {json.dumps(l2p_map)}")
     
     def _collect_and_report_metrics(
         self, 
@@ -174,7 +167,6 @@ class EPLBManager:
         
         self._metrics_collector.log_stats(stats)
         
-        # 统计总共有多少个replica metrics
         total_replica_metrics = 0
         for gpu_id, layer_stats in gpu_expert_stats.items():
             for layer_id, metrics in layer_stats.items():
@@ -203,12 +195,10 @@ class EPLBManager:
                 
                 unique_logical_experts = torch.unique(physical_to_logical)
                 
-                # 计算每个逻辑专家在当前GPU上的本地副本数
                 logical_expert_counts = {}
                 
                 for logical_id in unique_logical_experts.tolist():
                     if logical_id >= 0:
-                        # 当前GPU上的本地副本数
                         count = torch.sum(physical_to_logical == logical_id).item()
                         logical_expert_counts[logical_id] = count
                     

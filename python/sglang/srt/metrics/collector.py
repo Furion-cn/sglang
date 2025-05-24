@@ -483,11 +483,9 @@ class TokenizerMetricsCollector:
                 his._buckets[i].inc(num_new_tokens)
                 break
 
-# 全局实例，供其他模块访问
 eplb_metrics_collector = None
 
 def create_eplb_metrics_collector(labels: Dict[str, str]) -> EPLBMetricsCollector:
-    """创建并设置全局EPLB指标收集器实例"""
     global eplb_metrics_collector
     eplb_metrics_collector = EPLBMetricsCollector(labels)
     return eplb_metrics_collector

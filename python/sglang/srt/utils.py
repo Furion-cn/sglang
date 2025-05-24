@@ -1068,7 +1068,6 @@ def add_prometheus_middleware(app):
     from starlette.responses import Response
     import sys
 
-    # 获取全局的EPLBMetricsCollector实例，如果存在的话
     def get_eplb_metrics_collector():
         try:
             from sglang.srt.metrics.collector import eplb_metrics_collector
@@ -1078,13 +1077,11 @@ def add_prometheus_middleware(app):
         except AttributeError:
             return None
 
-    # 获取日志记录器
     logger = logging.getLogger(__name__)
 
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
     
-    # 创建自定义的metrics处理程序
     async def custom_metrics_handler(request):
         eplb_collector = get_eplb_metrics_collector()
         
@@ -1092,14 +1089,12 @@ def add_prometheus_middleware(app):
         
         if eplb_collector is not None and hasattr(eplb_collector, 'generate_custom_metrics'):
             try:
-                # 使用自定义的metrics生成函数
                 logger.info("Using custom metrics generator for EPLB metrics")
                 metrics_data = eplb_collector.generate_custom_metrics()
                 logger.info(f"Custom metrics generated, length: {len(metrics_data)} chars")
                 return Response(metrics_data, media_type="text/plain; charset=utf-8")
             except Exception as e:
                 logger.error(f"Error generating custom metrics: {e}", exc_info=True)
-                # 记录更详细的错误信息
                 import traceback
                 stack_trace = traceback.format_exc()
                 logger.error(f"Stack trace: {stack_trace}")
@@ -1107,14 +1102,12 @@ def add_prometheus_middleware(app):
         else:
             logger.info("No EPLB collector found or no generate_custom_metrics method, using standard generation")
         
-        # 如果没有自定义生成器或出错，则使用标准方法
         try:
             from prometheus_client import generate_latest
             metrics_data = generate_latest(registry)
             logger.info(f"Standard metrics generated, length: {len(metrics_data)} chars")
             return Response(metrics_data, media_type="text/plain; charset=utf-8")
         except Exception as e:
-            # 如果标准方法也失败，返回一个简单的错误消息
             logger.error(f"Error generating standard metrics: {e}", exc_info=True)
             error_reason = str(e).replace('"', "'")  # 避免引号问题
             return Response(
@@ -1125,7 +1118,6 @@ def add_prometheus_middleware(app):
                 status_code=500
             )
 
-    # 使用自定义的处理程序
     from starlette.routing import Route
     metrics_route = Route("/metrics", custom_metrics_handler)
 
