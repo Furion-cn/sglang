@@ -1050,10 +1050,10 @@ class Scheduler(
     ):
         gap_latency = time.time() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.time()
-        self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = sum(
             [len(req.origin_input_ids) for req in can_run_list]
         )
+        self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = 0
 
         num_used = self.max_total_num_tokens - (
