@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from sglang.srt.managers.scheduler import GenerationBatchResult, Scheduler
     from sglang.srt.mem_cache.memory_pool import KVCache
-
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +306,15 @@ class SchedulerDisaggregationPrefillMixin:
 
         if self.disagg_launch_done is not None:
             self.disagg_launch_done.clear()
+        
+        if self.attn_tp_rank == 0:
+            process_result_time = time.time()
+            input_throughput_schedule_time = batch.num_prefill_tokens / (process_result_time - batch.schedule_batch_time)
+            input_throughput_run_time = batch.num_prefill_tokens / (process_result_time - batch.run_batch_time)
+            logger.info(f"Prefill batch. "
+                        f"#input tokens: {batch.num_prefill_tokens}, "
+                        f"#input throughput(schedule_time): {input_throughput_schedule_time:.2f}, "
+                        f"#input throughput(run_time): {input_throughput_run_time:.2f}")
 
         for req, next_token_id in zip(batch.reqs, next_token_ids, strict=True):
             req: Req

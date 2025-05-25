@@ -1048,11 +1048,13 @@ class Scheduler(
         can_run_list: List[Req],
         running_bs: int,
     ):
+        schedule_batch_time = time.time()
         gap_latency = time.time() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.time()
         self.num_prefill_tokens = sum(
             [len(req.origin_input_ids) for req in can_run_list]
         )
+        num_prefill_tokens = self.num_prefill_tokens
         self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = 0
 
@@ -1103,6 +1105,8 @@ class Scheduler(
             self.stats.avg_request_queue_latency = total_queue_latency / num_new_seq
 
             self.metrics_collector.log_stats(self.stats)
+        return num_prefill_tokens, schedule_batch_time
+
 
     def log_decode_stats(self):
         gap_latency = time.time() - self.last_decode_stats_tic
@@ -1359,9 +1363,10 @@ class Scheduler(
         if self.chunked_req:
             self.chunked_req.is_chunked += 1
 
+        num_prefill_tokens, schedule_batch_time = 0, 0.0
         # Print stats
         if self.attn_tp_rank == 0:
-            self.log_prefill_stats(adder, can_run_list, running_bs)
+            num_prefill_tokens, schedule_batch_time = self.log_prefill_stats(adder, can_run_list, running_bs)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
@@ -1373,6 +1378,8 @@ class Scheduler(
             self.enable_overlap,
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
+            num_prefill_tokens,
+            schedule_batch_time,
         )
         new_batch.prepare_for_extend()
 
@@ -1438,6 +1445,8 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
+        run_batch_time = time.time()
+        batch.run_batch_time = run_batch_time
 
         # NOTE HACK
         if self.forward_ct == 5:
