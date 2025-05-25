@@ -404,16 +404,13 @@ class CudaGraphRunner:
         if self.enable_dp_attention or self.enable_sp_layernorm:
             self.global_num_tokens_gpu.copy_(
                 torch.tensor(
-                    [
-                        num_tokens // self.dp_size + (i < bs % self.dp_size)
-                        for i in range(self.dp_size)
-                    ],
+                    [num_tokens] * self.dp_size,
                     dtype=torch.int32,
                     device=input_ids.device,
                 )
             )
             global_num_tokens = self.global_num_tokens_gpu
-            gathered_buffer = self.gathered_buffer[:num_tokens]
+            gathered_buffer = self.gathered_buffer[:num_tokens * self.dp_size]
         else:
             global_num_tokens = None
             gathered_buffer = None
@@ -521,7 +518,7 @@ class CudaGraphRunner:
         # Pad
         if self.enable_dp_attention or self.enable_sp_layernorm:
             index = bisect.bisect_left(
-                self.capture_bs, sum(forward_batch.global_num_tokens_cpu)
+                self.capture_bs, max(forward_batch.global_num_tokens_cpu)
             )
         else:
             index = bisect.bisect_left(self.capture_bs, raw_bs)
