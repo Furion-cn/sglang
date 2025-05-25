@@ -310,12 +310,15 @@ class CudaGraphRunner:
 
     def can_run(self, forward_batch: ForwardBatch):
         if self.enable_dp_attention or self.enable_sp_layernorm:
-            total_global_tokens = sum(forward_batch.global_num_tokens_cpu)
+            max_num_tokens = max(forward_batch.global_num_tokens_cpu)
 
             is_bs_supported = forward_batch.can_run_dp_cuda_graph and (
-                total_global_tokens in self.graphs
+                all(
+                    per_num_tokens in self.graphs
+                    for per_num_tokens in forward_batch.global_num_tokens_cpu
+                )
                 if self.disable_padding
-                else total_global_tokens <= self.max_bs
+                else max_num_tokens <= self.max_bs
             )
         else:
             is_bs_supported = (
