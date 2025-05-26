@@ -162,7 +162,7 @@ class ServerArgs:
     enable_deepep_moe: bool = False
     deepep_mode: Optional[Literal["auto", "normal", "low_latency"]] = "auto"
     ep_num_redundant_experts: int = 0
-    ep_dispatch_algorithm: Optional[Literal["static", "random"]] = None
+    ep_dispatch_algorithm: Optional[Literal["static", "random", "fake_uniform", "fake_grouped_uniform"]] = None
     init_expert_location: Optional[str] = None
     expert_location_updater_mode: Optional[Literal["pin_memory", "pageable_memory"]] = (
         None

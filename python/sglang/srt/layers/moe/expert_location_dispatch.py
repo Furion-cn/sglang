@@ -13,7 +13,7 @@ from sglang.srt.utils import get_compiler_backend
 
 @dataclass
 class ExpertLocationDispatchInfo:
-    ep_dispatch_algorithm: Literal["static", "random"]
+    ep_dispatch_algorithm: Literal["static", "random", "fake_uniform", "fake_grouped_uniform"]
     partial_logical_to_rank_dispatch_physical_map: torch.Tensor
     partial_logical_to_all_physical_map: torch.Tensor
     partial_logical_to_all_physical_map_num_valid: torch.Tensor
