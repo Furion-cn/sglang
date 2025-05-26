@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+import datetime
 import logging
 from typing import Dict, List, Tuple
 
@@ -340,7 +341,7 @@ def update_expert_weights_single_layer(
         reqs = torch.distributed.batch_isend_irecv(p2p_ops)
         try:
             for req in reqs:
-                req.wait(timeout=30)
+                req.wait(timeout=datetime.timedelta(seconds=30))
         except RuntimeError:
             logger.error(
                 f"Context: {rank=} {old_physical_to_logical_map=} {new_physical_to_logical_map=} {num_local_physical_experts=} {num_gpu_per_node=}"
