@@ -185,20 +185,24 @@ class SchedulerDisaggregationPrefillMixin:
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            self.model_runner_event_loop_step()
+            logger.info("model_runner_event_loop_step")
+            #self.model_runner_event_loop_step()
             self.waiting_queue.extend(
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
+            logger.info("process_prefill_chunk")
             self.process_prefill_chunk()
+            logger.info("get_new_batch_prefill")
             batch = self.get_new_batch_prefill()
-
             # Handle DP attention
             if (
                 self.server_args.enable_dp_attention
                 or self.server_args.enable_sp_layernorm
             ):
+                logger.info("prepare_dp_attn_batch")
                 batch, _ = self.prepare_dp_attn_batch(batch)
 
+            logger.info("cur_batch")
             self.cur_batch = batch
 
             if batch:
@@ -207,11 +211,13 @@ class SchedulerDisaggregationPrefillMixin:
                     self.disagg_launch_done.clear()
 
                 result = self.run_batch(batch)
+                logger.info("run_batch")
 
                 if self.disagg_launch_done is not None:
                     self.disagg_launch_done.set()
 
                 self.process_batch_result_disagg_prefill(batch, result)
+                logger.info("process_batch_result_disagg_prefill")
             else:
                 # NOTE: no batch to forward, release the event
                 if self.disagg_launch_done is not None:
@@ -219,9 +225,11 @@ class SchedulerDisaggregationPrefillMixin:
 
             if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
+                logger.info("process_disagg_prefill_inflight_queue")
 
             if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.check_memory()
+                logger.info("check_memory")
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
