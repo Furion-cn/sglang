@@ -1071,7 +1071,7 @@ class Scheduler(
             f"Prefill batch. "
             f"#new-seq: {num_new_seq}, "
             f"#input-throughput: {self.last_input_throughput:.2f}, "
-            f"#prefill-length: {self.num_prefill_tokens}, "
+            f"#prefill-length: {num_prefill_tokens}, "
             f"#new-token: {adder.log_input_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
