@@ -64,10 +64,13 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        logger.info(
+            f"forward_cuda x.dtype: {x.dtype} weight.data.dtype: {self.weight.data.dtype}"
+        )
+
         if residual is not None:
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x, residual
-        logger.info(f"x.dtype: {x.dtype} weight.data.dtype: {self.weight.data.dtype}")
         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
         return out
 
@@ -76,6 +79,9 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        logger.info(
+            f"forward_hip x.dtype: {x.dtype} weight.data.dtype: {self.weight.data.dtype}"
+        )
         if not x.is_contiguous():
             # NOTE: Remove this if aiter kernel supports discontinuous input
             x = x.contiguous()
@@ -91,6 +97,9 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        logger.info(
+            f"forward_native x.dtype: {x.dtype} weight.data.dtype: {self.weight.data.dtype}"
+        )
         if not x.is_contiguous():
             x = x.contiguous()
         orig_dtype = x.dtype
