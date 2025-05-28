@@ -67,6 +67,7 @@ class RMSNorm(CustomOp):
         if residual is not None:
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x, residual
+        logger.info(f"x.dtype: {x.dtype} weight.data.dtype: {self.weight.data.dtype}")
         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
         return out
 
