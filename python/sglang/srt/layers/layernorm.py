@@ -50,6 +50,8 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
 
     def forward(self, *args, **kwargs):
+        logger.info("RMSNorm forward")
+        print(f"RMSNorm forward args: {args}")
         if torch.compiler.is_compiling():
             return self.forward_native(*args, **kwargs)
         if _is_cuda:
