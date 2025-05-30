@@ -91,6 +91,10 @@ class ExpertDistributionRecorder(ABC):
     def dump_record(self, output_mode: _OutputMode = "file"):
         self._on_not_implemented()
 
+    @property
+    def recording(self):
+        return False
+
     def _on_not_implemented(self):
         raise Exception(
             "Please set ServerArgs.expert_distribution_recorder_mode to use ExpertDistributionRecorder."
@@ -122,6 +126,12 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
             k: _SinglePassGatherer.init_new(server_args, expert_location_metadata, rank)
             for k in self._accumulator.get_single_pass_gatherer_keys()
         }
+
+        if server_args.enable_expert_distribution_metrics:
+            logger.info(
+                "ExpertDistributionRecorder auto start record since enable_expert_distribution_metrics"
+            )
+            self.start_record()
 
     def with_current_layer(self, layer_idx):
         return self._current_layer_idx.with_value(layer_idx)
@@ -179,9 +189,7 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
         )
 
     def _on_hook(self, hook_name: str, **kwargs):
-        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
-
-        if not (self._recording or get_is_capture_mode()):
+        if not (self._recording or torch.cuda.is_current_stream_capturing()):
             return
         gatherer = self._single_pass_gatherers[
             self._accumulator.get_single_pass_gatherer_key(
@@ -222,6 +230,10 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
         output = self._accumulator.dump(output_mode=output_mode)
         self._reset()
         return output
+
+    @property
+    def recording(self):
+        return self._recording
 
 
 _global_expert_distribution_recorder: Optional[ExpertDistributionRecorder] = (
@@ -293,6 +305,7 @@ class _SinglePassGatherer(ABC):
 
     def collect(self) -> Dict:
         raise NotImplementedError
+
 
 class _DetailSinglePassGatherer(_SinglePassGatherer):
     # DeepSeek V3 has this value; should generalize later
@@ -619,6 +632,7 @@ class _DequeCollection:
     def mean(self) -> Dict[int, float]:
         return {d.maxlen: sum(d) / len(d) for d in self._dequeues}
 
+
 class _DetailAccumulator(_UtilizationRateAccumulatorMixin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -674,6 +688,7 @@ class _DetailAccumulator(_UtilizationRateAccumulatorMixin):
         _dump_to_file(
             f"expert_distribution_recorder_{time.time()}_{self._rank}.pt", output
         )
+
 
 class _StatAccumulator(_UtilizationRateAccumulatorMixin):
     def __init__(self, *args, **kwargs):
