@@ -176,8 +176,7 @@ def _update_expert_weights_via_cpu(
         old_layer_mapping = old_physical_to_logical_map[layer_id]
         new_layer_mapping = new_physical_to_logical_map[layer_id]
         
-        # 使用真正的CPU传输方式
-        update_layer_weights_via_cpu_truly(
+        _update_layer_weights_via_cpu(
             expert_weights_list=expert_weights_list,
             old_physical_to_logical_map=old_layer_mapping,
             new_physical_to_logical_map=new_layer_mapping,
@@ -204,7 +203,7 @@ def _update_expert_weights_via_cpu(
     )
 
 
-def update_layer_weights_via_cpu_truly(
+def _update_layer_weights_via_cpu(
     expert_weights_list: List[torch.Tensor],
     old_physical_to_logical_map: List[int],
     new_physical_to_logical_map: List[int],
@@ -213,19 +212,16 @@ def update_layer_weights_via_cpu_truly(
     rank: int,
     layer_id: int,
 ):
-    """真正基于CPU的专家权重更新，完全避开NCCL后端限制"""
     fn_start_time = time.time()
     fn_start_mem = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
     
     world_size = torch.distributed.get_world_size()
     
-    # 确定当前GPU的专家范围
     local_expert_range = (
         rank * num_local_physical_experts,
         (rank + 1) * num_local_physical_experts,
     )
     
-    # 1. 找出当前GPU需要的专家（从旧位置获取）
     requested_experts = []
     
     for local_idx, global_idx in enumerate(range(*local_expert_range)):
@@ -234,13 +230,10 @@ def update_layer_weights_via_cpu_truly(
             
         target_logical_id = new_physical_to_logical_map[global_idx]
         
-        # 检查是否需要从其他GPU获取
         source_found_locally = False
         
-        # 先检查是否可以在本地找到
         for src_local_idx, src_global_idx in enumerate(range(*local_expert_range)):
             if src_global_idx < len(old_physical_to_logical_map) and old_physical_to_logical_map[src_global_idx] == target_logical_id:
-                # 本地复制
                 for tensor_idx in range(len(expert_weights_list)):
                     expert_weights_list[tensor_idx][local_idx].copy_(
                         expert_weights_list[tensor_idx][src_local_idx]
@@ -248,9 +241,7 @@ def update_layer_weights_via_cpu_truly(
                 source_found_locally = True
                 break
         
-        # 如果在本地找不到，需要从其他GPU获取
         if not source_found_locally:
-            # 查找源GPU
             source_global_idx = None
             source_rank = None
             
@@ -275,17 +266,14 @@ def update_layer_weights_via_cpu_truly(
         f"Time = {local_copies_time:.3f}s"
     )
     
-    # 如果没有需要跨GPU请求的专家，提前返回
     if not requested_experts:
         logger.debug(f"[Perf-CPU-True] Layer {layer_id}: No cross-GPU requests needed")
         return
     
-    # 2. 收集所有GPU的请求信息
     all_requests = [None] * world_size
     torch.distributed.all_gather_object(all_requests, requested_experts)
     
-    # 3. 准备需要发送的专家数据
-    # 格式: {target_rank: {(tensor_idx, target_local_idx): cpu_tensor, ...}, ...}
+    # layout: {target_rank: {(tensor_idx, target_local_idx): cpu_tensor, ...}, ...}
     experts_to_send = {}
     
     comm_prep_start = time.time()
@@ -301,11 +289,8 @@ def update_layer_weights_via_cpu_truly(
                 source_local_idx = req["source_local_idx"]
                 target_local_idx = req["target_local_idx"]
                 
-                # 将需要的专家权重移至CPU
                 for tensor_idx, tensor in enumerate(expert_weights_list):
-                    # 创建CPU张量的唯一键
                     key = (tensor_idx, target_local_idx)
-                    # 将GPU张量移至CPU
                     experts_for_target[key] = tensor[source_local_idx].cpu()
         
         if experts_for_target:
@@ -317,16 +302,12 @@ def update_layer_weights_via_cpu_truly(
         f"Time = {comm_prep_time:.3f}s"
     )
     
-    # 4. 使用all_gather_object进行数据交换
-    # 构建发送缓冲区 - 每个rank一个字典
     send_buffer = [{}] * world_size
     for target_rank, data in experts_to_send.items():
         send_buffer[target_rank] = data
     
-    # 接收缓冲区
     recv_buffer = [None] * world_size
     
-    # 执行交换
     exchange_start = time.time()
     torch.distributed.all_gather_object(recv_buffer, send_buffer[rank])
     exchange_time = time.time() - exchange_start
@@ -336,7 +317,6 @@ def update_layer_weights_via_cpu_truly(
         f"Time = {exchange_time:.3f}s"
     )
     
-    # 5. 处理接收到的专家数据
     update_start = time.time()
     
     experts_received = 0
@@ -345,7 +325,6 @@ def update_layer_weights_via_cpu_truly(
             continue
             
         for (tensor_idx, local_idx), cpu_tensor in data.items():
-            # 将CPU张量复制回GPU
             expert_weights_list[tensor_idx][local_idx].copy_(cpu_tensor.to(expert_weights_list[tensor_idx].device))
             experts_received += 1
     
@@ -355,10 +334,8 @@ def update_layer_weights_via_cpu_truly(
         f"Time = {update_time:.3f}s"
     )
     
-    # 同步所有进程，确保权重更新完成
     torch.distributed.barrier()
     
-    # 总时间和内存使用
     fn_end_time = time.time()
     fn_end_mem = torch.cuda.memory_allocated() / (1024 ** 2)
     
@@ -720,4 +697,4 @@ def _deduplicate_ordered(arr: List[int]):
     return output
 
 # 添加别名函数，确保代码能正常工作
-update_layer_weights_via_cpu = update_layer_weights_via_cpu_truly
+update_layer_weights_via_cpu = _update_layer_weights_via_cpu
