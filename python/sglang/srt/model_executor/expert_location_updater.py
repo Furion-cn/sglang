@@ -695,6 +695,3 @@ def _deduplicate_ordered(arr: List[int]):
         if len(output) == 0 or item != output[-1]:
             output.append(item)
     return output
-
-# 添加别名函数，确保代码能正常工作
-update_layer_weights_via_cpu = _update_layer_weights_via_cpu
