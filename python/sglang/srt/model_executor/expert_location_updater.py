@@ -13,6 +13,7 @@
 # ==============================================================================
 import datetime
 import logging
+import time
 from typing import Dict, List, Tuple
 
 import torch
@@ -32,29 +33,52 @@ def update_expert_location(
     new_expert_location_metadata: ExpertLocationMetadata,
     nnodes: int,
     rank: int,
-    transfer_mode: str = "gpu",
+    transfer_mode: str,
 ):
     logger.info(f"Update expert location via {transfer_mode}")
     old_expert_location_metadata = get_global_expert_location_metadata()
 
-    if transfer_mode == "gpu":
-        _update_expert_weights(
-            routed_experts_weights_of_layer,
-            old_expert_location_metadata,
-            new_expert_location_metadata,
-            nnodes,
-            rank,
+    start_mem = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
+    start_time = time.time()
+    
+    logger.info(f"[Perf] Before expert update: GPU memory usage = {start_mem:.2f} MB")
+
+    try:
+        if transfer_mode == "gpu":
+            _update_expert_weights(
+                routed_experts_weights_of_layer,
+                old_expert_location_metadata,
+                new_expert_location_metadata,
+                nnodes,
+                rank,
+            )
+        elif transfer_mode == "cpu":
+            _update_expert_weights_via_cpu(
+                routed_experts_weights_of_layer,
+                old_expert_location_metadata,
+                new_expert_location_metadata,
+                nnodes,
+                rank,
+            )
+        else:
+            raise ValueError(f"Unknown transfer_mode: {transfer_mode}")
+    finally:
+        end_time = time.time()
+        end_mem = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
+        peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)  # MB
+        
+        duration = end_time - start_time
+        mem_diff = end_mem - start_mem
+        
+        logger.info(
+            f"[Perf] Expert update ({transfer_mode}) completed: "
+            f"Time = {duration:.3f}s, "
+            f"Final GPU memory = {end_mem:.2f} MB, "
+            f"Peak GPU memory = {peak_mem:.2f} MB, "
+            f"Memory change = {mem_diff:.2f} MB"
         )
-    elif transfer_mode == "cpu":
-        _update_expert_weights_via_cpu(
-            routed_experts_weights_of_layer,
-            old_expert_location_metadata,
-            new_expert_location_metadata,
-            nnodes,
-            rank,
-        )
-    else:
-        raise ValueError(f"Unknown transfer_mode: {transfer_mode}")
+        
+        torch.cuda.reset_peak_memory_stats()
     
     old_expert_location_metadata.update(new_expert_location_metadata)
 
@@ -66,8 +90,20 @@ def _update_expert_weights(
     nnodes: int,
     rank: int,
 ):
+    fn_start_time = time.time()
+    fn_start_mem = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
+    
+    temp_buffers_start_time = time.time()
     temp_buffers = create_temp_buffers(
         next(iter(routed_experts_weights_of_layer.values()))
+    )
+    temp_buffers_end_time = time.time()
+    temp_buffers_mem = (torch.cuda.memory_allocated() / (1024 ** 2)) - fn_start_mem
+    
+    logger.info(
+        f"[Perf-GPU] Created temp buffers: "
+        f"Time = {temp_buffers_end_time - temp_buffers_start_time:.3f}s, "
+        f"Memory = {temp_buffers_mem:.2f} MB"
     )
 
     world_size = torch.distributed.get_world_size()
@@ -81,8 +117,11 @@ def _update_expert_weights(
         new_expert_location_metadata.physical_to_logical_map.tolist()
     )
 
-    for layer_id in sorted(routed_experts_weights_of_layer.keys()):
-        update_expert_weights_single_layer(
+    total_layers = len(routed_experts_weights_of_layer)
+    for layer_idx, layer_id in enumerate(sorted(routed_experts_weights_of_layer.keys())):
+        layer_start_time = time.time()
+        
+        _update_expert_weights_single_layer(
             routed_experts_weights=routed_experts_weights_of_layer[layer_id],
             temp_buffers=temp_buffers,
             old_physical_to_logical_map=old_physical_to_logical_map[layer_id],
@@ -91,6 +130,23 @@ def _update_expert_weights(
             num_gpu_per_node=num_gpu_per_node,
             rank=rank,
         )
+        
+        layer_end_time = time.time()
+        if layer_idx == 0 or layer_idx == total_layers - 1 or layer_idx == total_layers // 2:
+            logger.info(
+                f"[Perf-GPU] Layer {layer_id} ({layer_idx+1}/{total_layers}) updated: "
+                f"Time = {layer_end_time - layer_start_time:.3f}s"
+            )
+    
+    fn_end_time = time.time()
+    fn_end_mem = torch.cuda.memory_allocated() / (1024 ** 2)
+    
+    logger.info(
+        f"[Perf-GPU] _update_expert_weights completed: "
+        f"Total time = {fn_end_time - fn_start_time:.3f}s, "
+        f"Memory change = {fn_end_mem - fn_start_mem:.2f} MB"
+    )
+
 
 def _update_expert_weights_via_cpu(
     routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
@@ -99,19 +155,29 @@ def _update_expert_weights_via_cpu(
     nnodes: int,
     rank: int,
 ):
+    fn_start_time = time.time()
+    fn_start_mem = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
+    
+    logger.info(f"[Perf-CPU] Starting CPU-based expert weight update")
+    
     world_size = torch.distributed.get_world_size()
     num_local_physical_experts = old_expert_location_metadata.num_local_physical_experts
     num_gpu_per_node = world_size // nnodes
-
+    
     old_physical_to_logical_map = old_expert_location_metadata.physical_to_logical_map.tolist()
     new_physical_to_logical_map = new_expert_location_metadata.physical_to_logical_map.tolist()
-
-    for layer_id in sorted(routed_experts_weights_of_layer.keys()):
+    
+    total_layers = len(routed_experts_weights_of_layer)
+    for layer_idx, layer_id in enumerate(sorted(routed_experts_weights_of_layer.keys())):
+        layer_start_time = time.time()
+        
         expert_weights_list = routed_experts_weights_of_layer[layer_id]
+        
         old_layer_mapping = old_physical_to_logical_map[layer_id]
         new_layer_mapping = new_physical_to_logical_map[layer_id]
-
-        update_layer_weights_via_cpu(
+        
+        # 使用真正的CPU传输方式
+        update_layer_weights_via_cpu_truly(
             expert_weights_list=expert_weights_list,
             old_physical_to_logical_map=old_layer_mapping,
             new_physical_to_logical_map=new_layer_mapping,
@@ -120,8 +186,25 @@ def _update_expert_weights_via_cpu(
             rank=rank,
             layer_id=layer_id,
         )
+        
+        layer_end_time = time.time()
+        if layer_idx == 0 or layer_idx == total_layers - 1 or layer_idx == total_layers // 2:
+            logger.info(
+                f"[Perf-CPU] Layer {layer_id} ({layer_idx+1}/{total_layers}) updated: "
+                f"Time = {layer_end_time - layer_start_time:.3f}s"
+            )
+    
+    fn_end_time = time.time()
+    fn_end_mem = torch.cuda.memory_allocated() / (1024 ** 2)
+    
+    logger.info(
+        f"[Perf-CPU] _update_expert_weights_via_cpu completed: "
+        f"Total time = {fn_end_time - fn_start_time:.3f}s, "
+        f"Memory change = {fn_end_mem - fn_start_mem:.2f} MB"
+    )
 
-def update_layer_weights_via_cpu(
+
+def update_layer_weights_via_cpu_truly(
     expert_weights_list: List[torch.Tensor],
     old_physical_to_logical_map: List[int],
     new_physical_to_logical_map: List[int],
@@ -130,143 +213,167 @@ def update_layer_weights_via_cpu(
     rank: int,
     layer_id: int,
 ):
+    """真正基于CPU的专家权重更新，完全避开NCCL后端限制"""
+    fn_start_time = time.time()
+    fn_start_mem = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
+    
+    world_size = torch.distributed.get_world_size()
+    
+    # 确定当前GPU的专家范围
     local_expert_range = (
         rank * num_local_physical_experts,
         (rank + 1) * num_local_physical_experts,
     )
-
-    current_gpu_logical_experts = []
-    for idx in range(*local_expert_range):
-        if idx < len(new_physical_to_logical_map):
-            logical_id = new_physical_to_logical_map[idx]
-            current_gpu_logical_experts.append(logical_id)
-
-    send_requests = []
-
+    
+    # 1. 找出当前GPU需要的专家（从旧位置获取）
+    requested_experts = []
+    
     for local_idx, global_idx in enumerate(range(*local_expert_range)):
         if global_idx >= len(new_physical_to_logical_map):
             continue
             
         target_logical_id = new_physical_to_logical_map[global_idx]
         
-        source_global_idx = None
-        source_rank = None
+        # 检查是否需要从其他GPU获取
+        source_found_locally = False
         
-        for idx, logical_id in enumerate(old_physical_to_logical_map):
-            if logical_id == target_logical_id:
-                source_global_idx = idx
-                source_rank = idx // num_local_physical_experts
-                break
-        
-        if source_global_idx is not None and source_rank != rank:
-            send_requests.append({
-                "target_logical_id": target_logical_id,
-                "target_local_idx": local_idx,
-                "source_rank": source_rank,
-                "source_global_idx": source_global_idx,
-                "source_local_idx": source_global_idx % num_local_physical_experts,
-            })
-
-    for local_idx, global_idx in enumerate(range(*local_expert_range)):
-        if global_idx >= len(new_physical_to_logical_map):
-            continue
-            
-        target_logical_id = new_physical_to_logical_map[global_idx]
-        
+        # 先检查是否可以在本地找到
         for src_local_idx, src_global_idx in enumerate(range(*local_expert_range)):
             if src_global_idx < len(old_physical_to_logical_map) and old_physical_to_logical_map[src_global_idx] == target_logical_id:
+                # 本地复制
                 for tensor_idx in range(len(expert_weights_list)):
                     expert_weights_list[tensor_idx][local_idx].copy_(
                         expert_weights_list[tensor_idx][src_local_idx]
                     )
-                send_requests = [r for r in send_requests if r["target_local_idx"] != local_idx]
+                source_found_locally = True
                 break
-
-    if send_requests:
-        process_cross_gpu_requests_via_cpu(
-            expert_weights_list=expert_weights_list,
-            send_requests=send_requests,
-            rank=rank,
-            layer_id=layer_id,
-        )
-
-def process_cross_gpu_requests_via_cpu(
-    expert_weights_list: List[torch.Tensor],
-    send_requests: List[dict],
-    rank: int,
-    layer_id: int,
-):
-    world_size = torch.distributed.get_world_size()
-    
-    requests_by_source = {}
-    for req in send_requests:
-        source_rank = req["source_rank"]
-        if source_rank not in requests_by_source:
-            requests_by_source[source_rank] = []
-        requests_by_source[source_rank].append(req)
-    
-    for tensor_idx in range(len(expert_weights_list)):
-        tensor = expert_weights_list[tensor_idx]
         
-        tensor_shape = tensor.shape[1:] 
-        tensor_dtype = tensor.dtype
+        # 如果在本地找不到，需要从其他GPU获取
+        if not source_found_locally:
+            # 查找源GPU
+            source_global_idx = None
+            source_rank = None
+            
+            for idx, logical_id in enumerate(old_physical_to_logical_map):
+                if logical_id == target_logical_id:
+                    source_global_idx = idx
+                    source_rank = idx // num_local_physical_experts
+                    break
+            
+            if source_global_idx is not None:
+                requested_experts.append({
+                    "target_logical_id": target_logical_id,
+                    "target_local_idx": local_idx,
+                    "source_rank": source_rank,
+                    "source_global_idx": source_global_idx,
+                    "source_local_idx": source_global_idx % num_local_physical_experts,
+                })
+    
+    local_copies_time = time.time() - fn_start_time
+    logger.debug(
+        f"[Perf-CPU-True] Layer {layer_id}: Found {len(requested_experts)} experts to request, "
+        f"Time = {local_copies_time:.3f}s"
+    )
+    
+    # 如果没有需要跨GPU请求的专家，提前返回
+    if not requested_experts:
+        logger.debug(f"[Perf-CPU-True] Layer {layer_id}: No cross-GPU requests needed")
+        return
+    
+    # 2. 收集所有GPU的请求信息
+    all_requests = [None] * world_size
+    torch.distributed.all_gather_object(all_requests, requested_experts)
+    
+    # 3. 准备需要发送的专家数据
+    # 格式: {target_rank: {(tensor_idx, target_local_idx): cpu_tensor, ...}, ...}
+    experts_to_send = {}
+    
+    comm_prep_start = time.time()
+    
+    for target_rank, requests in enumerate(all_requests):
+        if target_rank == rank or not requests:
+            continue
+            
+        experts_for_target = {}
         
-        for source_rank, requests in requests_by_source.items():
-            requested_local_indices = [req["source_local_idx"] for req in requests]
-            all_ranks_requests = [[] for _ in range(world_size)]
-            all_ranks_requests[source_rank] = requested_local_indices
-            
-            object_list = [None] * world_size
-            torch.distributed.all_gather_object(object_list, all_ranks_requests)
-            
-            requests_to_me = object_list[rank]
-            
-            if rank == source_rank:
-                for target_rank, local_indices in enumerate(object_list):
-                    if target_rank != rank and local_indices:
-                        num_experts = len(local_indices)
-                        cpu_tensor = torch.empty(
-                            (num_experts,) + tensor_shape, 
-                            dtype=tensor_dtype, 
-                            device="cpu"
-                        )
-                        
-                        for i, local_idx in enumerate(local_indices):
-                            cpu_tensor[i].copy_(tensor[local_idx].cpu())
-                        
-                        torch.distributed.send(cpu_tensor, dst=target_rank)
-                        
-                        logger.debug(
-                            f"Sent {num_experts} experts for layer {layer_id} "
-                            f"tensor {tensor_idx} from rank {rank} to rank {target_rank}"
-                        )
-            
-            if requests_to_me:
-                num_experts = len(requests)
-                cpu_tensor = torch.empty(
-                    (num_experts,) + tensor_shape, 
-                    dtype=tensor_dtype, 
-                    device="cpu"
-                )
+        for req in requests:
+            if req["source_rank"] == rank:
+                source_local_idx = req["source_local_idx"]
+                target_local_idx = req["target_local_idx"]
                 
-                torch.distributed.recv(cpu_tensor, src=source_rank)
-                
-                for i, req in enumerate(requests):
-                    target_local_idx = req["target_local_idx"]
-                    tensor[target_local_idx].copy_(cpu_tensor[i].to(tensor.device))
-                
-                logger.debug(
-                    f"Received {num_experts} experts for layer {layer_id} "
-                    f"tensor {tensor_idx} from rank {source_rank} to rank {rank}"
-                )
+                # 将需要的专家权重移至CPU
+                for tensor_idx, tensor in enumerate(expert_weights_list):
+                    # 创建CPU张量的唯一键
+                    key = (tensor_idx, target_local_idx)
+                    # 将GPU张量移至CPU
+                    experts_for_target[key] = tensor[source_local_idx].cpu()
+        
+        if experts_for_target:
+            experts_to_send[target_rank] = experts_for_target
+    
+    comm_prep_time = time.time() - comm_prep_start
+    logger.debug(
+        f"[Perf-CPU-True] Layer {layer_id}: Prepared data for {len(experts_to_send)} target ranks, "
+        f"Time = {comm_prep_time:.3f}s"
+    )
+    
+    # 4. 使用all_gather_object进行数据交换
+    # 构建发送缓冲区 - 每个rank一个字典
+    send_buffer = [{}] * world_size
+    for target_rank, data in experts_to_send.items():
+        send_buffer[target_rank] = data
+    
+    # 接收缓冲区
+    recv_buffer = [None] * world_size
+    
+    # 执行交换
+    exchange_start = time.time()
+    torch.distributed.all_gather_object(recv_buffer, send_buffer[rank])
+    exchange_time = time.time() - exchange_start
+    
+    logger.debug(
+        f"[Perf-CPU-True] Layer {layer_id}: Exchanged expert weights, "
+        f"Time = {exchange_time:.3f}s"
+    )
+    
+    # 5. 处理接收到的专家数据
+    update_start = time.time()
+    
+    experts_received = 0
+    for source_rank, data in enumerate(recv_buffer):
+        if source_rank == rank or not data:
+            continue
             
-            torch.distributed.barrier()
+        for (tensor_idx, local_idx), cpu_tensor in data.items():
+            # 将CPU张量复制回GPU
+            expert_weights_list[tensor_idx][local_idx].copy_(cpu_tensor.to(expert_weights_list[tensor_idx].device))
+            experts_received += 1
+    
+    update_time = time.time() - update_start
+    logger.debug(
+        f"[Perf-CPU-True] Layer {layer_id}: Updated {experts_received} expert weights, "
+        f"Time = {update_time:.3f}s"
+    )
+    
+    # 同步所有进程，确保权重更新完成
+    torch.distributed.barrier()
+    
+    # 总时间和内存使用
+    fn_end_time = time.time()
+    fn_end_mem = torch.cuda.memory_allocated() / (1024 ** 2)
+    
+    logger.debug(
+        f"[Perf-CPU-True] Layer {layer_id} weights updated via CPU: "
+        f"Total time = {fn_end_time - fn_start_time:.3f}s, "
+        f"Memory change = {fn_end_mem - fn_start_mem:.2f} MB"
+    )
+
 
 def create_temp_buffers(sample_tensors):
     return [torch.empty_like(tensor) for tensor in sample_tensors]
 
 
-def update_expert_weights_single_layer(
+def _update_expert_weights_single_layer(
     routed_experts_weights: List[torch.Tensor],
     temp_buffers: List[torch.Tensor],
     old_physical_to_logical_map: List[int],  # (num_physical_Experts,)
@@ -611,3 +718,6 @@ def _deduplicate_ordered(arr: List[int]):
         if len(output) == 0 or item != output[-1]:
             output.append(item)
     return output
+
+# 添加别名函数，确保代码能正常工作
+update_layer_weights_via_cpu = update_layer_weights_via_cpu_truly
