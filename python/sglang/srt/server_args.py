@@ -181,6 +181,7 @@ class ServerArgs:
     ] = None
     expert_distribution_recorder_buffer_size: Optional[int] = None
     enable_expert_distribution_metrics: bool = False
+    expert_location_transfer_mode: Optional[Literal["gpu", "cpu"]] = None
     deepep_config: Optional[str] = None
     enable_torch_compile: bool = False
     torch_compile_max_bs: int = 32
@@ -1323,6 +1324,12 @@ class ServerArgs:
             "--enable-expert-distribution-metrics",
             action="store_true",
             help="Enable logging metrics for expert balancedness",
+        )
+        parser.add_argument(
+            "--expert-location-transfer-mode",
+            type=str,
+            default=ServerArgs.expert_location_transfer_mode,
+            help="Mode of expert location transfer",
         )
         parser.add_argument(
             "--deepep-config",

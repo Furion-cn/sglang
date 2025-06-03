@@ -32,15 +32,30 @@ def update_expert_location(
     new_expert_location_metadata: ExpertLocationMetadata,
     nnodes: int,
     rank: int,
+    transfer_mode: str = "gpu",
 ):
+    logger.info(f"Update expert location via {transfer_mode}")
     old_expert_location_metadata = get_global_expert_location_metadata()
-    _update_expert_weights(
-        routed_experts_weights_of_layer,
-        old_expert_location_metadata,
-        new_expert_location_metadata,
-        nnodes,
-        rank,
-    )
+
+    if transfer_mode == "gpu":
+        _update_expert_weights(
+            routed_experts_weights_of_layer,
+            old_expert_location_metadata,
+            new_expert_location_metadata,
+            nnodes,
+            rank,
+        )
+    elif transfer_mode == "cpu":
+        _update_expert_weights_via_cpu(
+            routed_experts_weights_of_layer,
+            old_expert_location_metadata,
+            new_expert_location_metadata,
+            nnodes,
+            rank,
+        )
+    else:
+        raise ValueError(f"Unknown transfer_mode: {transfer_mode}")
+    
     old_expert_location_metadata.update(new_expert_location_metadata)
 
 
@@ -77,6 +92,175 @@ def _update_expert_weights(
             rank=rank,
         )
 
+def _update_expert_weights_via_cpu(
+    routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
+    old_expert_location_metadata: ExpertLocationMetadata,
+    new_expert_location_metadata: ExpertLocationMetadata,
+    nnodes: int,
+    rank: int,
+):
+    world_size = torch.distributed.get_world_size()
+    num_local_physical_experts = old_expert_location_metadata.num_local_physical_experts
+    num_gpu_per_node = world_size // nnodes
+
+    old_physical_to_logical_map = old_expert_location_metadata.physical_to_logical_map.tolist()
+    new_physical_to_logical_map = new_expert_location_metadata.physical_to_logical_map.tolist()
+
+    for layer_id in sorted(routed_experts_weights_of_layer.keys()):
+        expert_weights_list = routed_experts_weights_of_layer[layer_id]
+        old_layer_mapping = old_physical_to_logical_map[layer_id]
+        new_layer_mapping = new_physical_to_logical_map[layer_id]
+
+        update_layer_weights_via_cpu(
+            expert_weights_list=expert_weights_list,
+            old_physical_to_logical_map=old_layer_mapping,
+            new_physical_to_logical_map=new_layer_mapping,
+            num_local_physical_experts=num_local_physical_experts,
+            num_gpu_per_node=num_gpu_per_node,
+            rank=rank,
+            layer_id=layer_id,
+        )
+
+def update_layer_weights_via_cpu(
+    expert_weights_list: List[torch.Tensor],
+    old_physical_to_logical_map: List[int],
+    new_physical_to_logical_map: List[int],
+    num_local_physical_experts: int,
+    num_gpu_per_node: int,
+    rank: int,
+    layer_id: int,
+):
+    local_expert_range = (
+        rank * num_local_physical_experts,
+        (rank + 1) * num_local_physical_experts,
+    )
+
+    current_gpu_logical_experts = []
+    for idx in range(*local_expert_range):
+        if idx < len(new_physical_to_logical_map):
+            logical_id = new_physical_to_logical_map[idx]
+            current_gpu_logical_experts.append(logical_id)
+
+    send_requests = []
+
+    for local_idx, global_idx in enumerate(range(*local_expert_range)):
+        if global_idx >= len(new_physical_to_logical_map):
+            continue
+            
+        target_logical_id = new_physical_to_logical_map[global_idx]
+        
+        source_global_idx = None
+        source_rank = None
+        
+        for idx, logical_id in enumerate(old_physical_to_logical_map):
+            if logical_id == target_logical_id:
+                source_global_idx = idx
+                source_rank = idx // num_local_physical_experts
+                break
+        
+        if source_global_idx is not None and source_rank != rank:
+            send_requests.append({
+                "target_logical_id": target_logical_id,
+                "target_local_idx": local_idx,
+                "source_rank": source_rank,
+                "source_global_idx": source_global_idx,
+                "source_local_idx": source_global_idx % num_local_physical_experts,
+            })
+
+    for local_idx, global_idx in enumerate(range(*local_expert_range)):
+        if global_idx >= len(new_physical_to_logical_map):
+            continue
+            
+        target_logical_id = new_physical_to_logical_map[global_idx]
+        
+        for src_local_idx, src_global_idx in enumerate(range(*local_expert_range)):
+            if src_global_idx < len(old_physical_to_logical_map) and old_physical_to_logical_map[src_global_idx] == target_logical_id:
+                for tensor_idx in range(len(expert_weights_list)):
+                    expert_weights_list[tensor_idx][local_idx].copy_(
+                        expert_weights_list[tensor_idx][src_local_idx]
+                    )
+                send_requests = [r for r in send_requests if r["target_local_idx"] != local_idx]
+                break
+
+    if send_requests:
+        process_cross_gpu_requests_via_cpu(
+            expert_weights_list=expert_weights_list,
+            send_requests=send_requests,
+            rank=rank,
+            layer_id=layer_id,
+        )
+
+def process_cross_gpu_requests_via_cpu(
+    expert_weights_list: List[torch.Tensor],
+    send_requests: List[dict],
+    rank: int,
+    layer_id: int,
+):
+    world_size = torch.distributed.get_world_size()
+    
+    requests_by_source = {}
+    for req in send_requests:
+        source_rank = req["source_rank"]
+        if source_rank not in requests_by_source:
+            requests_by_source[source_rank] = []
+        requests_by_source[source_rank].append(req)
+    
+    for tensor_idx in range(len(expert_weights_list)):
+        tensor = expert_weights_list[tensor_idx]
+        
+        tensor_shape = tensor.shape[1:] 
+        tensor_dtype = tensor.dtype
+        
+        for source_rank, requests in requests_by_source.items():
+            requested_local_indices = [req["source_local_idx"] for req in requests]
+            all_ranks_requests = [[] for _ in range(world_size)]
+            all_ranks_requests[source_rank] = requested_local_indices
+            
+            object_list = [None] * world_size
+            torch.distributed.all_gather_object(object_list, all_ranks_requests)
+            
+            requests_to_me = object_list[rank]
+            
+            if rank == source_rank:
+                for target_rank, local_indices in enumerate(object_list):
+                    if target_rank != rank and local_indices:
+                        num_experts = len(local_indices)
+                        cpu_tensor = torch.empty(
+                            (num_experts,) + tensor_shape, 
+                            dtype=tensor_dtype, 
+                            device="cpu"
+                        )
+                        
+                        for i, local_idx in enumerate(local_indices):
+                            cpu_tensor[i].copy_(tensor[local_idx].cpu())
+                        
+                        torch.distributed.send(cpu_tensor, dst=target_rank)
+                        
+                        logger.debug(
+                            f"Sent {num_experts} experts for layer {layer_id} "
+                            f"tensor {tensor_idx} from rank {rank} to rank {target_rank}"
+                        )
+            
+            if requests_to_me:
+                num_experts = len(requests)
+                cpu_tensor = torch.empty(
+                    (num_experts,) + tensor_shape, 
+                    dtype=tensor_dtype, 
+                    device="cpu"
+                )
+                
+                torch.distributed.recv(cpu_tensor, src=source_rank)
+                
+                for i, req in enumerate(requests):
+                    target_local_idx = req["target_local_idx"]
+                    tensor[target_local_idx].copy_(cpu_tensor[i].to(tensor.device))
+                
+                logger.debug(
+                    f"Received {num_experts} experts for layer {layer_id} "
+                    f"tensor {tensor_idx} from rank {source_rank} to rank {rank}"
+                )
+            
+            torch.distributed.barrier()
 
 def create_temp_buffers(sample_tensors):
     return [torch.empty_like(tensor) for tensor in sample_tensors]

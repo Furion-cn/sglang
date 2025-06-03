@@ -598,13 +598,14 @@ class ModelRunner:
             ) from None
 
     def update_expert_location(
-        self, new_expert_location_metadata: ExpertLocationMetadata
+        self, new_expert_location_metadata: ExpertLocationMetadata,
     ):
         expert_location_updater.update_expert_location(
             self.model.routed_experts_weights_of_layer,
             new_expert_location_metadata,
             nnodes=self.server_args.nnodes,
             rank=self.tp_rank,
+            transfer_mode=self.server_args.expert_location_transfer_mode,
         )
 
     def update_weights_from_disk(
