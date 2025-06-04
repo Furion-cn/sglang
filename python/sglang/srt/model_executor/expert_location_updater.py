@@ -26,6 +26,20 @@ from sglang.srt.managers.expert_location import (
 
 logger = logging.getLogger(__name__)
 
+_global_eplb_rebalance_buffer = None
+
+def set_global_eplb_rebalance_buffer(buffer: List[torch.Tensor]):
+    global _global_eplb_rebalance_buffer
+    _global_eplb_rebalance_buffer = buffer
+
+def get_global_eplb_rebalance_buffer() -> List[torch.Tensor]:
+    return _global_eplb_rebalance_buffer
+
+def clear_global_eplb_rebalance_buffer():
+    global _global_eplb_rebalance_buffer
+    if _global_eplb_rebalance_buffer is not None:
+        for buffer in _global_eplb_rebalance_buffer:
+            buffer.zero_()
 
 def update_expert_location(
     routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
@@ -43,6 +57,7 @@ def update_expert_location(
     )
     old_expert_location_metadata.update(new_expert_location_metadata)
 
+    clear_global_eplb_rebalance_buffer()
 
 def _update_expert_weights(
     routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
@@ -51,10 +66,6 @@ def _update_expert_weights(
     nnodes: int,
     rank: int,
 ):
-    temp_buffers = create_temp_buffers(
-        next(iter(routed_experts_weights_of_layer.values()))
-    )
-
     world_size = torch.distributed.get_world_size()
     num_local_physical_experts = old_expert_location_metadata.num_local_physical_experts
     num_gpu_per_node = world_size // nnodes
@@ -69,7 +80,7 @@ def _update_expert_weights(
     for layer_id in sorted(routed_experts_weights_of_layer.keys()):
         update_expert_weights_single_layer(
             routed_experts_weights=routed_experts_weights_of_layer[layer_id],
-            temp_buffers=temp_buffers,
+            temp_buffers=get_global_eplb_rebalance_buffer(),
             old_physical_to_logical_map=old_physical_to_logical_map[layer_id],
             new_physical_to_logical_map=new_physical_to_logical_map[layer_id],
             num_local_physical_experts=num_local_physical_experts,
