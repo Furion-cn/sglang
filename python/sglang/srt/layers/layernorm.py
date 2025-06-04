@@ -73,7 +73,7 @@ class RMSNorm(CustomOp):
             return x, residual
         out = torch.empty_like(x)
         rms_norm(out, x, self.weight.data, self.variance_epsilon)
-        return out
+        return out, None
 
     def forward_native(
         self,
