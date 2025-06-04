@@ -88,7 +88,7 @@ class RMSNorm(CustomOp):
             logger.info(f"rmsnorm out.shape: {out}")
 
         logger.info(f"-------------------------rmsnorm out.shape: {out}")
-        return out
+        return out, None
 
     def forward_hip(
         self,
