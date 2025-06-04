@@ -12,6 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 
+import logging
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -34,6 +35,8 @@ from sglang.srt.layers.dp_attention import (
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+logger = logging.getLogger(__name__)
 
 
 class ScatterMode(Enum):
@@ -216,6 +219,9 @@ class LayerCommunicator:
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        logger.info(
+            f"1111-----------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
+        )
         return self._communicate_summable_tensor_pair_fn(
             hidden_states=hidden_states,
             residual=residual,

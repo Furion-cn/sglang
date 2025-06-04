@@ -265,7 +265,25 @@ class LogitsProcessor(nn.Module):
         ):
             # Prefill without input logprobs.
             if logits_metadata.padded_static_len < 0:
-                last_index = torch.cumsum(logits_metadata.extend_seq_lens, dim=0) - 1
+                logger.info(
+                    f"DEBUG: Before calculating last_index - extend_seq_lens type: {type(logits_metadata.extend_seq_lens)}, "
+                    f"extend_seq_lens: {logits_metadata.extend_seq_lens}, "
+                    f"extend_seq_lens.shape: {getattr(logits_metadata.extend_seq_lens, 'shape', 'N/A')}, "
+                    f"extend_seq_lens.device: {getattr(logits_metadata.extend_seq_lens, 'device', 'N/A')}"
+                )
+                try:
+                    cumsum_result = torch.cumsum(logits_metadata.extend_seq_lens, dim=0)
+                    logger.info(f"DEBUG: cumsum_result: {cumsum_result}")
+                    last_index = cumsum_result - 1
+                    logger.info(
+                        f"DEBUG: last_index calculated successfully: {last_index}"
+                    )
+                except Exception as e:
+                    logger.error(f"DEBUG: Error calculating last_index: {e}")
+                    logger.error(
+                        f"DEBUG: extend_seq_lens content: {logits_metadata.extend_seq_lens}"
+                    )
+                    raise
                 logger.info(
                     f"logits_metadata.padded_static_len < 0--------------------------------last_index: {last_index}, hidden_states_shape: {hidden_states.shape}"
                 )
@@ -273,22 +291,55 @@ class LogitsProcessor(nn.Module):
                 # If padding_static length is 5 and extended_seq_lens is [2, 3],
                 # then our batch looks like [t00, t01, p, p, p, t10, t11, t12, p, p]
                 # and this retrieves t01 and t12, which are the valid last tokens
-                idx = torch.arange(
-                    len(logits_metadata.extend_seq_lens),
-                    device=logits_metadata.extend_seq_lens.device,
+                logger.info(
+                    f"DEBUG: padded_static_len >= 0 branch - extend_seq_lens: {logits_metadata.extend_seq_lens}, "
+                    f"padded_static_len: {logits_metadata.padded_static_len}"
                 )
-                last_index = (
-                    idx * logits_metadata.padded_static_len
-                    + logits_metadata.extend_seq_lens
-                    - 1
-                )
+                try:
+                    idx = torch.arange(
+                        len(logits_metadata.extend_seq_lens),
+                        device=logits_metadata.extend_seq_lens.device,
+                    )
+                    logger.info(f"DEBUG: idx: {idx}")
+                    last_index = (
+                        idx * logits_metadata.padded_static_len
+                        + logits_metadata.extend_seq_lens
+                        - 1
+                    )
+                    logger.info(f"DEBUG: last_index calculated: {last_index}")
+                except Exception as e:
+                    logger.error(f"DEBUG: Error in padded_static_len >= 0 branch: {e}")
+                    raise
                 logger.info(
                     f"logits_metadata.padded_static_len >= 0--------------------------------last_index: {last_index}, hidden_states_shape: {hidden_states.shape}"
                 )
             logger.info(
                 f"********************last_index: {last_index}, hidden_states_shape: {hidden_states.shape}"
             )
-            pruned_states = hidden_states[last_index]
+            # Safety check before indexing
+            if isinstance(last_index, torch.Tensor):
+                max_index = torch.max(last_index).item()
+                min_index = torch.min(last_index).item()
+                logger.info(
+                    f"DEBUG: last_index range: min={min_index}, max={max_index}, hidden_states.shape[0]={hidden_states.shape[0]}"
+                )
+                if max_index >= hidden_states.shape[0]:
+                    logger.error(
+                        f"DEBUG: Index out of bounds! max_index={max_index} >= hidden_states.shape[0]={hidden_states.shape[0]}"
+                    )
+                if min_index < 0:
+                    logger.error(f"DEBUG: Negative index! min_index={min_index}")
+
+            try:
+                pruned_states = hidden_states[last_index]
+                logger.info(f"DEBUG: pruned_states.shape: {pruned_states.shape}")
+            except Exception as e:
+                logger.error(
+                    f"DEBUG: Error indexing hidden_states with last_index: {e}"
+                )
+                logger.error(f"DEBUG: last_index: {last_index}")
+                logger.error(f"DEBUG: hidden_states.shape: {hidden_states.shape}")
+                raise
             if aux_hidden_states is not None:
                 aux_pruned_states = [hidden[last_index] for hidden in aux_hidden_states]
             sample_indices = None
