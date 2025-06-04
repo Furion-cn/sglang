@@ -117,7 +117,18 @@ class DeepseekModelNextN(nn.Module):
             f"5555-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode} hidden_states_shape: {hidden_states.shape}"
         )
         if not forward_batch.forward_mode.is_idle():
-            hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+            logger.info(
+                f"DEBUG: About to call self.shared_head.norm with hidden_states.shape={None if hidden_states is None else hidden_states.shape}, residual={'None' if residual is None else residual.shape}"
+            )
+            norm_result = self.shared_head.norm(hidden_states, residual)
+            logger.info(
+                f"DEBUG: self.shared_head.norm returned {len(norm_result) if isinstance(norm_result, (tuple, list)) else 1} values: {type(norm_result)}"
+            )
+            if isinstance(norm_result, (tuple, list)):
+                logger.info(
+                    f"DEBUG: norm_result contents nums:{len(norm_result)} {[type(x) for x in norm_result]}"
+                )
+            hidden_states, _ = norm_result
         logger.info(
             f"6666-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode} hidden_states_shape: {hidden_states.shape}"
         )
