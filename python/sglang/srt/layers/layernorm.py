@@ -80,7 +80,14 @@ class RMSNorm(CustomOp):
             )
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x, residual
+        logger.info(f"rmsnorm x.shape: {x.shape}")
         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
+        if isinstance(out, tuple) or isinstance(out, list):
+            logger.info(f"rmsnorm out.shape: len(out):{len(out)}")
+        else:
+            logger.info(f"rmsnorm out.shape: {out}")
+
+        logger.info(f"-------------------------rmsnorm out.shape: {out}")
         return out
 
     def forward_hip(
