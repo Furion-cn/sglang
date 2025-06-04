@@ -501,21 +501,21 @@ class CommunicateSummableTensorPairFn:
         hidden_states += residual
         residual = None
         logger.info(
-            f"1112-----------_gather hidden_states_shape: {hidden_states.shape}, residual_shape: {residual.shape}"
+            f"1112-----------_gather hidden_states_shape: {None if hidden_states is None else hidden_states.shape}, residual_shape: {None if residual is None else residual.shape}"
         )
         hidden_states, local_hidden_states = (
             forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
             hidden_states,
         )
         logger.info(
-            f"1113-----------_gather hidden_states_shape: {hidden_states.shape}, local_hidden_states_shape: {local_hidden_states.shape}"
+            f"1113-----------_gather hidden_states_shape: {None if hidden_states is None else hidden_states.shape}, local_hidden_states_shape: {None if local_hidden_states is None else local_hidden_states.shape}"
         )
         attn_tp_all_gather(
             list(hidden_states.tensor_split(context.attn_tp_size)),
             local_hidden_states,
         )
         logger.info(
-            f"1114-----------_gather hidden_states_shape: {hidden_states.shape}, residual_shape: {residual.shape}"
+            f"1114-----------_gather hidden_states_shape: {None if hidden_states is None else hidden_states.shape}, residual_shape: {None if residual is None else residual.shape}"
         )
         return hidden_states, residual
 
