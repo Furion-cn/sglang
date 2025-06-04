@@ -1449,24 +1449,26 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
-
+        logger.info(f"1111----------- hidden_states_shape: {hidden_states.shape}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
-
+        logger.info(f"7777----------- hidden_states_shape: {hidden_states.shape}")
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-
+        logger.info(f"8888-----------hidden_states_shape: {hidden_states.shape}")
         hidden_states = self.mlp(hidden_states, forward_batch)
-
+        logger.info(f"9999-----------hidden_states_shape: {hidden_states.shape}")
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
-
+        logger.info(
+            f"1010-----------hidden_states_shape: {hidden_states.shape}, residual_shape: {residual.shape}"
+        )
         return hidden_states, residual
 
     def op_comm_prepare_attn(
