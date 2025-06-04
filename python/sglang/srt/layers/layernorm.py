@@ -71,6 +71,13 @@ class RMSNorm(CustomOp):
         )
 
         if residual is not None:
+            logger.info(
+                f"fused_add_rmsnorm inputs:\\n"
+                f"  x: shape={x.shape}, dtype={x.dtype}, device={x.device}, is_contiguous={x.is_contiguous()}\\n"
+                f"  residual: shape={residual.shape}, dtype={residual.dtype}, device={residual.device}, is_contiguous={residual.is_contiguous()}\\n"
+                f"  weight: shape={self.weight.data.shape}, dtype={self.weight.data.dtype}, device={self.weight.data.device}, is_contiguous={self.weight.data.is_contiguous()}\\n"
+                f"  epsilon: {self.variance_epsilon}"
+            )
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x, residual
         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
