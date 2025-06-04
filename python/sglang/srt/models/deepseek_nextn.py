@@ -153,6 +153,9 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, forward_batch)
+        logger.info(
+            f"hidden_states_shape: {hidden_states.shape} input_ids_shape: {input_ids.shape} "
+        )
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
