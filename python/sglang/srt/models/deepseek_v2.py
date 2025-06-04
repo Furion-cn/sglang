@@ -88,6 +88,7 @@ from sglang.srt.two_batch_overlap import (
     model_forward_maybe_tbo,
 )
 from sglang.srt.utils import (
+    LazyValue,
     BumpAllocator,
     DeepEPMode,
     add_prefix,
@@ -367,6 +368,9 @@ class DeepseekV2MoE(nn.Module):
                 correction_bias=self.correction_bias,
                 routed_scaling_factor=self.routed_scaling_factor,
                 num_token_non_padded=forward_batch.num_token_non_padded,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
             )
         else:
             topk_idx = torch.full(
@@ -1654,6 +1658,18 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         self.dp_size = get_local_attention_dp_size()
 
+        self._routed_experts_weights_of_layer = LazyValue(
+            lambda: {
+                layer_id: layer.mlp.get_moe_weights()
+                for layer_id, layer in enumerate(self.model.layers)
+                if isinstance(layer.mlp, DeepseekV2MoE)
+            }
+        )
+
+    @property
+    def routed_experts_weights_of_layer(self):
+        return self._routed_experts_weights_of_layer.value
+
     def determine_n_share_experts_fusion(
         self, architecture: str = "DeepseekV3ForCausalLM"
     ):
@@ -1834,14 +1850,6 @@ class DeepseekV2ForCausalLM(nn.Module):
                 self_attn.w_kc = w_kc.transpose(1, 2).contiguous()
                 self_attn.w_vc = w_vc.contiguous()
                 self_attn.use_deep_gemm_bmm = True
-
-        # TODO support nextn later
-        if not is_nextn:
-            self.routed_experts_weights_of_layer = {
-                layer_id: layer.mlp.get_moe_weights()
-                for layer_id, layer in enumerate(self.model.layers)
-                if isinstance(layer.mlp, DeepseekV2MoE)
-            }
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
         if is_nextn:
