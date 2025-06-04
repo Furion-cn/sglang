@@ -33,6 +33,8 @@ def set_global_eplb_rebalance_buffer(buffer: List[torch.Tensor]):
     _global_eplb_rebalance_buffer = buffer
 
 def get_global_eplb_rebalance_buffer() -> List[torch.Tensor]:
+    if _global_eplb_rebalance_buffer is None:
+        raise RuntimeError("Global EPLB rebalance buffer is not initialized")
     return _global_eplb_rebalance_buffer
 
 def clear_global_eplb_rebalance_buffer():
