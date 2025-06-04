@@ -563,6 +563,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             const auto num_warps = kNumWarpGroups * kNumWarpsPerGroup;
         """
         buffer = self._get_buffer()
+
+        expert_ids = topk_idx.to(torch.int64).reshape(-1)
+        local_count = torch.bincount(expert_ids, minlength=self.num_experts)
+        dist.all_reduce(local_count, group=self.group, op=dist.ReduceOp.SUM)
+        #logger.info(f"{local_count=}")
+
         packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
                 hidden_states,
