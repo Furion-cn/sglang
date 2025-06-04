@@ -77,6 +77,9 @@ class DeepseekModelNextN(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
+        logger.info(
+            f"2222-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode}"
+        )
         zero_allocator = BumpAllocator(
             buffer_size=2,
             dtype=torch.float32,
@@ -89,6 +92,10 @@ class DeepseekModelNextN(nn.Module):
             hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
+        logger.info(
+            f"3333-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode}"
+        )
+
         logger.info(f"hidden_states_dtype: {hidden_states.dtype}")
         hidden_states = self.eh_proj(
             torch.cat(
@@ -99,14 +106,21 @@ class DeepseekModelNextN(nn.Module):
                 dim=-1,
             )
         )
-
+        logger.info(
+            f"4444-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode} hidden_states_shape: {hidden_states.shape}"
+        )
         residual = None
         hidden_states, residual = self.decoder(
             positions, hidden_states, forward_batch, residual, zero_allocator
         )
-
+        logger.info(
+            f"5555-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode} hidden_states_shape: {hidden_states.shape}"
+        )
         if not forward_batch.forward_mode.is_idle():
             hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+        logger.info(
+            f"6666-----------input_ids_shape: {input_ids.shape} forward_batch.capature {forward_batch.capture_hidden_mode} hidden_states_shape: {hidden_states.shape}"
+        )
         return hidden_states
 
 
@@ -152,6 +166,9 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        logger.info(
+            f"111111----------input_ids_shape {input_ids.shape} forward_batch.capture_hidden_mode: {forward_batch.capture_hidden_mode}"
+        )
         hidden_states = self.model(input_ids, positions, forward_batch)
         logger.info(
             f"hidden_states_shape: {hidden_states.shape} input_ids_shape: {input_ids.shape} "
