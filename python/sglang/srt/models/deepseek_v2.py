@@ -84,6 +84,7 @@ from sglang.srt.managers.expert_location_dispatch import ExpertLocationDispatchI
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.operations import _annotate_region
 from sglang.srt.two_batch_overlap import (
     MaybeTboDeepEPDispatcher,
     model_forward_maybe_tbo,
@@ -1439,6 +1440,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
             post_attention_layernorm=self.post_attention_layernorm,
+            is_nextn=is_nextn,
         )
 
     def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
@@ -1474,7 +1476,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states, forward_batch)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
-            hidden_states, residual, forward_batch
+            hidden_states, residual, forward_batch, is_nextn=self.is_nextn
         )
 
         if self.enable_dp_attention and self.speculative_algorithm.is_eagle():
@@ -1531,6 +1533,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             state.pop("hidden_states_mlp_output"),
             state.pop("residual_after_comm_pre_mlp"),
             state.forward_batch,
+            is_nextn=self.is_nextn,
         )
 
         output = dict(
