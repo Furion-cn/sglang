@@ -1448,59 +1448,59 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         zero_allocator: BumpAllocator,
     ) -> torch.Tensor:
-        if self.is_nextn:
-            logger.info(
-                "nextn11111--------------hidden_states_shape: {}".format(
-                    hidden_states.shape
-                )
-            )
+        # if self.is_nextn:
+        #     logger.info(
+        #         "nextn11111--------------hidden_states_shape: {}".format(
+        #             hidden_states.shape
+        #         )
+        #     )
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
-        logger.info(f"1111----------- hidden_states_shape: {hidden_states.shape}")
+        # logger.info(f"1111----------- hidden_states_shape: {hidden_states.shape}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
-        if self.is_nextn:
-            logger.info(
-                "nextn22222--------------hidden_states_shape: {}".format(
-                    hidden_states.shape
-                )
-            )
-        logger.info(f"7777----------- hidden_states_shape: {hidden_states.shape}")
+        # if self.is_nextn:
+        #     logger.info(
+        #         "nextn22222--------------hidden_states_shape: {}".format(
+        #             hidden_states.shape
+        #         )
+        #     )
+        # logger.info(f"7777----------- hidden_states_shape: {hidden_states.shape}")
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-        if self.is_nextn:
-            logger.info(
-                "nextn33333--------------hidden_states_shape: {}".format(
-                    hidden_states.shape
-                )
-            )
-        logger.info(f"8888-----------hidden_states_shape: {hidden_states.shape}")
+        # if self.is_nextn:
+        #     logger.info(
+        #         "nextn33333--------------hidden_states_shape: {}".format(
+        #             hidden_states.shape
+        #         )
+        #     )
+        # logger.info(f"8888-----------hidden_states_shape: {hidden_states.shape}")
         hidden_states = self.mlp(hidden_states, forward_batch)
-        if self.is_nextn:
-            logger.info(
-                "nextn44444--------------hidden_states_shape: {}".format(
-                    hidden_states.shape
-                )
-            )
-        logger.info(f"9999-----------hidden_states_shape: {hidden_states.shape}")
+        # if self.is_nextn:
+        #     logger.info(
+        #         "nextn44444--------------hidden_states_shape: {}".format(
+        #             hidden_states.shape
+        #         )
+        #     )
+        # logger.info(f"9999-----------hidden_states_shape: {hidden_states.shape}")
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch, is_nextn=self.is_nextn
         )
-        if self.is_nextn:
-            logger.info(
-                "nextn55555--------------hidden_states_shape: {}".format(
-                    hidden_states.shape
-                )
-            )
-        logger.info(
-            f"1010-----------hidden_states_shape: {None if hidden_states is None else hidden_states.shape}, residual_shape: {None if residual is None else  residual.shape}"
-        )
+        # if self.is_nextn:
+        #     logger.info(
+        #         "nextn55555--------------hidden_states_shape: {}".format(
+        #             hidden_states.shape
+        #         )
+        #     )
+        # logger.info(
+        #         f"1010-----------hidden_states_shape: {None if hidden_states is None else hidden_states.shape}, residual_shape: {None if residual is None else  residual.shape}"
+        #     )
         return hidden_states, residual
 
     def op_comm_prepare_attn(
