@@ -1467,7 +1467,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
         logger.info(
-            f"1010-----------hidden_states_shape: {"none" if hidden_states is None else hidden_states.shape}, residual_shape: {"none" if residual is None else  residual.shape}"
+            f"1010-----------hidden_states_shape: {None if hidden_states is None else hidden_states.shape}, residual_shape: {None if residual is None else  residual.shape}"
         )
         return hidden_states, residual
 
