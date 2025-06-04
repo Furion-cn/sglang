@@ -98,6 +98,8 @@ from sglang.srt.utils import (
     log_info_on_rank0,
 )
 
+from sglang.srt.operations import _annotate_region
+
 _is_hip = is_hip()
 _is_cuda = is_cuda()
 
@@ -806,8 +808,8 @@ class DeepseekV2AttentionMLA(nn.Module):
                 not self.o_proj.reduce_results
             ), "short-circuiting allreduce will lead to hangs"
             return hidden_states, None, forward_batch, None
-
-        attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
+        with _annotate_region(debug_name=f"dispatch_attn_forward_method"):
+            attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
 
         if attn_forward_method == AttnForwardMethod.MHA:
             inner_state = self.forward_normal_prepare(
@@ -818,9 +820,10 @@ class DeepseekV2AttentionMLA(nn.Module):
                 positions, hidden_states, forward_batch, zero_allocator
             )
         elif attn_forward_method == AttnForwardMethod.MLA:
-            inner_state = self.forward_absorb_prepare(
-                positions, hidden_states, forward_batch, zero_allocator
-            )
+            with _annotate_region(debug_name=f"forward_absorb_prepare"):
+                inner_state = self.forward_absorb_prepare(
+                    positions, hidden_states, forward_batch, zero_allocator
+                )
         elif attn_forward_method == AttnForwardMethod.MLA_FUSED_ROPE:
             inner_state = self.forward_absorb_fused_mla_rope_prepare(
                 positions, hidden_states, forward_batch, zero_allocator
