@@ -104,7 +104,11 @@ class DeepseekModelNextN(nn.Module):
 
         residual = None
         hidden_states, residual = self.decoder(
-            positions, hidden_states, forward_batch, residual, zero_allocator
+            positions,
+            hidden_states,
+            forward_batch,
+            residual,
+            zero_allocator,
         )
 
         if not forward_batch.forward_mode.is_idle():
