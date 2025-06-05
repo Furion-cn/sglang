@@ -166,9 +166,16 @@ class EAGLEWorker(TpModelWorker):
                     self.topk,
                     self.speculative_num_steps,
                 )
-                self.draft_extend_attn_backend = FlashInferAttnBackend(
-                    self.draft_model_runner,
-                    skip_prefill=False,
+                self.draft_extend_attn_backend = (
+                    FlashInferAttnBackend(
+                        self.draft_model_runner,
+                        skip_prefill=False,
+                    )
+                    if not (
+                        self.server_args.enable_dp_attention
+                        or self.server_args.enable_sp_layernorm
+                    )
+                    else None
                 )
             else:
                 from sglang.srt.layers.attention.flashinfer_mla_backend import (
@@ -181,9 +188,16 @@ class EAGLEWorker(TpModelWorker):
                     self.topk,
                     self.speculative_num_steps,
                 )
-                self.draft_extend_attn_backend = FlashInferMLAAttnBackend(
-                    self.draft_model_runner,
-                    skip_prefill=False,
+                self.draft_extend_attn_backend = (
+                    FlashInferMLAAttnBackend(
+                        self.draft_model_runner,
+                        skip_prefill=False,
+                    )
+                    if not (
+                        self.server_args.enable_dp_attention
+                        or self.server_args.enable_sp_layernorm
+                    )
+                    else None
                 )
             self.padded_static_len = self.speculative_num_steps + 1
             self.has_prefill_wrapper_verify = True
@@ -198,9 +212,16 @@ class EAGLEWorker(TpModelWorker):
                 self.topk,
                 self.speculative_num_steps,
             )
-            self.draft_extend_attn_backend = TritonAttnBackend(
-                self.draft_model_runner,
-                skip_prefill=False,
+            self.draft_extend_attn_backend = (
+                TritonAttnBackend(
+                    self.draft_model_runner,
+                    skip_prefill=False,
+                )
+                if not (
+                    self.server_args.enable_dp_attention
+                    or self.server_args.enable_sp_layernorm
+                )
+                else None
             )
             self.padded_static_len = self.speculative_num_steps + 1
             self.has_prefill_wrapper_verify = False
