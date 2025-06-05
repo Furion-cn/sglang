@@ -58,7 +58,7 @@ class RMSNorm(CustomOp):
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x, residual
         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-        return out
+        return out, None
 
     def forward_hip(
         self,
@@ -92,7 +92,7 @@ class RMSNorm(CustomOp):
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = (x * self.weight).to(orig_dtype)
         if residual is None:
-            return x
+            return x, None
         else:
             return x, residual
 

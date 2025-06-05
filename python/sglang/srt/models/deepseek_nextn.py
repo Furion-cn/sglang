@@ -108,7 +108,7 @@ class DeepseekModelNextN(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
-            hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+            hidden_states = self.shared_head.norm(hidden_states, residual)
 
         return hidden_states
 
