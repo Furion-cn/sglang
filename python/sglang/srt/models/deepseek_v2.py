@@ -1440,7 +1440,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
             post_attention_layernorm=self.post_attention_layernorm,
-            is_nextn=is_nextn,
         )
 
     def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
@@ -1476,7 +1475,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states, forward_batch)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
-            hidden_states, residual, forward_batch, is_nextn=self.is_nextn
+            hidden_states, residual, forward_batch
         )
 
         if self.enable_dp_attention and self.speculative_algorithm.is_eagle():
@@ -1533,7 +1532,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             state.pop("hidden_states_mlp_output"),
             state.pop("residual_after_comm_pre_mlp"),
             state.forward_batch,
-            is_nextn=self.is_nextn,
         )
 
         output = dict(
