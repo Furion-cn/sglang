@@ -1246,7 +1246,9 @@ class Scheduler(
         msg += (
             f"cuda graph: {can_run_cuda_graph}, "
             f"gen throughput (token/s): {self.last_gen_throughput:.2f}, "
-            f"#queue-req: {len(self.waiting_queue)}"
+            f"#queue-req: {len(self.waiting_queue)}, "
+            f"#need-prealloc-req: {len(self.disagg_decode_prealloc_queue.queue)}, "
+            f"#transferring-req: {len(self.disagg_decode_transfer_queue.queue)}"
         )
 
         logger.info(msg)
