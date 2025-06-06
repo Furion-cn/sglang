@@ -451,7 +451,9 @@ async def register(obj: PDRegistryRequest):
     return Response(status_code=200)
 
 
-def run(prefill_configs, decode_addrs, host, port, enable_metrics):
+def run(
+    prefill_configs, decode_addrs, host, port, enable_metrics: Optional[bool] = False
+):
     global load_balancer
     load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs, enable_metrics)
     if enable_metrics:
