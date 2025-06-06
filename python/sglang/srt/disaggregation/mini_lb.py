@@ -15,12 +15,14 @@ import orjson
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
-from prometheus_client import Counter, Histogram, Gauge
 from typing import Callable
 import time
 
-from sglang.srt.disaggregation.utils import PDRegistryRequest, add_prometheus_middleware
-
+from sglang.srt.disaggregation.utils import PDRegistryRequest
+from sglang.srt.utils import set_prometheus_multiproc_dir
+import re
+from starlette.routing import Mount
+import os
 
 def setup_logger():
     logger = logging.getLogger("pdlb")
@@ -49,17 +51,27 @@ class PrefillConfig:
 
 class GenerationMetrics:
     def __init__(self):
+        # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
+        from prometheus_client import Counter, Histogram, Gauge, REGISTRY, multiprocess
+        from prometheus_client.core import CollectorRegistry
+        
+        # 创建一个新的 registry
+        self.registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(self.registry)
+
         # 请求计数器
         self.request_counter = Counter(
             'sglang_lb_requests_total',
             'Total number of generation requests',
-            ['endpoint', 'status']
+            ['endpoint', 'status'],
+            registry=self.registry,
         )
 
         self.active_requests = Gauge(
             'sglang_lb_active_requests',
             'Current number of active requests',
-            ['endpoint', 'server_type']
+            ['endpoint', 'server_type'],
+            registry=self.registry,
         )
 
         # 请求延迟直方图
@@ -67,35 +79,24 @@ class GenerationMetrics:
             'sglang_lb_request_duration_seconds',
             'Request latency in seconds',
             ['endpoint'],
-            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
+            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+            registry=self.registry,
         )
-
-        # 请求token间平均延迟
-        self.request_token_latency = Histogram(
-            'sglang_lb_request_token_latency_seconds',
-            'Request token latency in seconds',
-            ['endpoint'],
-            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
-        )
-
         # 添加token处理速率
-        self.token_throughput = Histogram(
-            'sglang_lb_token_throughput',
+        self.token_throughput = Counter(
+            'sglang_lb_token_throughput_total',
             'Tokens processed per second',
             ['endpoint', 'token_type'],  # token_type: prompt/completion
-            buckets=[1, 2, 5, 10, 20, 50, 100, 200, 500]
+            registry=self.registry,
         )
-
-# 创建metrics实例
-metrics = GenerationMetrics()
-
-
 class MiniLoadBalancer:
     def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str], enable_metrics: bool):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
         self.enable_metrics = enable_metrics
+        if self.enable_metrics:
+            self.metrics = GenerationMetrics()
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -128,18 +129,19 @@ class MiniLoadBalancer:
                 session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                 session.post(f"{decode_server}/{endpoint}", json=modified_request),
             ]
-            metrics.active_requests.labels(endpoint=endpoint, server_type="prefill").inc()
-            metrics.active_requests.labels(endpoint=endpoint, server_type="decode").inc()
+            if self.enable_metrics:
+                self.metrics.active_requests.labels(endpoint=endpoint, server_type="prefill").inc()
+                self.metrics.active_requests.labels(endpoint=endpoint, server_type="decode").inc()
 
             # Wait for both responses to complete. Prefill should end first.
             prefill_response, decode_response = await asyncio.gather(*tasks)
 
             prefill_json = await prefill_response.json()
             if self.enable_metrics:
-                metrics.active_requests.labels(endpoint=endpoint, server_type="prefill").dec()
+                self.metrics.active_requests.labels(endpoint=endpoint, server_type="prefill").dec()
             ret_json = await decode_response.json()
             if self.enable_metrics:
-                metrics.active_requests.labels(endpoint=endpoint, server_type="decode").dec()
+                self.metrics.active_requests.labels(endpoint=endpoint, server_type="decode").dec()
 
             if "return_logprob" in modified_request:
                 # merge `meta_info.input_token_logprobs` from prefill to decode
@@ -151,36 +153,34 @@ class MiniLoadBalancer:
                         )
 
             if self.enable_metrics:
+                elapsed = time.perf_counter() - start_time
+                self.metrics.request_latency.labels(endpoint=endpoint).observe(elapsed)
                 if endpoint == "generate" and "meta_info" in ret_json:
-                    elapsed = time.perf_counter() - start_time
-                    metrics.request_latency.labels(endpoint=endpoint).observe(elapsed)
                     if "prompt_tokens" in ret_json["meta_info"]:
                         prompt_throughput = ret_json["meta_info"].get("prompt_tokens", 0) / elapsed
-                        metrics.token_throughput.labels(
+                        self.metrics.token_throughput.labels(
                             endpoint=endpoint,
                             token_type="prompt"
-                        ).observe(prompt_throughput)
+                        ).inc(prompt_throughput)
                     if "completion_tokens" in ret_json["meta_info"]:
                         completion_throughput = ret_json["meta_info"].get("completion_tokens", 0) / elapsed
-                        metrics.token_throughput.labels(
+                        self.metrics.token_throughput.labels(
                             endpoint=endpoint,
                             token_type="completion"
-                        ).observe(completion_throughput)
+                        ).inc(completion_throughput)
                 elif endpoint == "v1/chat/completions" and "usage" in ret_json:
-                    elapsed = time.perf_counter() - start_time
-                    metrics.request_latency.labels(endpoint=endpoint).observe(elapsed)
                     if "prompt_tokens" in ret_json["usage"]:
                         prompt_throughput = ret_json["usage"].get("prompt_tokens", 0) / elapsed
-                        metrics.token_throughput.labels(
+                        self.metrics.token_throughput.labels(
                             endpoint=endpoint,
                             token_type="prompt"
-                        ).observe(prompt_throughput)
+                        ).inc(prompt_throughput)
                     if "completion_tokens" in ret_json["usage"]:
                         completion_throughput = ret_json["usage"].get("completion_tokens", 0) / elapsed
-                        metrics.token_throughput.labels(
+                        self.metrics.token_throughput.labels(
                             endpoint=endpoint,
                             token_type="completion"
-                        ).observe(completion_throughput)
+                        ).inc(completion_throughput)
 
             return ORJSONResponse(
                 content=ret_json,
@@ -446,10 +446,27 @@ async def register(obj: PDRegistryRequest):
 
 def run(prefill_configs, decode_addrs, host, port, enable_metrics):
     global load_balancer
+    if enable_metrics:
+        set_prometheus_multiproc_dir()
+        logger.info(f"PROMETHEUS_MULTIPROC_DIR: {os.environ['PROMETHEUS_MULTIPROC_DIR']}")
+    
     load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs, enable_metrics)
+
     if enable_metrics:
         add_prometheus_middleware(app)
     uvicorn.run(app, host=host, port=port)
+
+def add_prometheus_middleware(app):
+    from prometheus_client import make_asgi_app
+    global load_balancer
+    # 获取 load_balancer 中的 registry
+    if load_balancer and load_balancer.enable_metrics:
+        metrics_app = make_asgi_app(registry=load_balancer.metrics.registry)
+        metrics_route = Mount("/metrics", metrics_app)
+        metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
+        app.routes.append(metrics_route)
+    logger.info("Prometheus metrics middleware added")
+
 
 if __name__ == "__main__":
     import argparse
@@ -474,7 +491,9 @@ if __name__ == "__main__":
         "--port", type=int, default=8000, help="Port to bind the server (default: 8000)"
     )
     parser.add_argument(
-        "--enable-metrics", type=bool, default=False, help="enable metrics"
+        "--enable-metrics",
+        action="store_true",
+        help="Enable log prometheus metrics.",
     )
     args = parser.parse_args()
 
@@ -491,6 +510,6 @@ if __name__ == "__main__":
 
     prefill_configs = [
         PrefillConfig(url, port) for url, port in zip(args.prefill, bootstrap_ports)
-    ]
+    ]        
 
     run(prefill_configs, args.decode, args.host, args.port, enable_metrics=args.enable_metrics)
