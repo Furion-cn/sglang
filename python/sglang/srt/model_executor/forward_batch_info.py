@@ -30,6 +30,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
     from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
     from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+logger = logging.getLogger(__name__)
 
 
 class ForwardMode(IntEnum):
@@ -309,7 +312,7 @@ class ForwardBatch:
                 else None
             ),
         )
-
+        logger.info(f"tbo_split_seq_index {ret.tbo_split_seq_index}")
         # For DP attention
         if batch.global_num_tokens is not None:
 
