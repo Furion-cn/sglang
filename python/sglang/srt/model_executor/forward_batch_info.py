@@ -303,7 +303,11 @@ class ForwardBatch:
             num_token_non_padded=torch.tensor(
                 len(batch.input_ids), dtype=torch.int32
             ).to(device, non_blocking=True),
-            tbo_split_seq_index=batch.tbo_split_seq_index,
+            tbo_split_seq_index=(
+                batch.tbo_split_seq_index
+                if (batch.spec_algorithm is None or batch.spec_algorithm.is_none())
+                else None
+            ),
         )
 
         # For DP attention

@@ -76,10 +76,10 @@ from sglang.srt.mem_cache.memory_pool import (
 from sglang.srt.mem_cache.paged_allocator import PagedTokenToKVPoolAllocator
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 from sglang.srt.model_executor.expert_location_updater import (
-    ExpertLocationUpdater, 
-    set_global_eplb_rebalance_buffer,
-    get_global_eplb_rebalance_buffer,
+    ExpertLocationUpdater,
     create_temp_buffers,
+    get_global_eplb_rebalance_buffer,
+    set_global_eplb_rebalance_buffer,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader import get_model
@@ -309,9 +309,7 @@ class ModelRunner:
                 )
             )
             temp_buffers_theoretical = 0
-            for (
-                buffer
-            ) in get_global_eplb_rebalance_buffer():
+            for buffer in get_global_eplb_rebalance_buffer():
                 temp_buffers_theoretical += buffer.element_size() * buffer.nelement()
             logger.info(
                 f"[EPLBManager] system started, eplb rebalance buffer allocated {temp_buffers_theoretical / (1024 ** 2):.2f} MB"
@@ -1053,7 +1051,7 @@ class ModelRunner:
 
     def init_attention_backend(self):
         """Init attention kernel backend."""
-        if self.server_args.enable_two_batch_overlap:
+        if self.server_args.enable_two_batch_overlap and not self.is_draft_worker:
             self.attn_backend = TboAttnBackend.init_new(self._get_attention_backend)
         else:
             self.attn_backend = self._get_attention_backend()
