@@ -890,7 +890,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # Enable custom logit processor
     enable_custom_logit_processor: bool = False
-
+    schedule_batch_time: float = 0.0
     # Whether to return hidden states
     return_hidden_states: bool = False
 
@@ -906,6 +906,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         spec_algorithm: SpeculativeAlgorithm,
         enable_custom_logit_processor: bool,
         chunked_req: Optional[Req] = None,
+        schedule_batch_time: Optional[float] = 0.0,
     ):
         return_logprob = any(req.return_logprob for req in reqs)
 
@@ -924,6 +925,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             enable_custom_logit_processor=enable_custom_logit_processor,
             return_hidden_states=any(req.return_hidden_states for req in reqs),
             chunked_req=chunked_req,
+            schedule_batch_time=schedule_batch_time,
         )
 
     def batch_size(self):
