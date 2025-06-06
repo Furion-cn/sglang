@@ -29,6 +29,22 @@ from sglang.srt.utils import get_bool_env_var
 
 logger = logging.getLogger(__name__)
 
+_global_eplb_rebalance_buffer = None
+
+def set_global_eplb_rebalance_buffer(buffer: List[torch.Tensor]):
+    global _global_eplb_rebalance_buffer
+    _global_eplb_rebalance_buffer = buffer
+
+def get_global_eplb_rebalance_buffer() -> List[torch.Tensor]:
+    if _global_eplb_rebalance_buffer is None:
+        raise RuntimeError("Global EPLB rebalance buffer is not initialized")
+    return _global_eplb_rebalance_buffer
+
+def clear_global_eplb_rebalance_buffer():
+    global _global_eplb_rebalance_buffer
+    if _global_eplb_rebalance_buffer is not None:
+        for buffer in _global_eplb_rebalance_buffer:
+            buffer.zero_()
 
 class ExpertLocationUpdater:
     def __init__(self):
@@ -60,6 +76,7 @@ class ExpertLocationUpdater:
             update_layer_ids=update_layer_ids,
         )
 
+        clear_global_eplb_rebalance_buffer()
 
 def _update_expert_weights(
     routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
@@ -71,10 +88,6 @@ def _update_expert_weights(
 ):
     log_metrics = get_bool_env_var("SGLANG_EXPERT_LOCATION_UPDATER_LOG_METRICS")
 
-    temp_buffers = create_temp_buffers(
-        routed_experts_weights_of_layer[update_layer_ids[0]]
-    )
-
     world_size = torch.distributed.get_world_size()
     num_local_physical_experts = old_expert_location_metadata.num_local_physical_experts
     num_gpu_per_node = world_size // nnodes
@@ -82,7 +95,7 @@ def _update_expert_weights(
     for layer_id in update_layer_ids:
         update_expert_weights_single_layer(
             routed_experts_weights=routed_experts_weights_of_layer[layer_id],
-            temp_buffers=temp_buffers,
+            temp_buffers=get_global_eplb_rebalance_buffer(),
             old_physical_to_logical_map=old_expert_location_metadata.physical_to_logical_map_cpu[
                 layer_id
             ].tolist(),
