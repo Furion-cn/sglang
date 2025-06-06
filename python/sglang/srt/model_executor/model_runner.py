@@ -871,15 +871,14 @@ class ModelRunner:
                 ),
                 4096,
             )
-            req_to_token_pool_size = max_num_reqs + 1
         else:
-            req_to_token_pool_size =  max(
+            max_num_reqs =  max(
                 int(
                     self.max_total_num_tokens / self.model_config.context_len * 512
                 ),
                 2 * max_num_reqs // (self.server_args.dp_size if self.server_args.enable_dp_attention else 1),
                 2048,
-            ) + 1
+            )
 
         if SGLANG_CI_SMALL_KV_SIZE:
             self.max_total_num_tokens = int(SGLANG_CI_SMALL_KV_SIZE)
@@ -929,7 +928,7 @@ class ModelRunner:
 
         if self.req_to_token_pool is None:
             self.req_to_token_pool = ReqToTokenPool(
-                size=req_to_token_pool_size,
+                size=max_num_reqs + 1,
                 max_context_len=self.model_config.context_len + 4,
                 device=self.device,
                 enable_memory_saver=self.server_args.enable_memory_saver,
