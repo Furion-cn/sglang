@@ -296,6 +296,20 @@ class ModelRunner:
         if server_args.lora_paths is not None:
             self.init_lora_manager()
 
+        if self.eplb_manager is not None:
+            # 在初始化 init memory pool 之前分配 eplb rebalance buffer
+            expert_location_updater.set_global_eplb_rebalance_buffer(
+                expert_location_updater.create_temp_buffers(
+                    next(iter(self.model.routed_experts_weights_of_layer.values()))
+                )
+            )
+            temp_buffers_theoretical = 0
+            for buffer in expert_location_updater.get_global_eplb_rebalance_buffer():
+                temp_buffers_theoretical += buffer.element_size() * buffer.nelement()
+            logger.info(
+                f"[EPLBManager] system started, eplb rebalance buffer allocated {temp_buffers_theoretical / (1024 ** 2):.2f} MB"
+            )
+
         # Init memory pool and attention backends
         self.init_memory_pool(
             min_per_gpu_memory,
@@ -876,6 +890,24 @@ class ModelRunner:
                 ),
                 4096,
             )
+            req_to_token_pool_size = max_num_reqs + 1
+        else:
+            req_to_token_pool_size = (
+                max(
+                    int(
+                        self.max_total_num_tokens / self.model_config.context_len * 512
+                    ),
+                    2
+                    * max_num_reqs
+                    // (
+                        self.server_args.dp_size
+                        if self.server_args.enable_dp_attention
+                        else 1
+                    ),
+                    2048,
+                )
+                + 1
+            )
 
         if SGLANG_CI_SMALL_KV_SIZE:
             self.max_total_num_tokens = int(SGLANG_CI_SMALL_KV_SIZE)
@@ -925,7 +957,7 @@ class ModelRunner:
 
         if self.req_to_token_pool is None:
             self.req_to_token_pool = ReqToTokenPool(
-                size=max_num_reqs,
+                size=req_to_token_pool_size,
                 max_context_len=self.model_config.context_len + 4,
                 device=self.device,
                 enable_memory_saver=self.server_args.enable_memory_saver,

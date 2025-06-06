@@ -727,9 +727,11 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             num_logical_experts=self._expert_location_metadata.num_logical_experts,
             physical_to_logical_map=self._expert_location_metadata.physical_to_logical_map,
         )
+
         torch.distributed.all_reduce(
             logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
         )
+
         output = dict(
             rank=self._rank,
             logical_count=logical_count_of_buffered_step,
