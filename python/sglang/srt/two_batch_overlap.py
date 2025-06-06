@@ -92,6 +92,9 @@ def compute_split_indices_for_cuda_graph_replay(
     forward_mode_for_tbo_split = (
         forward_mode if forward_mode != ForwardMode.IDLE else ForwardMode.DECODE
     )
+    logger.info(
+        f"************* compute_split_indices_for_cuda_graph_replay **************forward_mode_for_tbo_split{forward_mode_for_tbo_split}"
+    )
     tbo_split_seq_index = compute_split_seq_index(
         forward_mode=forward_mode_for_tbo_split,
         num_tokens=cuda_graph_num_tokens,
@@ -115,7 +118,9 @@ class TboCudaGraphRunnerPlugin:
     def capture_one_batch_size(self, batch: ForwardBatch, num_tokens: int):
         if not global_server_args_dict["enable_two_batch_overlap"]:
             return
-
+        logger.info(
+            f"------------------------TboCudaGraphRunnerPlugin -----------------------forward_mode{batch.forward_mode}----------"
+        )
         batch.tbo_split_seq_index = compute_split_seq_index(
             forward_mode=batch.forward_mode,
             num_tokens=num_tokens,
@@ -162,6 +167,11 @@ class TboDPAttentionPreparer:
         self.enable_two_batch_overlap = enable_two_batch_overlap
 
         if local_batch is not None:
+            logger.info(
+                f"...................TboDPAttentionPreparer........local_batch.forward_mode{local_batch.forward_mode}.....local_batch.extend_lens{local_batch.extend_lens}..........."
+            )
+            if local_batch.forward_mode.is_extend() and local_batch.extend_lens == 0:
+                return False, self._compute_local_forward_mode(local_batch)
             self.local_tbo_split_seq_index = compute_split_seq_index(
                 forward_mode=local_batch.forward_mode,
                 num_tokens=local_batch.input_ids.shape[0],
