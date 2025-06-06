@@ -15,7 +15,7 @@ import orjson
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
-from prometheus_client import Counter, Histogram, Summary
+from prometheus_client import Counter, Histogram, Gauge
 from typing import Callable
 import time
 
@@ -54,6 +54,12 @@ class GenerationMetrics:
             'sglang_lb_requests_total',
             'Total number of generation requests',
             ['endpoint', 'status']
+        )
+
+        self.active_requests = Gauge(
+            'sglang_lb_active_requests',
+            'Current number of active requests',
+            ['endpoint', 'server_type']
         )
 
         # 请求延迟直方图
@@ -122,15 +128,20 @@ class MiniLoadBalancer:
                 session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                 session.post(f"{decode_server}/{endpoint}", json=modified_request),
             ]
+            metrics.active_requests.labels(endpoint=endpoint, server_type="prefill").inc()
+            metrics.active_requests.labels(endpoint=endpoint, server_type="decode").inc()
 
             # Wait for both responses to complete. Prefill should end first.
             prefill_response, decode_response = await asyncio.gather(*tasks)
 
+            prefill_json = await prefill_response.json()
+            if self.enable_metrics:
+                metrics.active_requests.labels(endpoint=endpoint, server_type="prefill").dec()
+            ret_json = await decode_response.json()
+            if self.enable_metrics:
+                metrics.active_requests.labels(endpoint=endpoint, server_type="decode").dec()
+
             if "return_logprob" in modified_request:
-
-                prefill_json = await prefill_response.json()
-                ret_json = await decode_response.json()
-
                 # merge `meta_info.input_token_logprobs` from prefill to decode
                 if "meta_info" in ret_json:
                     if "input_token_logprobs" in ret_json["meta_info"]:
@@ -138,8 +149,7 @@ class MiniLoadBalancer:
                             prefill_json["meta_info"]["input_token_logprobs"]
                             + ret_json["meta_info"]["input_token_logprobs"]
                         )
-            else:
-                ret_json = await decode_response.json()
+
             if self.enable_metrics:
                 if endpoint == "generate" and "meta_info" in ret_json:
                     elapsed = time.perf_counter() - start_time
