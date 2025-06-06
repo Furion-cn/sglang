@@ -33,7 +33,11 @@ class LBArgs:
             help=f"Port to bind the server (default: {LBArgs.port})",
         )
         parser.add_argument(
-            "--enable-metrics", type=bool, default=False, help="enable metrics"
+            "--enable-metrics",
+            required=False,
+            type=bool,
+            default=False,
+            help="enable metrics",
         )
         parser.add_argument(
             "--policy",
