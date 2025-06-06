@@ -360,6 +360,7 @@ class Scheduler(
         self.last_batch: Optional[ScheduleBatch] = None
         self.forward_ct = 0
         self.forward_ct_decode = 0
+        self.schedule_ct = 0
         self.num_generated_tokens = 0
         self.num_prefill_tokens = 0
         self.last_decode_stats_tic = time.perf_counter()
@@ -555,6 +556,8 @@ class Scheduler(
     def init_metrics(self):
         self.last_gen_throughput: float = 0.0
         self.last_input_throughput: float = 0.0
+        self.last_input_throughput_schedule_time: float = 0.0
+        self.last_input_throughput_run_time: float = 0.0
         self.step_time_dict = defaultdict(list)  # Dict[batch size -> step time]
         self.spec_num_total_accepted_tokens = 0
         self.spec_num_total_forward_ct = 0
@@ -564,6 +567,8 @@ class Scheduler(
         if self.enable_metrics:
             engine_type = "unified"
             self.metrics_collector = SchedulerMetricsCollector(
+                tp_rank=self.tp_rank,
+                dp_size=self.dp_size,
                 labels={
                     "model_name": self.server_args.served_model_name,
                     "engine_type": engine_type,
@@ -670,6 +675,10 @@ class Scheduler(
 
             self.last_batch = batch
 
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
+
     @DynamicGradMode()
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
@@ -713,6 +722,10 @@ class Scheduler(
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
+
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
 
     @DynamicGradMode()
     def event_loop_pp(self):
@@ -816,6 +829,9 @@ class Scheduler(
             if server_is_idle:
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
 
     def recv_requests(self) -> List[Req]:
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
@@ -1138,10 +1154,17 @@ class Scheduler(
         can_run_list: List[Req],
         running_bs: int,
     ):
+        schedule_batch_time = time.perf_counter()
         gap_latency = time.perf_counter() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.perf_counter()
         self.last_input_throughput = self.num_prefill_tokens / gap_latency
-        self.num_prefill_tokens = 0
+        self.num_prefill_tokens = sum(
+            [
+                req.extend_input_len if req.is_chunked else len(req.origin_input_ids)
+                for req in can_run_list
+            ]
+        )
+        num_prefill_tokens = self.num_prefill_tokens
 
         num_used = self.max_total_num_tokens - (
             self.token_to_kv_pool_allocator.available_size()
@@ -1152,6 +1175,8 @@ class Scheduler(
         f = (
             f"Prefill batch. "
             f"#new-seq: {num_new_seq}, "
+            f"#input-throughput: {self.last_input_throughput:.2f}, "
+            f"#prefill-length: {self.num_prefill_tokens}, "
             f"#new-token: {adder.log_input_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
@@ -1183,8 +1208,8 @@ class Scheduler(
                 total_queue_latency += req.queue_time_end - req.queue_time_start
             self.stats.avg_request_queue_latency = total_queue_latency / num_new_seq
 
-            self.metrics_collector.log_stats(self.stats)
         self._publish_kv_events()
+        return schedule_batch_time, num_prefill_tokens
 
     def log_decode_stats(
         self, can_run_cuda_graph: bool, running_batch: ScheduleBatch = None
@@ -1243,7 +1268,7 @@ class Scheduler(
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
             self.stats.spec_accept_length = spec_accept_length
-            self.metrics_collector.log_stats(self.stats)
+
         self._publish_kv_events()
 
     def check_memory(self):
@@ -1279,20 +1304,25 @@ class Scheduler(
             and self.attn_tp_rank == 0
             and time.perf_counter() > self.metrics_collector.last_log_time + 30
         ):
-            # During idle time, also collect metrics every 30 seconds.
-            num_used = self.max_total_num_tokens - (
-                self.token_to_kv_pool_allocator.available_size()
-                + self.tree_cache.evictable_size()
-            )
-            num_running_reqs = len(self.running_batch.reqs)
-            self.stats.num_running_reqs = num_running_reqs
-            self.stats.num_used_tokens = num_used
-            self.stats.token_usage = num_used / self.max_total_num_tokens
-            self.stats.gen_throughput = 0
-            self.stats.num_queue_reqs = len(self.waiting_queue)
-            self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
-            self.metrics_collector.log_stats(self.stats)
+            self.reset_stats()
+
         self._publish_kv_events()
+
+    def reset_stats(self):
+        # During idle time, reset the stats every 30 seconds.
+        num_used = self.max_total_num_tokens - (
+            self.token_to_kv_pool_allocator.available_size()
+            + self.tree_cache.evictable_size()
+        )
+        num_running_reqs = len(self.running_batch.reqs)
+        self.stats.num_running_reqs = num_running_reqs
+        self.stats.num_used_tokens = num_used
+        self.stats.token_usage = num_used / self.max_total_num_tokens
+        self.stats.gen_throughput = 0
+        self.stats.input_throughput_schedule_time = 0
+        self.stats.input_throughput_run_time = 0
+        self.stats.num_queue_reqs = len(self.waiting_queue)
+        self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
 
     def coordinate_spec_dp_attn_batch(self, new_batch: Optional[ScheduleBatch]):
         """Coordinate the DP attention batch."""
@@ -1316,6 +1346,16 @@ class Scheduler(
             global_info[:, 0, 0].tolist()
         )  # Any DP worker has forward batch
         return any_new_batch
+
+    def log_stats(self):
+        if self.enable_metrics:
+            self.metrics_collector.log_stats(
+                self.stats,
+                self.dp_size,
+                self.attn_tp_rank,
+                self.attn_tp_size,
+                self.tp_cpu_group,
+            )
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
@@ -1494,9 +1534,12 @@ class Scheduler(
         if self.chunked_req:
             self.chunked_req.is_chunked += 1
 
+        schedule_batch_time, num_prefill_tokens = 0.0, 0
         # Print stats
         if self.attn_tp_rank == 0:
-            self.log_prefill_stats(adder, can_run_list, running_bs)
+            schedule_batch_time, num_prefill_tokens = self.log_prefill_stats(
+                adder, can_run_list, running_bs
+            )
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
@@ -1509,6 +1552,8 @@ class Scheduler(
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
             chunked_req=self.chunked_req,
+            schedule_batch_time=schedule_batch_time,
+            num_prefill_tokens=num_prefill_tokens,
         )
         new_batch.prepare_for_extend()
 
@@ -1574,6 +1619,7 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
+        batch.run_batch_time = time.perf_counter()
 
         # Whether to run the profiler
         self._profile_batch_predicate(batch)

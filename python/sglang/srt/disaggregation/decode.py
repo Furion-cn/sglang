@@ -489,6 +489,9 @@ class SchedulerDisaggregationDecodeMixin:
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 40 == 0:
+                self.log_stats()
 
     @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
@@ -568,6 +571,9 @@ class SchedulerDisaggregationDecodeMixin:
 
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 40 == 0:
+                self.log_stats()
 
     def get_next_disagg_decode_batch_to_run(
         self: Scheduler,
@@ -657,3 +663,9 @@ class SchedulerDisaggregationDecodeMixin:
             self.disagg_decode_transfer_queue.pop_transferred()
         )  # the requests which kv has arrived
         self.waiting_queue.extend(alloc_reqs)
+        self.stats.num_decode_prealloc_queue_reqs = len(
+            self.disagg_decode_prealloc_queue.queue
+        )
+        self.stats.num_decode_transfer_queue_reqs = len(
+            self.disagg_decode_transfer_queue.queue
+        )
