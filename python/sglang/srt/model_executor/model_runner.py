@@ -268,6 +268,8 @@ class ModelRunner:
             else None
         )
 
+        self.expert_location_updater = expert_location_updater.ExpertLocationUpdater()
+
         # Load the model
         self.sampler = Sampler()
         self.load_model()
@@ -613,7 +615,7 @@ class ModelRunner:
     def update_expert_location(
         self, new_expert_location_metadata: ExpertLocationMetadata
     ):
-        expert_location_updater.update_expert_location(
+        self.expert_location_updater.update_expert_location(
             self.model.routed_experts_weights_of_layer,
             new_expert_location_metadata,
             nnodes=self.server_args.nnodes,
