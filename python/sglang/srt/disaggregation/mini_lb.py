@@ -18,7 +18,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 from prometheus_client import Counter, Histogram, Summary
 
-from sglang.srt.disaggregation.utils import PDRegistryRequest, add_prometheus_middleware
+from sglang.srt.disaggregation.utils import PDRegistryRequest
+from sglang.srt.utils import add_prometheus_middleware
 
 
 def setup_logger():

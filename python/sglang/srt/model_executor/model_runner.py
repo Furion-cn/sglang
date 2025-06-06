@@ -298,13 +298,15 @@ class ModelRunner:
 
         if self.eplb_manager is not None:
             # 在初始化 init memory pool 之前分配 eplb rebalance buffer
-            expert_location_updater.set_global_eplb_rebalance_buffer(
-                expert_location_updater.create_temp_buffers(
+            self.expert_location_updater.set_global_eplb_rebalance_buffer(
+                self.expert_location_updater.create_temp_buffers(
                     next(iter(self.model.routed_experts_weights_of_layer.values()))
                 )
             )
             temp_buffers_theoretical = 0
-            for buffer in expert_location_updater.get_global_eplb_rebalance_buffer():
+            for (
+                buffer
+            ) in self.expert_location_updater.get_global_eplb_rebalance_buffer():
                 temp_buffers_theoretical += buffer.element_size() * buffer.nelement()
             logger.info(
                 f"[EPLBManager] system started, eplb rebalance buffer allocated {temp_buffers_theoretical / (1024 ** 2):.2f} MB"
