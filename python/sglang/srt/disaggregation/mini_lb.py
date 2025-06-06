@@ -81,10 +81,6 @@ class GenerationMetrics:
         )
 
 
-# 创建metrics实例
-metrics = GenerationMetrics()
-
-
 class MiniLoadBalancer:
     def __init__(
         self,
@@ -96,6 +92,8 @@ class MiniLoadBalancer:
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
         self.enable_metrics = enable_metrics
+        if enable_metrics:
+            self.metrics = GenerationMetrics()
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
