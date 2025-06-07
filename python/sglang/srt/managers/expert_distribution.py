@@ -412,6 +412,8 @@ def _list_sum(a: List, b: List) -> List:
 class _SelectExpertsSinglePassGatherer(_LayerBasedSinglePassGatherer):
     # pretty slow, but we will use the DeepEP Gatherer in production
     def on_select_experts(self, layer_idx: int, topk_ids: torch.Tensor):
+        if layer_idx is None:
+            return
         topk_ids_list = topk_ids.to("cpu", non_blocking=True).numpy().tolist()
         torch.cuda.synchronize()
 
