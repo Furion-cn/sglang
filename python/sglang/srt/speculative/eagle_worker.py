@@ -485,10 +485,11 @@ class EAGLEWorker(TpModelWorker):
         spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.spec_num_draft_tokens = self.topk
+        logger.info(f"00000000000eagle_worker draft")
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-
+        logger.info(f"1111111111111{forward_batch}")
         can_cuda_graph = self.cuda_graph_runner and self.cuda_graph_runner.can_run(
             forward_batch
         )
@@ -500,9 +501,11 @@ class EAGLEWorker(TpModelWorker):
             if not batch.forward_mode.is_idle():
                 # Initialize attention backend
                 self.draft_attn_backend.init_forward_metadata(forward_batch)
+            logger.info(f"2222222222222 not cuda graph")
             forward_batch = ForwardBatch.init_new(
                 model_worker_batch, self.draft_model_runner
             )
+            logger.info(f"3333333333333{forward_batch}")
             # Run forward steps
             score_list, token_list, parents_list = self.draft_forward(forward_batch)
 
@@ -753,9 +756,11 @@ class EAGLEWorker(TpModelWorker):
         batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.spec_num_draft_tokens = 1
+        logger.info(f"4444444444444forward_draft_extend")
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
+        logger.info(f"5555555555555{forward_batch}")
         forward_batch.return_logprob = False
         logits_output, _ = self.draft_model_runner.forward(forward_batch)
         self._detect_nan_if_needed(logits_output)
@@ -796,10 +801,11 @@ class EAGLEWorker(TpModelWorker):
         batch.return_logprob = False
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.spec_num_draft_tokens = self.speculative_num_draft_tokens
+        logger.info(f"6666666666666 forward_draft_extend_after_decode")
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-
+        logger.info(f"7777777777777{forward_batch}")
         # Run
         can_cuda_graph = (
             self.cuda_graph_runner_for_draft_extend
