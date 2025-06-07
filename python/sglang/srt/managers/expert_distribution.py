@@ -386,6 +386,8 @@ class _LayerBasedSinglePassGatherer(_SinglePassGatherer):
         self._objects_of_layer = {}
 
     def _on_layer_data(self, layer_idx: int, objects: List[int]):
+        if layer_idx is None:
+            return
         assert 0 <= layer_idx < self._expert_location_metadata.num_layers
         if layer_idx in self._objects_of_layer:
             self._objects_of_layer[layer_idx] = _list_sum(
@@ -412,8 +414,6 @@ def _list_sum(a: List, b: List) -> List:
 class _SelectExpertsSinglePassGatherer(_LayerBasedSinglePassGatherer):
     # pretty slow, but we will use the DeepEP Gatherer in production
     def on_select_experts(self, layer_idx: int, topk_ids: torch.Tensor):
-        if layer_idx is None:
-            return
         topk_ids_list = topk_ids.to("cpu", non_blocking=True).numpy().tolist()
         torch.cuda.synchronize()
 
