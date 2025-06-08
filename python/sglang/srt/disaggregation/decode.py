@@ -454,17 +454,17 @@ class SchedulerDisaggregationDecodeMixin:
             x = randn(1)
             recv_reqs = self.recv_requests()
             logger.info(
-                f"{x}   recv_reqs = self.recv_requests()----------- {recv_reqs}   "
+                # f"{x}   recv_reqs = self.recv_requests()----------- {recv_reqs}   "
             )
             self.process_input_requests(recv_reqs)
-            logger.info(f"{x}   rocess_input_requests=-------------  ")
+            # logger.info(f"{x}   rocess_input_requests=-------------  ")
             # polling and allocating kv cache
             self.process_decode_queue()
-            logger.info(f"{x}   self.process_decode_queue()-------------  ")
+            # logger.info(f"{x}   self.process_decode_queue()-------------  ")
             batch = self.get_next_disagg_decode_batch_to_run()
-            logger.info(
-                f"{x}   batch = self.get_next_disagg_decode_batch_to_run()------------  "
-            )
+            # logger.info(
+            #     f"{x}   batch = self.get_next_disagg_decode_batch_to_run()------------  "
+            # )
             self.cur_batch = batch
 
             prepare_dp_attn_flag = (
@@ -598,20 +598,31 @@ class SchedulerDisaggregationDecodeMixin:
         """Create fake completed prefill if possible and merge with running batch"""
         # Merge the prefill batch into the running batch
         last_batch = self.last_batch
+        logger.info(f"last batch --------------- {last_batch}")
         if last_batch and last_batch.forward_mode.is_extend():
+            logger.info(f"if last_batch and last_batch.forward_mode.is_extend():")
             # chunked prefill doesn't happen in decode instance.
             assert self.chunked_req is None
             # Filter finished batches.
             last_batch.filter_batch()
+            logger.info(f" last_batch.filter_batch()----------{last_batch}")
             if not last_batch.is_empty():
                 if self.running_batch.is_empty():
                     self.running_batch = last_batch
                 else:
+                    logger.info(
+                        f"before self.running_batch.merge_batch(last_batch)---------"
+                    )
                     # merge running_batch with prefill batch
                     self.running_batch.merge_batch(last_batch)
+                    logger.info(
+                        f"after self.running_batch.merge_batch(last_batch)---------"
+                    )
 
         new_prebuilt_batch = self.get_new_prebuilt_batch()
-
+        logger.info(
+            f"new_prebuilt_batch = self.get_new_prebuilt_batch() {new_prebuilt_batch}"
+        )
         ret: Optional[ScheduleBatch] = None
         if new_prebuilt_batch:
             ret = new_prebuilt_batch
@@ -620,8 +631,11 @@ class SchedulerDisaggregationDecodeMixin:
                 ret = None
             else:
                 self.running_batch = self.update_running_batch(self.running_batch)
+                logger.info(
+                    f"self.running_batch = self.update_running_batch(self.running_batch) {self.running_batch}"
+                )
                 ret = self.running_batch if not self.running_batch.is_empty() else None
-
+        logger.info(f"before return ret .................")
         return ret
 
     def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
