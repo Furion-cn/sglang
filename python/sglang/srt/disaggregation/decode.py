@@ -453,9 +453,9 @@ class SchedulerDisaggregationDecodeMixin:
         while True:
             x = randn(1)
             recv_reqs = self.recv_requests()
-            logger.info(
-                # f"{x}   recv_reqs = self.recv_requests()----------- {recv_reqs}   "
-            )
+            # logger.info(
+            #     # f"{x}   recv_reqs = self.recv_requests()----------- {recv_reqs}   "
+            # )
             self.process_input_requests(recv_reqs)
             # logger.info(f"{x}   rocess_input_requests=-------------  ")
             # polling and allocating kv cache
