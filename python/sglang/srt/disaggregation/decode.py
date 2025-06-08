@@ -471,19 +471,30 @@ class SchedulerDisaggregationDecodeMixin:
                 self.server_args.enable_dp_attention
                 or self.server_args.enable_sp_layernorm
             )
-
+            logger.info(f"111-------------prepare_dp_attn_flag")
             if batch:
                 # Generate fake extend output.
                 if batch.forward_mode.is_extend():
+                    logger.info(f"batch.forward_mode.is_extend()---------------------")
                     # Note: Logprobs should be handled on the prefill engine.
                     self.stream_output(
                         batch.reqs, any(req.return_logprob for req in batch.reqs)
                     )
+                    logger.info(f"after stream_output--------------------------")
                     if prepare_dp_attn_flag:
                         self._prepare_idle_batch_and_run(None)
+                        logger.info(
+                            f"after _prepare_idle_batch_and_run--------------------------"
+                        )
                 else:
                     if prepare_dp_attn_flag:
+                        logger.info(
+                            f"before prepare_dp_attn_batch---------------------------------"
+                        )
                         self.prepare_dp_attn_batch(batch)
+                        logger.info(
+                            f"after prepare_dp_attn_batch---------------------------------"
+                        )
                     result = self.run_batch(batch)
                     logger.info(f"run batch_result.....................{result}")
                     self.process_batch_result(batch, result)
