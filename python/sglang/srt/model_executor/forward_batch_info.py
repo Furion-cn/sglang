@@ -315,7 +315,7 @@ class ForwardBatch:
         logger.info(f"tbo_split_seq_index {ret.tbo_split_seq_index}")
         # For DP attention
         if batch.global_num_tokens is not None:
-
+            logger.info(f"00000000000000{batch.global_num_tokens}")
             spec_num_draft_tokens = (
                 batch.spec_num_draft_tokens
                 if batch.spec_num_draft_tokens is not None
@@ -345,6 +345,7 @@ class ForwardBatch:
                 device=device,
             )
         if ret.forward_mode.is_idle():
+            logger.info(f"111111111111ret.forward_mode.is_idle()")
             ret.positions = torch.empty((0,), device=device)
             TboForwardBatchPreparer.prepare(ret)
             return ret
@@ -394,9 +395,9 @@ class ForwardBatch:
         # Init lora information
         if model_runner.server_args.lora_paths is not None:
             model_runner.lora_manager.prepare_lora_batch(ret)
-
+        logger.info(f"preparer....................{ret.input_ids}")
         TboForwardBatchPreparer.prepare(ret)
-
+        logger.info(f"after preparer....................{ret.input_ids}")
         return ret
 
     def merge_mm_inputs(self) -> Optional[MultimodalInputs]:

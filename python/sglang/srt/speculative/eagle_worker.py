@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from huggingface_hub import snapshot_download
+from numpy.matlib import randn
 
 from sglang.srt.distributed import GroupCoordinator, patch_tensor_parallel_group
 from sglang.srt.layers.dp_attention import get_attention_dp_size, get_attention_tp_size
@@ -312,7 +313,12 @@ class EAGLEWorker(TpModelWorker):
             A tuple of the final logit output of the target model, next tokens accepted,
             the batch id (used for overlap schedule), and number of accepted tokens.
         """
+        x = randn(100)
         if batch.forward_mode.is_decode() or batch.is_decode_dp_batch():
+
+            logger.info(
+                f"batch.forward_mode.is_decode() or batch.is_decode_dp_batch() {x}"
+            )
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 spec_info = self.draft(batch)
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
@@ -322,6 +328,9 @@ class EAGLEWorker(TpModelWorker):
             if self.check_forward_draft_extend_after_decode(batch):
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
                     self.forward_draft_extend_after_decode(batch)
+            logger.info(
+                f"batch.forward_mode.is_decode() or batch.is_decode_dp_batch() ------------- {x}"
+            )
             return (
                 logits_output,
                 verify_output.verified_id,
@@ -330,17 +339,27 @@ class EAGLEWorker(TpModelWorker):
                 can_run_cuda_graph,
             )
         elif batch.forward_mode.is_extend() or batch.is_extend_dp_batch():
+            logger.info(
+                f"batch.forward_mode.is_extend() or batch.is_extend_dp_batch() {x}"
+            )
             logits_output, next_token_ids, bid = self.forward_target_extend(batch)
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 self.forward_draft_extend(
                     batch, logits_output.hidden_states, next_token_ids
                 )
+            logger.info(
+                f"batch.forward_mode.is_extend() or batch.is_extend_dp_batch()-------------{x}"
+            )
             return logits_output, next_token_ids, bid, 0, False
         else:
+            logger.info(f"------------------------------------------------ {x}")
             model_worker_batch = batch.get_model_worker_batch()
             model_worker_batch.spec_num_draft_tokens = 1
             logits_output, next_token_ids, _ = (
                 self.target_worker.forward_batch_generation(model_worker_batch)
+            )
+            logger.info(
+                f"------------------------------------------------...............{x}"
             )
             return logits_output, next_token_ids, model_worker_batch.bid, 0, False
 
