@@ -32,6 +32,7 @@ import psutil
 import setproctitle
 import torch
 import zmq
+from numpy.matlib import randn
 from torch.distributed import barrier
 
 from sglang.global_config import global_config
@@ -1617,6 +1618,8 @@ class Scheduler(
     def run_batch(
         self, batch: ScheduleBatch
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
+        x = randn(1)
+        logger.info(f"start_run_batch-------------------------{x}")
         """Run a batch."""
         self.forward_ct += 1
         batch.run_batch_time = time.perf_counter()
@@ -1688,6 +1691,7 @@ class Scheduler(
             ret = EmbeddingBatchResult(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
+        logger.info(f"end_run_batch-------------------------{x}")
         return ret
 
     def process_batch_result(

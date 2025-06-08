@@ -475,7 +475,9 @@ class SchedulerDisaggregationDecodeMixin:
                     if prepare_dp_attn_flag:
                         self.prepare_dp_attn_batch(batch)
                     result = self.run_batch(batch)
+                    logger.info(f"run batch_result.....................{result}")
                     self.process_batch_result(batch, result)
+                    logger.info(f"after process result.....................{result}")
             elif prepare_dp_attn_flag:
                 batch, _ = self._prepare_idle_batch_and_run(None)
 
