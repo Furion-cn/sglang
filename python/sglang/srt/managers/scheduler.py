@@ -660,25 +660,32 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
+            x = randn(1)
             recv_reqs = self.recv_requests()
+            logger.info(f"event_loop_normal-------------{recv_reqs}")
             self.process_input_requests(recv_reqs)
-
+            logger.info(f"self.process_input_requests(recv_reqs)...............")
             batch = self.get_next_batch_to_run()
+            logger.info(f"get_next_batch to run -----------------{batch}")
             self.cur_batch = batch
 
             if batch:
                 result = self.run_batch(batch)
+                logger.info(f"result = self.run_batch(batch) {result}")
                 self.process_batch_result(batch, result)
+                logger.info(f"self.process_batch_result(batch, result)")
             else:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
+                logger.info(f"self.check_memory()")
 
             self.last_batch = batch
 
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
             if self.schedule_ct % 10 == 0:
                 self.log_stats()
+            logger.info("last log")
 
     @DynamicGradMode()
     def event_loop_overlap(self):
