@@ -1691,7 +1691,7 @@ class Scheduler(
             ret = EmbeddingBatchResult(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
-        logger.info(f"end_run_batch-------------------------{x}")
+        logger.info(f"end_run_batch-------------------------{ret}")
         return ret
 
     def process_batch_result(

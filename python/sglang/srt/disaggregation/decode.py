@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import numpy as np
 import torch
+from numpy.matlib import randn
 from torch.distributed import ProcessGroup
 
 from sglang.srt.disaggregation.base import BaseKVManager, BaseKVReceiver, KVArgs, KVPoll
@@ -450,11 +451,20 @@ class SchedulerDisaggregationDecodeMixin:
         """A normal scheduler loop for decode worker in disaggregation mode."""
 
         while True:
+            x = randn(1)
             recv_reqs = self.recv_requests()
+            logger.info(
+                f"{x}   recv_reqs = self.recv_requests()----------- {recv_reqs}   "
+            )
             self.process_input_requests(recv_reqs)
+            logger.info(f"{x}   rocess_input_requests=-------------  ")
             # polling and allocating kv cache
             self.process_decode_queue()
+            logger.info(f"{x}   self.process_decode_queue()-------------  ")
             batch = self.get_next_disagg_decode_batch_to_run()
+            logger.info(
+                f"{x}   batch = self.get_next_disagg_decode_batch_to_run()------------  "
+            )
             self.cur_batch = batch
 
             prepare_dp_attn_flag = (
@@ -480,6 +490,9 @@ class SchedulerDisaggregationDecodeMixin:
                     logger.info(f"after process result.....................{result}")
             elif prepare_dp_attn_flag:
                 batch, _ = self._prepare_idle_batch_and_run(None)
+                logger.info(
+                    f"batch, _ = self._prepare_idle_batch_and_run(None)----------- {batch}"
+                )
 
             if batch is None and (
                 len(self.disagg_decode_transfer_queue.queue)
@@ -489,11 +502,13 @@ class SchedulerDisaggregationDecodeMixin:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
+                logger.info(f"self.check_memory()...............")
 
             self.last_batch = batch
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
             if self.schedule_ct % 40 == 0:
                 self.log_stats()
+            logger.info("f------------------------lastlogger")
 
     @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
