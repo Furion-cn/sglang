@@ -301,6 +301,9 @@ class EAGLEWorker(TpModelWorker):
     def forward_batch_speculative_generation(
         self, batch: ScheduleBatch
     ) -> Tuple[LogitsProcessorOutput, List[int], int, int]:
+        logger.info(
+            f"[DEBUG] forward_batch_speculative_generation START - batch_size: {batch}"
+        )
         """Run speculative decoding forward.
 
         NOTE: Many states of batch is modified as you go through. It is not guaranteed that
@@ -778,7 +781,9 @@ class EAGLEWorker(TpModelWorker):
         self.capture_for_decode(logits_output, forward_batch.spec_info)
 
     def forward_draft_extend_after_decode(self, batch: ScheduleBatch):
-
+        logger.info(
+            f"[DEBUG] forward_draft_extend_after_decode START - batch_size: {batch}"
+        )
         is_idle = batch.forward_mode.is_idle()
         origin_batch = None
         if not is_idle:
@@ -792,7 +797,7 @@ class EAGLEWorker(TpModelWorker):
                 # Prepare metadata
                 batch.forward_mode = ForwardMode.DRAFT_EXTEND
                 logger.info(
-                    f"[DEBUG] prepare_extend_after_decode START - batch_size: {batch.batch_size()}"
+                    f"[DEBUG] prepare_extend_after_decode START - batch_size: {batch}"
                 )
                 batch.spec_info.prepare_extend_after_decode(
                     batch,
@@ -800,34 +805,26 @@ class EAGLEWorker(TpModelWorker):
                     pad_input=self.cuda_graph_runner_for_draft_extend is not None,
                 )
                 logger.info(
-                    f"[DEBUG] prepare_extend_after_decode END - batch_size: {batch.batch_size()}"
+                    f"[DEBUG] prepare_extend_after_decode END - batch_size: {batch}"
                 )
             else:
                 origin_batch = batch
                 batch = origin_batch.copy()
-                logger.info(
-                    f"[DEBUG] prepare_for_idle START - batch_size: {batch.batch_size()}"
-                )
+                logger.info(f"[DEBUG] prepare_for_idle START - batch_size: {batch}")
                 batch.prepare_for_idle()
-                logger.info(
-                    f"[DEBUG] prepare_for_idle END - batch_size: {batch.batch_size()}"
-                )
+                logger.info(f"[DEBUG] prepare_for_idle END - batch_size: {batch}")
                 batch.spec_info = EagleDraftInput.create_for_idle(
                     device=self.device,
                     hidden_size=self.model_config.hidden_size,
                     topk=self.topk,
                 )
-                logger.info(
-                    f"[DEBUG] create_for_idle END - batch_size: {batch.batch_size()}"
-                )
+                logger.info(f"[DEBUG] create_for_idle END - batch_size: {batch}")
                 batch.forward_mode = ForwardMode.IDLE
         batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         batch.return_logprob = False
-        logger.info(f"[DEBUG] init_new START - batch_size: {batch.batch_size()}")
+        logger.info(f"[DEBUG] init_new START - batch_size: {batch}")
         model_worker_batch = batch.get_model_worker_batch()
-        logger.info(
-            f"[DEBUG] get_model_worker_batch END - batch_size: {batch.batch_size()}"
-        )
+        logger.info(f"[DEBUG] get_model_worker_batch END - batch_size: {batch}")
         model_worker_batch.spec_num_draft_tokens = self.speculative_num_draft_tokens
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner

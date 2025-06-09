@@ -463,6 +463,7 @@ class SchedulerDisaggregationDecodeMixin:
             )
 
             if batch:
+                logger.info(f"[DEBUG] batch111111111111111: {batch}")
                 # Generate fake extend output.
                 if batch.forward_mode.is_extend():
                     # Note: Logprobs should be handled on the prefill engine.
@@ -474,6 +475,7 @@ class SchedulerDisaggregationDecodeMixin:
                 else:
                     if prepare_dp_attn_flag:
                         self.prepare_dp_attn_batch(batch)
+                    logger.info(f"[DEBUG] batch222222222222222: {batch}")
                     result = self.run_batch(batch)
                     self.process_batch_result(batch, result)
             elif prepare_dp_attn_flag:

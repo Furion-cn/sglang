@@ -1617,6 +1617,7 @@ class Scheduler(
     def run_batch(
         self, batch: ScheduleBatch
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
+        logger.info(f"[DEBUG] run_batch START - batch_size: {batch}")
         """Run a batch."""
         self.forward_ct += 1
         batch.run_batch_time = time.perf_counter()
