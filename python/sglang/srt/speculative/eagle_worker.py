@@ -791,29 +791,48 @@ class EAGLEWorker(TpModelWorker):
 
                 # Prepare metadata
                 batch.forward_mode = ForwardMode.DRAFT_EXTEND
+                logger.info(
+                    f"[DEBUG] prepare_extend_after_decode START - batch_size: {batch.batch_size()}"
+                )
                 batch.spec_info.prepare_extend_after_decode(
                     batch,
                     self.speculative_num_steps,
                     pad_input=self.cuda_graph_runner_for_draft_extend is not None,
                 )
+                logger.info(
+                    f"[DEBUG] prepare_extend_after_decode END - batch_size: {batch.batch_size()}"
+                )
             else:
                 origin_batch = batch
                 batch = origin_batch.copy()
+                logger.info(
+                    f"[DEBUG] prepare_for_idle START - batch_size: {batch.batch_size()}"
+                )
                 batch.prepare_for_idle()
+                logger.info(
+                    f"[DEBUG] prepare_for_idle END - batch_size: {batch.batch_size()}"
+                )
                 batch.spec_info = EagleDraftInput.create_for_idle(
                     device=self.device,
                     hidden_size=self.model_config.hidden_size,
                     topk=self.topk,
                 )
+                logger.info(
+                    f"[DEBUG] create_for_idle END - batch_size: {batch.batch_size()}"
+                )
                 batch.forward_mode = ForwardMode.IDLE
         batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
         batch.return_logprob = False
+        logger.info(f"[DEBUG] init_new START - batch_size: {batch.batch_size()}")
         model_worker_batch = batch.get_model_worker_batch()
+        logger.info(
+            f"[DEBUG] get_model_worker_batch END - batch_size: {batch.batch_size()}"
+        )
         model_worker_batch.spec_num_draft_tokens = self.speculative_num_draft_tokens
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-
+        logger.info(f"[DEBUG] init_new END - batch_size: {forward_batch}")
         # Run
         can_cuda_graph = (
             self.cuda_graph_runner_for_draft_extend
@@ -831,10 +850,14 @@ class EAGLEWorker(TpModelWorker):
             logits_output = self.draft_model_runner.model.forward(
                 forward_batch.input_ids, forward_batch.positions, forward_batch
             )
-
+        logger.info(
+            f"[DEBUG] forward END - batch_size: {forward_batch.input_ids.shape}"
+        )
         self._detect_nan_if_needed(logits_output)
         self.capture_for_decode(logits_output, forward_batch.spec_info)
-
+        logger.info(
+            f"[DEBUG] capture_for_decode END - batch_size: {forward_batch.input_ids.shape}"
+        )
         if origin_batch is not None:
             batch = origin_batch
         elif not is_idle:
