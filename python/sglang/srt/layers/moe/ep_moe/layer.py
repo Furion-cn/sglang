@@ -1298,8 +1298,6 @@ class DeepEPMoE(EPMoE):
 
         dispose_tensor(hidden_states)
 
-        logger.info(f"{gateup_output.shape=}")
-
         # Act
         down_input = torch.empty(
             (
@@ -1317,8 +1315,6 @@ class DeepEPMoE(EPMoE):
             masked_m=masked_m,
         )
 
-        logger.info(f"{gateup_output.shape=}")
-
         del gateup_output
         # GroupGemm-1
         down_output = self.grouped_gemm_runner(
@@ -1328,7 +1324,6 @@ class DeepEPMoE(EPMoE):
             c_dtype=down_input.dtype,
             masked_m=masked_m,
         )
-        logger.info(f"{down_input.shape=} {down_output.shape=}")
         return down_output
 
 
