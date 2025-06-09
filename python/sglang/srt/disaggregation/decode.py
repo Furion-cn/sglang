@@ -653,7 +653,7 @@ class SchedulerDisaggregationDecodeMixin:
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt_extend()
         new_batch.process_prebuilt_extend(self.server_args, self.model_config)
-
+        logger.info(f"[DEBUG]new batch specinfo {new_batch.spec_info}")
         return new_batch
 
     def process_decode_queue(self: Scheduler):

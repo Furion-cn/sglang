@@ -139,4 +139,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
             )
             spec_info.prepare_for_extend(self)
             spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
+            logger.info(
+                f"[DEBUG] spec_info.hidden_states.shape: {spec_info.hidden_states.shape} spec_info.topk_p.shape: {spec_info.topk_p.shape} spec_info.topk_index.shape: {spec_info.topk_index.shape} spec_info.verified_id.shape: {spec_info.verified_id.shape}"
+            )
             self.spec_info = spec_info
