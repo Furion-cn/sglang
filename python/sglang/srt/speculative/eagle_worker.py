@@ -302,7 +302,7 @@ class EAGLEWorker(TpModelWorker):
         self, batch: ScheduleBatch
     ) -> Tuple[LogitsProcessorOutput, List[int], int, int]:
         logger.info(
-            f"[DEBUG] forward_batch_speculative_generation START - batch_size: {batch}"
+            f"[DEBUG] forward_batch_speculative_generation START - forward_mode: {batch.forward_mode} input_ids: {batch.input_ids}"
         )
         """Run speculative decoding forward.
 
