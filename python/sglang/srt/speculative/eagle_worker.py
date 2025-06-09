@@ -838,6 +838,7 @@ class EAGLEWorker(TpModelWorker):
             self.cuda_graph_runner_for_draft_extend
             and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
         )
+        logger.info(f"can run cuda graph {can_cuda_graph}")
         if can_cuda_graph:
             logits_output = self.cuda_graph_runner_for_draft_extend.replay(
                 forward_batch
@@ -846,6 +847,9 @@ class EAGLEWorker(TpModelWorker):
             if not is_idle and batch.spec_info.verified_id is not None:
                 self.draft_model_runner.attn_backend.init_forward_metadata(
                     forward_batch
+                )
+                logger.info(
+                    f"draft_model_runner.attn_backend.init_forward_metadata end"
                 )
             logits_output = self.draft_model_runner.model.forward(
                 forward_batch.input_ids, forward_batch.positions, forward_batch
