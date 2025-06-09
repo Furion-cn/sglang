@@ -335,7 +335,7 @@ class EAGLEWorker(TpModelWorker):
         elif batch.forward_mode.is_extend() or batch.is_extend_dp_batch():
             logits_output, next_token_ids, bid = self.forward_target_extend(batch)
             logger.info(
-                f"forward_target_extend done {logits_output.shape} {next_token_ids.shape} {bid}"
+                f"forward_target_extend done {logits_output} {next_token_ids} {bid}"
             )
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 self.forward_draft_extend(
@@ -349,9 +349,7 @@ class EAGLEWorker(TpModelWorker):
             logits_output, next_token_ids, _ = (
                 self.target_worker.forward_batch_generation(model_worker_batch)
             )
-            logger.info(
-                f"forward_target_extend done {logits_output.shape} {next_token_ids.shape} {model_worker_batch.bid}"
-            )
+            logger.info(f"forward_target_extend done {logits_output} {next_token_ids} ")
             return logits_output, next_token_ids, model_worker_batch.bid, 0, False
 
     def check_forward_draft_extend_after_decode(self, batch: ScheduleBatch):
