@@ -119,7 +119,12 @@ class EagleDraftInput:
             new_verified_id,
             next_power_of_2(speculative_num_steps + 1),
         )
-
+        logger.info(
+            f"[DEBUG] after create_extend_spec_info new_verified_id: {new_verified_id}"
+        )
+        logger.info(
+            f"[DEBUG] after create_extend_spec_info self.verified_id: {self.verified_id}"
+        )
         batch.seq_lens_sum = sum(seq_lens_cpu)
         batch.input_ids = self.verified_id
         self.verified_id = new_verified_id
