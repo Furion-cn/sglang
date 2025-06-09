@@ -86,14 +86,23 @@ class DeepseekModelNextN(nn.Module):
                 input_embeds.device if input_embeds is not None else input_ids.device
             ),
         )
+        logger.info(
+            f"[DEBUG] forward_batch.spec_info.hidden_states.shape: {forward_batch.spec_info.hidden_states.shape}"
+        )
         forward_batch.spec_info.hidden_states = (
             forward_batch.spec_info.hidden_states.to(self.hnorm.weight.dtype)
+        )
+        logger.info(
+            f"[DEBUG] forward_batch.spec_info.hidden_states.shape: {forward_batch.spec_info.hidden_states.shape}"
         )
         if input_embeds is None:
             hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
         if not forward_batch.forward_mode.is_idle():
+            logger.info(
+                f"[DEBUG] eh_proj START {hidden_states.shape} {forward_batch.spec_info.hidden_states.shape}"
+            )
             hidden_states = self.eh_proj(
                 torch.cat(
                     (
@@ -103,8 +112,11 @@ class DeepseekModelNextN(nn.Module):
                     dim=-1,
                 )
             )
-
+            logger.info(f"[DEBUG] eh_proj END {hidden_states.shape}")
         residual = None
+        logger.info(
+            f"[DEBUG] decoder START {hidden_states.shape} {forward_batch.spec_info.hidden_states.shape}"
+        )
         hidden_states, residual = self.decoder(
             positions,
             hidden_states,
@@ -112,10 +124,10 @@ class DeepseekModelNextN(nn.Module):
             residual,
             zero_allocator,
         )
-
+        logger.info(f"[DEBUG] decoder END {hidden_states.shape}")
         if not forward_batch.forward_mode.is_idle():
             hidden_states = self.shared_head.norm(hidden_states, residual)
-
+        logger.info(f"[DEBUG] forward END {hidden_states.shape}")
         return hidden_states
 
 

@@ -851,6 +851,9 @@ class EAGLEWorker(TpModelWorker):
                 logger.info(
                     f"draft_model_runner.attn_backend.init_forward_metadata end"
                 )
+            logger.info(
+                f"draft_model_runner.model.forward start forward_batch.input_ids{None if forward_batch.input_ids is None else forward_batch.input_ids.shape} forward_batch.positions{None if forward_batch.positions is None else forward_batch.positions.shape}"
+            )
             logits_output = self.draft_model_runner.model.forward(
                 forward_batch.input_ids, forward_batch.positions, forward_batch
             )

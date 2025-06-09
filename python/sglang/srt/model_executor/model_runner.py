@@ -569,7 +569,12 @@ class ModelRunner:
         # Remove monkey_patch when linear.py quant remove dependencies with vllm
         monkey_patch_vllm_parallel_state()
         monkey_patch_isinstance_for_vllm_base_layer()
-
+        if self.is_draft_worker:
+            {
+                logger.info(
+                    f"[DEBUG] is_draft_worker: model_config={self.model_config} load_config={self.load_config} device={self.device}"
+                )
+            }
         with self.memory_saver_adapter.region():
             self.model = get_model(
                 model_config=self.model_config,
