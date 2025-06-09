@@ -1495,7 +1495,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
         if self.is_nextn:
             logger.info(
-                f"[DEBUG] postprocess_layer END {hidden_states.shape}  {residual.shape}"
+                f"[DEBUG] postprocess_layer END {None if hidden_states is None else hidden_states.shape}  {None if residual is None else residual.shape}"
             )
 
         if self.enable_dp_attention and self.speculative_algorithm.is_eagle():
