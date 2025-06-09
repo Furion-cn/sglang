@@ -140,7 +140,9 @@ class EagleDraftInput:
                     padded_len, device=self.positions.device
                 )
                 new_positions = torch.cat([self.positions, position_padding])
-
+                logger.info(
+                    f"[DEBUG] before padding hidden_states.shape: {self.hidden_states.shape}"
+                )
                 # need dummy hidden states for the padded positions
                 hidden_states_dim = self.hidden_states.shape[-1]
                 new_hidden_states = torch.cat(
@@ -154,7 +156,9 @@ class EagleDraftInput:
                     ],
                     dim=0,
                 )
-
+                logger.info(
+                    f"[DEBUG] after padding new_hidden_states.shape: {new_hidden_states.shape} padded_len={padded_len} hidden_states_dim={hidden_states_dim}"
+                )
                 # allocate KV cache location for the padded tokens
                 padded_cache_loc = torch.zeros(
                     padded_len,
@@ -199,12 +203,23 @@ class EagleDraftInput:
         return kv_indices, cum_kv_seq_len, qo_indptr, None
 
     def filter_batch(self, new_indices: torch.Tensor):
+        logger.info(
+            f"[DEBUG] filter_batch new_indices.shape: {None if new_indices is None else new_indices.shape} self.hidden_states.shape: {None if self.hidden_states is None else self.hidden_states.shape} self.topk_p.shape: {None if self.topk_p is None else self.topk_p.shape} self.topk_index.shape: {None if self.topk_index is None else self.topk_index.shape} self.verified_id.shape: {None if self.verified_id is None else self.verified_id.shape}"
+        )
+
         self.topk_p = self.topk_p[: len(new_indices)]
         self.topk_index = self.topk_index[: len(new_indices)]
         self.hidden_states = self.hidden_states[: len(new_indices)]
         self.verified_id = self.verified_id[: len(new_indices)]
 
+        logger.info(
+            f"[DEBUG] filter_batch END new_indices.shape: {None if new_indices is None else new_indices.shape} self.hidden_states.shape: {None if self.hidden_states is None else self.hidden_states.shape} self.topk_p.shape: {None if self.topk_p is None else self.topk_p.shape} self.topk_index.shape: {None if self.topk_index is None else self.topk_index.shape} self.verified_id.shape: {None if self.verified_id is None else self.verified_id.shape}"
+        )
+
     def merge_batch(self, spec_info: EagleDraftInput):
+        logger.info(
+            f"[DEBUG] merge_batch spec_info.hidden_states.shape: {None if spec_info.hidden_states is None else spec_info.hidden_states.shape} self.hidden_states.shape: {None if self.hidden_states is None else self.hidden_states.shape}"
+        )
         if self.hidden_states is None:
             self.hidden_states = spec_info.hidden_states
             self.verified_id = spec_info.verified_id
@@ -219,6 +234,9 @@ class EagleDraftInput:
         self.verified_id = torch.cat([self.verified_id, spec_info.verified_id], axis=0)
         self.topk_p = torch.cat([self.topk_p, spec_info.topk_p])
         self.topk_index = torch.cat([self.topk_index, spec_info.topk_index])
+        logger.info(
+            f"[DEBUG] merge_batch END self.hidden_states.shape: {None if self.hidden_states is None else self.hidden_states.shape} self.verified_id.shape: {None if self.verified_id is None else self.verified_id.shape} self.topk_p.shape: {None if self.topk_p is None else self.topk_p.shape} self.topk_index.shape: {None if self.topk_index is None else self.topk_index.shape}"
+        )
 
 
 @dataclass
