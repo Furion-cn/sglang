@@ -386,6 +386,8 @@ class _LayerBasedSinglePassGatherer(_SinglePassGatherer):
         self._objects_of_layer = {}
 
     def _on_layer_data(self, layer_idx: int, objects: List[int]):
+        if layer_idx is None:
+            return
         assert 0 <= layer_idx < self._expert_location_metadata.num_layers
         if layer_idx in self._objects_of_layer:
             self._objects_of_layer[layer_idx] = _list_sum(
