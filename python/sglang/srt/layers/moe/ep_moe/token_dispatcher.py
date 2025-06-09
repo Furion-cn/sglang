@@ -264,7 +264,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             )
             event.current_stream_wait() if self.async_finish else ()
             if hidden_states.shape[0] > 0:
-                reorder_topk_ids, seg_indptr, hidden_states = self._deepep_permute(
+                reorder_topk_ids, seg_indptr, hidden_states, masked_m = self._deepep_permute(
                     hidden_states, topk_idx, fp8_dtype=hidden_states.dtype
                 )
             else:
@@ -277,7 +277,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
                     dtype=torch.int64,
                 )
 
-            masked_m = expected_m = None
+            expected_m = None
             return (
                 hidden_states,
                 topk_idx,
@@ -365,7 +365,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/moe/token_dispatcher.py
         """
 
-        reorder_topk_ids, self.src2dst, seg_indptr = deepep_run_moe_deep_preprocess(
+        reorder_topk_ids, self.src2dst, seg_indptr, masked_m = deepep_run_moe_deep_preprocess(
             topk_idx, self.num_experts
         )
         num_total_tokens = reorder_topk_ids.numel()
@@ -389,7 +389,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             hidden_states.shape[1],
             BLOCK_SIZE=512,
         )
-        return reorder_topk_ids, seg_indptr, gateup_input
+        return reorder_topk_ids, seg_indptr, gateup_input, masked_m
 
     def combine_a(
         self,
@@ -512,6 +512,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         )
 
         reorder_topk_ids = seg_indptr = None
+
 
         return (
             hidden_states,

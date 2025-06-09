@@ -55,6 +55,7 @@ from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.utils import DeepEPMode, dispose_tensor, is_hip, set_weight_attrs
+from sglang.srt.layers.moe.ep_moe.fbgemm_grouped_gemm import grouped_gemm as fbgemm_grouped_gemm
 
 _is_hip = is_hip()
 
@@ -112,7 +113,7 @@ class GroupedGemmRunner(torch.nn.Module):
                 seg_indptr=seg_indptr,
                 weight_indices=weight_indices,
             )
-        elif masked_m is not None:
+        elif seg_indptr is None:
             c = grouped_gemm_masked_triton(
                 a,
                 b,
@@ -122,19 +123,11 @@ class GroupedGemmRunner(torch.nn.Module):
             )
         else:
             assert weight_column_major == True
-            c = grouped_gemm_triton(
+            c = fbgemm_grouped_gemm(
                 a,
                 b,
-                c,
-                batch_size,
-                weight_column_major,
-                seg_indptr,
-                weight_indices,
-                use_fp8_w8a8,
-                scale_a,
-                scale_b,
-                block_shape=block_shape,
-                c_dtype=c_dtype,
+                m_sizes=masked_m,
+                num_sms=torch.cuda.get_device_properties("cuda").multi_processor_count-20,
             )
         return c
 
