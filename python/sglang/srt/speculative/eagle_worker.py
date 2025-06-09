@@ -379,6 +379,9 @@ class EAGLEWorker(TpModelWorker):
             group=self.target_worker.get_tp_group().cpu_group,
         )
         need_forward = global_info[:, :, 0].any().item()
+        logger.info(
+            f"check_forward_draft_extend_after_decode_need_forward {need_forward}"
+        )
         return need_forward
 
     def forward_target_extend(
