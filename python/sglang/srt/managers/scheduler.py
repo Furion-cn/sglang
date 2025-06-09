@@ -1810,9 +1810,6 @@ class Scheduler(
             (dp_size, attn_tp_size, 6),
             dtype=torch.int64,
         )
-        logger.info(
-            f"local_info--------- {local_info.shape} global_info------------- {global_info.shape}"
-        )
         torch.distributed.all_gather_into_tensor(
             global_info.flatten(),
             local_info,

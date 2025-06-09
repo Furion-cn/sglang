@@ -68,29 +68,15 @@ def initialize_dp_attention(
 
     from sglang.srt.layers.sampler import SYNC_TOKEN_IDS_ACROSS_TP
 
-    if enable_dp_attention and moe_dense_tp_size is not None:
-        _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK = compute_dp_attention_local_info(
-            enable_dp_attention, tp_rank, tp_size, dp_size, moe_dense_tp_size
-        )
-        _, _, _LOCAL_ATTN_DP_RANK = _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK
-    else:
-        _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK = compute_dp_attention_world_info(
-            enable_dp_attention, tp_rank, tp_size, dp_size
-        )
-        _, _, _LOCAL_ATTN_DP_RANK = compute_dp_attention_local_info(
-            enable_dp_attention, tp_rank, tp_size, dp_size, moe_dense_tp_size
-        )
+    _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK = compute_dp_attention_world_info(
+        enable_dp_attention, tp_rank, tp_size, dp_size
+    )
+    _, _, _LOCAL_ATTN_DP_RANK = compute_dp_attention_local_info(
+        enable_dp_attention, tp_rank, tp_size, dp_size, moe_dense_tp_size
+    )
 
     if enable_dp_attention:
-        effective_tp_size = (
-            moe_dense_tp_size if moe_dense_tp_size is not None else tp_size
-        )
-        effective_attn_tp_size = (
-            effective_tp_size // dp_size
-            if moe_dense_tp_size is not None
-            else (tp_size // dp_size)
-        )
-        local_rank = tp_rank % effective_attn_tp_size
+        local_rank = tp_rank % (tp_size // dp_size)
         _ATTN_DP_SIZE = dp_size
         if moe_dense_tp_size is None:
             _LOCAL_ATTN_DP_SIZE = _ATTN_DP_SIZE
@@ -102,20 +88,11 @@ def initialize_dp_attention(
         _LOCAL_ATTN_DP_SIZE = 1
 
     tp_group = get_tp_group()
-    if enable_dp_attention and moe_dense_tp_size is not None:
-        effective_tp_size = moe_dense_tp_size
-        group_ranges = [
-            list(range(head, head + _ATTN_TP_SIZE))
-            for head in range(0, pp_size * effective_tp_size, _ATTN_TP_SIZE)
-        ]
-    else:
-        group_ranges = [
+    _ATTN_TP_GROUP = GroupCoordinator(
+        [
             list(range(head, head + _ATTN_TP_SIZE))
             for head in range(0, pp_size * tp_size, _ATTN_TP_SIZE)
-        ]
-
-    _ATTN_TP_GROUP = GroupCoordinator(
-        group_ranges,
+        ],
         local_rank,
         torch.distributed.get_backend(tp_group.device_group),
         use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
