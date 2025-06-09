@@ -170,8 +170,8 @@ class TboDPAttentionPreparer:
             logger.info(
                 f"...................TboDPAttentionPreparer........local_batch.forward_mode{local_batch.forward_mode}.....local_batch.extend_lens{local_batch.extend_lens}..........."
             )
-            if local_batch.forward_mode.is_extend() and local_batch.extend_lens == 0:
-                return False, self._compute_local_forward_mode(local_batch)
+            # if local_batch.forward_mode.is_extend() and local_batch.extend_lens == 0:
+            #     return False, self._compute_local_forward_mode(local_batch)
             self.local_tbo_split_seq_index = compute_split_seq_index(
                 forward_mode=local_batch.forward_mode,
                 num_tokens=local_batch.input_ids.shape[0],
