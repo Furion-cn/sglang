@@ -315,13 +315,16 @@ class EAGLEWorker(TpModelWorker):
         if batch.forward_mode.is_decode() or batch.is_decode_dp_batch():
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 spec_info = self.draft(batch)
+                logger.info(f"draft done {spec_info}")
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
                 self.verify(batch, spec_info)
             )
+            logger.info(f"verify done {verify_output}")
             # If it is None, it means all requests are finished
             if self.check_forward_draft_extend_after_decode(batch):
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
                     self.forward_draft_extend_after_decode(batch)
+                logger.info(f"forward_draft_extend_after_decode done")
             return (
                 logits_output,
                 verify_output.verified_id,
@@ -331,16 +334,23 @@ class EAGLEWorker(TpModelWorker):
             )
         elif batch.forward_mode.is_extend() or batch.is_extend_dp_batch():
             logits_output, next_token_ids, bid = self.forward_target_extend(batch)
+            logger.info(
+                f"forward_target_extend done {logits_output.shape} {next_token_ids.shape} {bid}"
+            )
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 self.forward_draft_extend(
                     batch, logits_output.hidden_states, next_token_ids
                 )
+                logger.info(f"forward_draft_extend done")
             return logits_output, next_token_ids, bid, 0, False
         else:
             model_worker_batch = batch.get_model_worker_batch()
             model_worker_batch.spec_num_draft_tokens = 1
             logits_output, next_token_ids, _ = (
                 self.target_worker.forward_batch_generation(model_worker_batch)
+            )
+            logger.info(
+                f"forward_target_extend done {logits_output.shape} {next_token_ids.shape} {model_worker_batch.bid}"
             )
             return logits_output, next_token_ids, model_worker_batch.bid, 0, False
 

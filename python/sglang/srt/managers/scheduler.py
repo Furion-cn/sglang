@@ -1648,6 +1648,9 @@ class Scheduler(
                     num_accepted_tokens,
                     can_run_cuda_graph,
                 ) = self.draft_worker.forward_batch_speculative_generation(batch)
+                logger.info(
+                    f"draft_worker.forward_batch_speculative_generation(batch) {logits_output.shape} {next_token_ids.shape} {bid} {num_accepted_tokens} {can_run_cuda_graph}"
+                )
                 self.spec_num_total_accepted_tokens += (
                     num_accepted_tokens + batch.batch_size()
                 )
