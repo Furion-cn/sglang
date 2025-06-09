@@ -372,6 +372,9 @@ class EAGLEWorker(TpModelWorker):
             (get_attention_dp_size(), get_attention_tp_size(), 1),
             dtype=torch.int64,
         )
+        logger.info(
+            f"check_forward_draft_extend_after_decode {local_need_forward} global_info.shape {global_info.shape} local_info.shape {local_info.shape}"
+        )
         torch.distributed.all_gather_into_tensor(
             global_info.flatten(),
             local_info,
