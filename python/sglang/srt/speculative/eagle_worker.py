@@ -317,6 +317,9 @@ class EAGLEWorker(TpModelWorker):
         """
         if batch.forward_mode.is_decode() or batch.is_decode_dp_batch():
             with self.draft_tp_context(self.draft_model_runner.tp_group):
+                logger.info(
+                    f"draft start input ids {batch.input_ids} spec info {batch.spec_info} output ids {batch.output_ids}"
+                )
                 spec_info = self.draft(batch)
                 logger.info(f"draft done {spec_info}")
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
