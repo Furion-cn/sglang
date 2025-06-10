@@ -321,7 +321,9 @@ class EAGLEWorker(TpModelWorker):
                     f"draft start input ids {batch.input_ids} spec info {batch.spec_info} output ids {batch.output_ids}"
                 )
                 spec_info = self.draft(batch)
-                logger.info(f"draft done {spec_info}")
+                logger.info(
+                    f"draft done hiddenstate {spec_info.hidden_states} topk {spec_info.topk_p} topkindex {spec_info.topk_index} verified_id {spec_info.verified_id}"
+                )
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
                 self.verify(batch, spec_info)
             )
@@ -688,7 +690,9 @@ class EAGLEWorker(TpModelWorker):
                 ),
             )
         batch.spec_info = res.draft_input
-
+        logger.info(
+            f"EagleWorker Verify SpecInfo {batch.spec_info} hiddenstate {batch.spec_info.hidden_states} topk {batch.spec_info.topk_p} top_k inde {batch.spec_info.topk_index} verified_id {batch.spec_info.verified_id}"
+        )
         if batch.return_logprob:
             self.add_logprob_values(batch, res, logits_output)
         return logits_output, res, model_worker_batch, can_run_cuda_graph
@@ -802,7 +806,7 @@ class EAGLEWorker(TpModelWorker):
                 # Prepare metadata
                 batch.forward_mode = ForwardMode.DRAFT_EXTEND
                 logger.info(
-                    f"[DEBUG] prepare_extend_after_decode START - batch_size: {batch.input_ids}"
+                    f"[DEBUG] prepare_extend_after_decode START - batch_size: {batch.input_ids} verified_id {batch.spec_info.verified_id}"
                 )
                 batch.spec_info.prepare_extend_after_decode(
                     batch,

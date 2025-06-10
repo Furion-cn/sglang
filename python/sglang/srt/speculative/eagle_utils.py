@@ -109,7 +109,7 @@ class EagleDraftInput:
         self.positions = torch.empty_like(self.verified_id, dtype=torch.long)
         new_verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
         self.accept_length.add_(1)
-
+        logger.info(f"before create_extend_spec_info {self.verified_id}")
         create_extend_spec_info[(self.accept_length.numel(),)](
             self.verified_id,
             batch.seq_lens,
