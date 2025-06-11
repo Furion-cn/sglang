@@ -325,6 +325,9 @@ class EAGLEWorker(TpModelWorker):
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
                 self.verify(batch, spec_info)
             )
+            logger.info(
+                f"verify done verifyoutput {verify_output.accept_length_per_req_cpu}"
+            )
             # If it is None, it means all requests are finished
             if self.check_forward_draft_extend_after_decode(batch):
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
@@ -817,6 +820,7 @@ class EAGLEWorker(TpModelWorker):
                 )
             else:
                 origin_batch = batch
+                logger.info(f"origin_batch_spec_info {origin_batch.spec_info}")
                 batch = origin_batch.copy()
                 logger.info(
                     f"[DEBUG] prepare_for_idle START - batch_size: {batch.input_ids}"
