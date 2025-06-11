@@ -332,7 +332,9 @@ class EAGLEWorker(TpModelWorker):
             if self.check_forward_draft_extend_after_decode(batch):
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
                     self.forward_draft_extend_after_decode(batch)
-                logger.info(f"forward_draft_extend_after_decode done")
+                    logger.info(
+                        f"forward_draft_extend_after_decode done {batch.spec_info.verified_id}"
+                    )
             return (
                 logits_output,
                 verify_output.verified_id,
@@ -590,6 +592,7 @@ class EAGLEWorker(TpModelWorker):
                 spec_info.hidden_states = hidden_states
 
             # Run forward
+            logger.info(f"forward_batch.input_ids {forward_batch.input_ids}")
             logits_output = self.draft_model_runner.model.forward(
                 forward_batch.input_ids, forward_batch.positions, forward_batch
             )

@@ -87,7 +87,7 @@ class DeepseekModelNextN(nn.Module):
             ),
         )
         logger.info(
-            f"[DEBUG] forward_batch.spec_info.hidden_states.shape: {forward_batch.spec_info.hidden_states.shape}"
+            f"[DEBUG] forward_batch.spec_info.hidden_states.shape: {forward_batch.spec_info.hidden_states.shape} input_ids {input_ids}"
         )
         forward_batch.spec_info.hidden_states = (
             forward_batch.spec_info.hidden_states.to(self.hnorm.weight.dtype)
