@@ -318,22 +318,19 @@ class EAGLEWorker(TpModelWorker):
         if batch.forward_mode.is_decode() or batch.is_decode_dp_batch():
             with self.draft_tp_context(self.draft_model_runner.tp_group):
                 logger.info(
-                    f"draft start input ids {batch.input_ids} spec info {batch.spec_info} output ids {batch.output_ids}"
+                    f"  fowardmode {batch.forward_mode} --------draft start input ids spec info {batch.spec_info}"
                 )
                 spec_info = self.draft(batch)
                 logger.info(f"draft done draft token {spec_info.draft_token}")
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
                 self.verify(batch, spec_info)
             )
-            logger.info(
-                f"verify done verified_id {batch.spec_info.verified_id} logits_output {logits_output} verify_output {verify_output} model_worker_batch {model_worker_batch.input_ids}"
-            )
             # If it is None, it means all requests are finished
             if self.check_forward_draft_extend_after_decode(batch):
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
                     self.forward_draft_extend_after_decode(batch)
                     logger.info(
-                        f"forward_draft_extend_after_decode done {batch.spec_info.verified_id}"
+                        f"  fowardmode {batch.forward_mode} --------forward_draft_extend_after_decode done {batch.spec_info} "
                     )
             return (
                 logits_output,
@@ -608,9 +605,10 @@ class EAGLEWorker(TpModelWorker):
     def verify(self, batch: ScheduleBatch, spec_info: EagleVerifyInput):
 
         if not batch.forward_mode.is_idle():
+            logger.info(f"verify start spec info {spec_info}")
             spec_info.prepare_for_verify(batch, self.page_size)
             batch.forward_mode = ForwardMode.TARGET_VERIFY
-
+            logger.info(f"verify done spec info {spec_info}")
         batch.spec_info = spec_info
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.spec_num_draft_tokens = self.speculative_num_draft_tokens
