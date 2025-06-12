@@ -821,7 +821,7 @@ class EAGLEWorker(TpModelWorker):
                 # Prepare metadata
                 batch.forward_mode = ForwardMode.DRAFT_EXTEND
                 logger.info(
-                    f"[DEBUG] prepare_extend_after_decode START - batch_size: {batch.input_ids} verified_id {batch.spec_info.verified_id}"
+                    f"[DEBUG] prepare_extend_after_decode START - verified_id {batch.spec_info.verified_id}"
                 )
                 batch.spec_info.prepare_extend_after_decode(
                     batch,
@@ -829,7 +829,7 @@ class EAGLEWorker(TpModelWorker):
                     pad_input=self.cuda_graph_runner_for_draft_extend is not None,
                 )
                 logger.info(
-                    f"[DEBUG] prepare_extend_after_decode END - batch_size: {batch.input_ids}"
+                    f"[DEBUG] prepare_extend_after_decode END - batch_spec_info: {batch.spec_info}"
                 )
             else:
                 logger.info(
@@ -885,10 +885,13 @@ class EAGLEWorker(TpModelWorker):
                     f"draft_model_runner.attn_backend.init_forward_metadata end"
                 )
             logger.info(
-                f"draft_model_runner.model.forward start forward_batch.input_ids{None if forward_batch.input_ids is None else forward_batch.input_ids.shape} forward_batch.positions{None if forward_batch.positions is None else forward_batch.positions.shape}"
+                f"draft_model_runner.model.forward start forward_batch.input_ids{None if forward_batch.input_ids is None else forward_batch.input_ids} forward_batch.positions{None if forward_batch.positions is None else forward_batch.positions.shape}"
             )
             logits_output = self.draft_model_runner.model.forward(
                 forward_batch.input_ids, forward_batch.positions, forward_batch
+            )
+            logger.info(
+                f"logits_output = self.draft_model_runner.model.forward {logits_output.hidden_states}"
             )
         logger.info(
             f"[DEBUG] forward END - batch_size: {forward_batch.input_ids.shape}"
@@ -896,7 +899,7 @@ class EAGLEWorker(TpModelWorker):
         self._detect_nan_if_needed(logits_output)
         self.capture_for_decode(logits_output, forward_batch.spec_info)
         logger.info(
-            f"[DEBUG] capture_for_decode END - batch_size: {forward_batch.input_ids.shape}"
+            f"[DEBUG] capture_for_decode END - hiddenstates: {forward_batch.spec_info.hidden_states}"
         )
         if origin_batch is not None:
             batch = origin_batch
