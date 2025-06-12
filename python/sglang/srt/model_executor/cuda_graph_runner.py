@@ -50,6 +50,10 @@ if TYPE_CHECKING:
 # Detect whether the current forward pass is in capture mode
 is_capture_mode = False
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def get_is_capture_mode():
     return is_capture_mode
@@ -386,6 +390,9 @@ class CudaGraphRunner:
                     num_tokens=bs * self.num_tokens_per_bs,
                     tp_group=self.model_runner.tp_group,
                 ) as forward:
+                    if bs > 128:
+                        logger.info(f"capture bs {bs} is more than 128 skip")
+                        continue
                     (
                         graph,
                         output_buffers,
