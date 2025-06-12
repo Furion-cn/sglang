@@ -818,6 +818,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # This is an optimization to reduce the overhead of the prefill check.
     batch_is_full: bool = False
 
+    run_batch_time: float = 0.0
+    schedule_batch_time: float = 0.0
     # Events
     launch_done: Optional[threading.Event] = None
 
