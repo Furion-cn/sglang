@@ -326,7 +326,7 @@ class EAGLEWorker(TpModelWorker):
                 self.verify(batch, spec_info)
             )
             logger.info(
-                f"verify done verifyoutput {verify_output.accept_length_per_req_cpu}"
+                f"verify done verified_id {verify_output.verified_id} verifyoutput {verify_output.accept_length_per_req_cpu}"
             )
             logger.info(
                 f"verify done specinfo hiddenstates000000 {batch.spec_info.hidden_states}"
@@ -670,7 +670,9 @@ class EAGLEWorker(TpModelWorker):
                 self.page_size,
                 vocab_mask,
             )
-
+            logger.info(
+                f"verified_id, verified_len_per_req_cpu {res.verified_id} {res.accept_length_per_req_cpu}"
+            )
             # Post process based on verified outputs.
             # Pick indices that we care (accepted)
             logits_output.next_token_logits = logits_output.next_token_logits[
