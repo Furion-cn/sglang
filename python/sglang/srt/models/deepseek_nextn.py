@@ -123,6 +123,8 @@ class DeepseekModelNextN(nn.Module):
         logger.info(f" decoder STARTdddddhiddesntate {hidden_states}")
         if not forward_batch.forward_mode.is_idle():
             hidden_states = self.shared_head.norm(hidden_states, residual)
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
         logger.info(f"decoder STARTeeeeedhiddesntate {hidden_states}")
         return hidden_states
 
