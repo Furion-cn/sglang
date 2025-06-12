@@ -390,8 +390,8 @@ class CudaGraphRunner:
                     num_tokens=bs * self.num_tokens_per_bs,
                     tp_group=self.model_runner.tp_group,
                 ) as forward:
-                    if bs > 128:
-                        logger.info(f"capture bs {bs} is more than 128 skip")
+                    if bs > 32:
+                        logger.info(f"capture bs {bs} is more than 128 / 4 = 32 skip")
                         continue
                     (
                         graph,
