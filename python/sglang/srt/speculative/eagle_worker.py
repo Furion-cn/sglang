@@ -328,6 +328,9 @@ class EAGLEWorker(TpModelWorker):
             logger.info(
                 f"verify done verifyoutput {verify_output.accept_length_per_req_cpu}"
             )
+            logger.info(
+                f"verify done specinfo hiddenstates {batch.spec_info.hidden_states}"
+            )
             # If it is None, it means all requests are finished
             if self.check_forward_draft_extend_after_decode(batch):
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
@@ -692,9 +695,10 @@ class EAGLEWorker(TpModelWorker):
                 ),
             )
         batch.spec_info = res.draft_input
-        logger.info(
-            f"EagleWorker Verify SpecInfo {batch.spec_info} hiddenstate {batch.spec_info.hidden_states} topk {batch.spec_info.topk_p} top_k inde {batch.spec_info.topk_index} verified_id {batch.spec_info.verified_id}"
-        )
+        if not batch.forward_mode.is_idle():
+            logger.info(
+                f"EagleWorker  hiddenstate {batch.spec_info.hidden_states} Verify SpecInfo {batch.spec_info} topk {batch.spec_info.topk_p} top_k inde {batch.spec_info.topk_index} verified_id {batch.spec_info.verified_id}"
+            )
         if batch.return_logprob:
             self.add_logprob_values(batch, res, logits_output)
         return logits_output, res, model_worker_batch, can_run_cuda_graph
@@ -819,6 +823,9 @@ class EAGLEWorker(TpModelWorker):
                     f"[DEBUG] prepare_extend_after_decode END - batch_size: {batch.input_ids}"
                 )
             else:
+                logger.info(
+                    f"batch.spec_info.hidden_states {batch.spec_info.hidden_states}"
+                )
                 origin_batch = batch
                 logger.info(f"origin_batch_spec_info {origin_batch.spec_info}")
                 batch = origin_batch.copy()
@@ -892,6 +899,9 @@ class EAGLEWorker(TpModelWorker):
             batch.req_pool_indices = req_pool_indices_backup
             batch.spec_info.accept_length = accept_length_backup
             batch.return_logprob = return_logprob_backup
+        logger.info(
+            f"batch.spec_info.hidden_states new {batch.spec_info.hidden_states}"
+        )
 
     def capture_for_decode(
         self, logits_output: LogitsProcessorOutput, draft_input: EagleDraftInput
