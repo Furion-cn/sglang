@@ -329,11 +329,17 @@ class EAGLEWorker(TpModelWorker):
                 f"verify done verifyoutput {verify_output.accept_length_per_req_cpu}"
             )
             logger.info(
-                f"verify done specinfo hiddenstates {batch.spec_info.hidden_states}"
+                f"verify done specinfo hiddenstates000000 {batch.spec_info.hidden_states}"
             )
             # If it is None, it means all requests are finished
             if self.check_forward_draft_extend_after_decode(batch):
+                logger.info(
+                    f"verify done specinfo hiddenstates111111 {batch.spec_info.hidden_states}"
+                )
                 with self.draft_tp_context(self.draft_model_runner.tp_group):
+                    logger.info(
+                        f"verify done specinfo hiddenstates222222 {batch.spec_info.hidden_states}"
+                    )
                     self.forward_draft_extend_after_decode(batch)
                     logger.info(
                         f"  fowardmode {batch.forward_mode} --------forward_draft_extend_after_decode done {batch.spec_info} "
