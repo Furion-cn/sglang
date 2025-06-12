@@ -1485,10 +1485,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states, forward_batch)
         if self.is_nextn:
             logger.info(f"[DEBUG] mlp END {hidden_states}")
-
-        hidden_states, residual = self.layer_communicator.postprocess_layer(
-            hidden_states, residual, forward_batch
-        )
+        if not self.is_nextn:
+            hidden_states, residual = self.layer_communicator.postprocess_layer(
+                hidden_states, residual, forward_batch
+            )
         if self.is_nextn:
             logger.info(
                 f"[DEBUG] postprocess_layer END {None if hidden_states is None else hidden_states}  {None if residual is None else residual.shape}"

@@ -436,8 +436,8 @@ class CommunicateSummableTensorPairFn:
         context: CommunicateContext,
         is_nextn: bool = False,
     ):
-        # if is_nextn:
-        #     return CommunicateSummableTensorPairFn._gather
+        if is_nextn:
+            return CommunicateSummableTensorPairFn._gather
         if context.is_same_group_size(
             hidden_states_input_mode, output_mode
         ) and context.is_same_group_size(residual_input_mode, output_mode):
