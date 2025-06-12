@@ -1,6 +1,8 @@
 import logging
 from dataclasses import dataclass
 
+from setuptools.windows_support import hide_file
+
 from sglang.srt.layers.quantization.deep_gemm import _ENABLE_JIT_DEEPGEMM
 from sglang.srt.managers.expert_distribution import (
     get_global_expert_distribution_recorder,
@@ -571,6 +573,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             const auto num_warps = kNumWarpGroups * kNumWarpsPerGroup;
         """
         buffer = self._get_buffer()
+        logger.info(
+            f"hidden states shape topk_idx shape {hidden_states.shape} {topk_idx.shape}"
+        )
         packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
                 hidden_states,
