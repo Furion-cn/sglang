@@ -1460,15 +1460,13 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         if self.is_nextn:
             logger.info(
-                f"[DEBUG] forward START {hidden_states.shape}  layer_communicator={self.layer_communicator}"
+                f"[DEBUG] forward START {hidden_states}  layer_communicator={self.layer_communicator}"
             )
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
         if self.is_nextn:
-            logger.info(
-                f"[DEBUG] prepare_attn END {hidden_states.shape}  {residual.shape}"
-            )
+            logger.info(f"[DEBUG] prepare_attn END {hidden_states}  {residual.shape}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -1476,32 +1474,30 @@ class DeepseekV2DecoderLayer(nn.Module):
             zero_allocator=zero_allocator,
         )
         if self.is_nextn:
-            logger.info(f"[DEBUG] self_attn END {hidden_states.shape}")
+            logger.info(f"[DEBUG] self_attn END {hidden_states}")
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
         if self.is_nextn:
-            logger.info(
-                f"[DEBUG] prepare_mlp END {hidden_states.shape}  {residual.shape}"
-            )
+            logger.info(f"[DEBUG] prepare_mlp END {hidden_states}  {residual.shape}")
 
         hidden_states = self.mlp(hidden_states, forward_batch)
         if self.is_nextn:
-            logger.info(f"[DEBUG] mlp END {hidden_states.shape}")
+            logger.info(f"[DEBUG] mlp END {hidden_states}")
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
         if self.is_nextn:
             logger.info(
-                f"[DEBUG] postprocess_layer END {None if hidden_states is None else hidden_states.shape}  {None if residual is None else residual.shape}"
+                f"[DEBUG] postprocess_layer END {None if hidden_states is None else hidden_states}  {None if residual is None else residual.shape}"
             )
 
         if self.enable_dp_attention and self.speculative_algorithm.is_eagle():
             hidden_states = hidden_states.clone()
         if self.is_nextn:
-            logger.info(f"[DEBUG] forward END {hidden_states.shape}")
+            logger.info(f"[DEBUG] forward END {hidden_states}")
         return hidden_states, residual
 
     def op_comm_prepare_attn(
