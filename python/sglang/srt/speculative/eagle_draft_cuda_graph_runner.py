@@ -114,6 +114,12 @@ class EAGLEDraftCudaGraphRunner:
             )
 
     def can_run(self, forward_batch: ForwardBatch):
+        bs_str = "bs : "
+        for bs in self.graphs.keys():
+            bs_str += bs
+            bs_str += ", "
+
+        logger.info(f"draft forward can run all bs {bs_str}")
         if self.enable_dp_attention or self.enable_sp_layernorm:
             if not forward_batch.can_run_dp_cuda_graph:
                 return False

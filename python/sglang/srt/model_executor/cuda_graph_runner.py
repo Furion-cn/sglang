@@ -358,7 +358,14 @@ class CudaGraphRunner:
             if self.model_runner.server_args.enable_two_batch_overlap
             else True
         )
+        bs_str = "bs : "
+        for bs in self.graphs.keys():
+            bs_str += bs
+            bs_str += ", "
 
+        logger.info(
+            f"all bs {bs_str} is_bs_supported is_encoder_lens_supported is_tbo_supported {is_bs_supported} {is_encoder_lens_supported} {is_tbo_supported}"
+        )
         return is_bs_supported and is_encoder_lens_supported and is_tbo_supported
 
     def capture(self):
