@@ -797,7 +797,7 @@ class EAGLEWorker(TpModelWorker):
 
     def forward_draft_extend_after_decode(self, batch: ScheduleBatch):
         logger.info(
-            f"[DEBUG] forward_draft_extend_after_decode START - batch_size: {batch.input_ids}"
+            f"[DEBUG] forward_draft_extend_after_decode START ------hiddenstates: {batch.spec_info.hidden_states}"
         )
         is_idle = batch.forward_mode.is_idle()
         origin_batch = None
