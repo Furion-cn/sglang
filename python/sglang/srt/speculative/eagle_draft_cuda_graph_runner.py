@@ -116,7 +116,7 @@ class EAGLEDraftCudaGraphRunner:
     def can_run(self, forward_batch: ForwardBatch):
         bs_str = "bs : "
         for bs in self.graphs.keys():
-            bs_str += bs
+            bs_str += str(bs)
             bs_str += ", "
 
         logger.info(f"draft forward can run all bs {bs_str}")

@@ -360,7 +360,7 @@ class CudaGraphRunner:
         )
         bs_str = "bs : "
         for bs in self.graphs.keys():
-            bs_str += bs
+            bs_str += str(bs)
             bs_str += ", "
 
         logger.info(
