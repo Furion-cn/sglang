@@ -151,13 +151,14 @@ class SchedulerStats:
 
 class SchedulerMetricsCollector:
 
-    def __init__(self, tp_rank: int, dp_size: int, labels: Dict[str, str]) -> None:
+    def __init__(self, tp_rank: int, tp_size: int, dp_size: int, node_rank: int, labels: Dict[str, str]) -> None:
         # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
         from prometheus_client import Counter, Gauge
 
         self.labels = labels
         self.tp_rank = tp_rank
         self.dp_size = dp_size
+        self.node_rank = node_rank
         self.last_log_time = time.perf_counter()
 
         labelnames_dp = list(labels.keys())
@@ -180,13 +181,6 @@ class SchedulerMetricsCollector:
         self.token_usage = Gauge(
             name="sglang:token_usage",
             documentation="The token usage.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.gen_throughput = Gauge(
-            name="sglang:gen_throughput",
-            documentation="The generation throughput (token/s).",
             labelnames=labelnames_dp,
             multiprocess_mode="mostrecent",
         )
@@ -281,12 +275,16 @@ class SchedulerMetricsCollector:
             labelnames=labels.keys(),
         )
 
+        if "node_rank" not in labels:
+            labels["node_rank"] = str(node_rank)
+
         self._labeled_gauges = {}
         for dp in range(dp_size):
             dp_labels = labels.copy()
             dp_labels["dp"] = str(dp)
+            dp_labels["node_rank"] = str(node_rank)
             
-            self._labeled_gauges[dp] = {
+            self._labeled_gauges[(node_rank, dp)] = {
                 'num_running_reqs': self.num_running_reqs.labels(**dp_labels),
                 'num_used_tokens': self.num_used_tokens.labels(**dp_labels),
                 'token_usage': self.token_usage.labels(**dp_labels),
@@ -318,7 +316,7 @@ class SchedulerMetricsCollector:
         self.num_transfer_failed_reqs.labels(**self.labels).inc(1)
 
     def _stats_to_tensor(self, stats: SchedulerStats) -> torch.Tensor:
-        data = torch.zeros(15, dtype=torch.float32)
+        data = torch.zeros(16, dtype=torch.float32)
         data[0] = stats.num_running_reqs
         data[1] = stats.num_used_tokens
         data[2] = stats.token_usage
@@ -334,17 +332,18 @@ class SchedulerMetricsCollector:
         data[12] = stats.num_prefill_infight_queue_reqs
         data[13] = stats.num_decode_prealloc_queue_reqs
         data[14] = stats.num_decode_transfer_queue_reqs
+        data[15] = self.node_rank
         return data
 
     def log_stats(self, stats: SchedulerStats, dp_size: int, attn_tp_rank: int, attn_tp_size: int, tp_cpu_group) -> None:
         if attn_tp_rank != 0:
-            local_info = torch.zeros(15, dtype=torch.float32)
+            local_info = torch.zeros(16, dtype=torch.float32)
         else:
             local_info = self._stats_to_tensor(stats)
-            if local_info.size(0) != 15:
+            if local_info.size(0) != 16:
                 raise ValueError(f"local_info.size(0) != 15: {local_info.size(0)}")
         global_info = torch.empty(
-            (dp_size, attn_tp_size, 15),
+            (dp_size, attn_tp_size, 16),
             dtype=torch.float32
         )
         torch.distributed.all_gather_into_tensor(
@@ -355,11 +354,13 @@ class SchedulerMetricsCollector:
         if attn_tp_rank != 0:
             return
 
-        stats_data = global_info[:, 0, :].cpu().numpy()  # shape: (dp_size, 15)
+        stats_data = global_info[:, 0, :].cpu().numpy()  # shape: (dp_size, 16)
 
         for i, stat in enumerate(stats_data):
             assert (i < self.dp_size), f"dp_rank must smaller than dp_size"
-            gauges = self._labeled_gauges[i]
+            # find gauges by node_rank and dp
+            node_rank = int(stat[15]) 
+            gauges = self._labeled_gauges[(node_rank, i)]
             gauges['num_running_reqs'].set(stat[0])
             gauges['num_used_tokens'].set(stat[1])
             gauges['token_usage'].set(stat[2])

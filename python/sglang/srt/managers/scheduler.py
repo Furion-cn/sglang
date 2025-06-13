@@ -553,12 +553,19 @@ class Scheduler(
         self.stats = SchedulerStats()
         if self.enable_metrics:
             engine_type = "unified"
+            gpus_per_node=8
+            node_rank=self.tp_rank // gpus_per_node
             self.metrics_collector = SchedulerMetricsCollector(
                 tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
                 dp_size=self.dp_size,
+                node_rank=node_rank,
                 labels={
                     "model_name": self.server_args.served_model_name,
                     "engine_type": engine_type,
+                    "tp": str(self.tp_size),
+                    "dp": str(self.dp_size),
+                    "node_rank": str(node_rank),
                 },
             )
 
