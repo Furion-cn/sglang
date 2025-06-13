@@ -261,7 +261,7 @@ def rebalance_experts(
     num_nodes: int,
     phase: Literal["prefill", "decode"],
 ):
-    if phase == "prefill":
+    if phase == "prefill" and num_groups is not None and num_groups % num_nodes == 0:
         return prefill_rebalance_experts(
             tokens_per_expert=tokens_per_expert,
             num_physical_experts=num_physical_experts,
@@ -269,10 +269,9 @@ def rebalance_experts(
             num_groups=num_groups,
             num_nodes=num_nodes,
         )
-    if phase == "decode":
-        return decode_rebalance_experts(
-            tokens_per_expert=tokens_per_expert,
-            num_physical_experts=num_physical_experts,
-            num_local_physical_experts=num_local_physical_experts,
-        )
-    raise NotImplementedError
+
+    return decode_rebalance_experts(
+        tokens_per_expert=tokens_per_expert,
+        num_physical_experts=num_physical_experts,
+        num_local_physical_experts=num_local_physical_experts,
+    )

@@ -179,7 +179,9 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
         )
 
     def _on_hook(self, hook_name: str, **kwargs):
-        if not (self._recording or torch.cuda.is_current_stream_capturing()):
+        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
+        if not (self._recording or get_is_capture_mode()):
             return
         gatherer = self._single_pass_gatherers[
             self._accumulator.get_single_pass_gatherer_key(
@@ -560,6 +562,7 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             dtype=torch.int32,
             device=self._server_args.device,
         )
+        self._first_dump = True
 
     def append(
         self,
@@ -584,9 +587,15 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             num_logical_experts=self._expert_location_metadata.num_logical_experts,
             physical_to_logical_map=self._expert_location_metadata.physical_to_logical_map,
         )
+
+        if self._first_dump:
+            self._first_dump = False
+            torch.cuda.empty_cache()
+        
         torch.distributed.all_reduce(
             logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
         )
+        
         output = dict(
             rank=self._rank,
             logical_count=logical_count_of_buffered_step,

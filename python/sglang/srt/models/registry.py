@@ -71,6 +71,8 @@ def import_model_classes():
     package_name = "sglang.srt.models"
     package = importlib.import_module(package_name)
     for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
+        if name == "MiMoForCausalLM":
+            continue
         if not ispkg:
             try:
                 module = importlib.import_module(name)

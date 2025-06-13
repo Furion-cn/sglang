@@ -268,6 +268,8 @@ class ModelRunner:
             else None
         )
 
+        self.expert_location_updater = expert_location_updater.ExpertLocationUpdater()
+
         # Load the model
         self.sampler = Sampler()
         self.load_model()
@@ -294,6 +296,19 @@ class ModelRunner:
         # Init lora
         if server_args.lora_paths is not None:
             self.init_lora_manager()
+
+
+        if self.eplb_manager is not None:
+            # 在初始化 init memory pool 之前分配 eplb rebalance buffer
+            expert_location_updater.set_global_eplb_rebalance_buffer(expert_location_updater.create_temp_buffers(
+                next(iter(self.model.routed_experts_weights_of_layer.values()))
+            ))
+            temp_buffers_theoretical = 0
+            for buffer in expert_location_updater.get_global_eplb_rebalance_buffer():
+                temp_buffers_theoretical += buffer.element_size() * buffer.nelement()
+            logger.info(
+                f"[EPLBManager] system started, eplb rebalance buffer allocated {temp_buffers_theoretical / (1024 ** 2):.2f} MB"
+            )
 
         # Init memory pool and attention backends
         self.init_memory_pool(
@@ -600,7 +615,7 @@ class ModelRunner:
     def update_expert_location(
         self, new_expert_location_metadata: ExpertLocationMetadata
     ):
-        expert_location_updater.update_expert_location(
+        self.expert_location_updater.update_expert_location(
             self.model.routed_experts_weights_of_layer,
             new_expert_location_metadata,
             nnodes=self.server_args.nnodes,
@@ -857,6 +872,14 @@ class ModelRunner:
                     2048,
                 ),
                 4096,
+            )
+        else:
+            max_num_reqs =  max(
+                int(
+                    self.max_total_num_tokens / self.model_config.context_len * 512
+                ),
+                2 * max_num_reqs // (self.server_args.dp_size if self.server_args.enable_dp_attention else 1),
+                2048,
             )
 
         if SGLANG_CI_SMALL_KV_SIZE:

@@ -564,6 +564,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
             self.required_dst_info_num = (
                 local_tp_size_per_dp_rank // prefill_tp_size_per_dp_rank
             )
+            # 4//2 = 2, 4//3 = 1
             self.target_tp_ranks = [self.target_tp_rank]
         else:
             assert (

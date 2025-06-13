@@ -72,13 +72,15 @@ class _StageExecutor:
         self._index = 0
         self._stage_state = _StateDict()
         self._stage_output = inputs
+        self._inputs_shape = inputs["hidden_states"].shape
+        self._inputs_dim = inputs["hidden_states"].dim()
 
     def next(self):
         assert not self.done
 
         stage = self._stages[self._index]
 
-        with _annotate_region(debug_name=f"{self._debug_name}{self._index}"):
+        with _annotate_region(debug_name=f"{self._debug_name}{self._index}_{self._inputs_shape[1] if self._inputs_dim == 3 else self._inputs_shape[0]}"):
             for op in stage:
                 with _annotate_region(debug_name=op.debug_name):
                     self._stage_output = op.fn(

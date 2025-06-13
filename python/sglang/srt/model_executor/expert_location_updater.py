@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+import datetime
 import logging
 from typing import Dict, List, Tuple
 
@@ -25,23 +26,49 @@ from sglang.srt.managers.expert_location import (
 
 logger = logging.getLogger(__name__)
 
+_global_eplb_rebalance_buffer = None
 
-def update_expert_location(
-    routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
-    new_expert_location_metadata: ExpertLocationMetadata,
-    nnodes: int,
-    rank: int,
-):
-    old_expert_location_metadata = get_global_expert_location_metadata()
-    _update_expert_weights(
-        routed_experts_weights_of_layer,
-        old_expert_location_metadata,
-        new_expert_location_metadata,
-        nnodes,
-        rank,
-    )
-    old_expert_location_metadata.update(new_expert_location_metadata)
+def set_global_eplb_rebalance_buffer(buffer: List[torch.Tensor]):
+    global _global_eplb_rebalance_buffer
+    _global_eplb_rebalance_buffer = buffer
 
+def get_global_eplb_rebalance_buffer() -> List[torch.Tensor]:
+    if _global_eplb_rebalance_buffer is None:
+        raise RuntimeError("Global EPLB rebalance buffer is not initialized")
+    return _global_eplb_rebalance_buffer
+
+def clear_global_eplb_rebalance_buffer():
+    global _global_eplb_rebalance_buffer
+    if _global_eplb_rebalance_buffer is not None:
+        for buffer in _global_eplb_rebalance_buffer:
+            buffer.zero_()
+
+class ExpertLocationUpdater:
+    def __init__(self):
+        self._first_execution = True
+        
+    def update_expert_location(
+        self,
+        routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
+        new_expert_location_metadata: ExpertLocationMetadata,
+        nnodes: int,
+        rank: int,
+    ):
+        if self._first_execution:
+            self._first_execution = False
+            torch.cuda.empty_cache()
+
+        old_expert_location_metadata = get_global_expert_location_metadata()
+        _update_expert_weights(
+            routed_experts_weights_of_layer,
+            old_expert_location_metadata,
+            new_expert_location_metadata,
+            nnodes,
+            rank,
+        )
+        old_expert_location_metadata.update(new_expert_location_metadata)
+
+        clear_global_eplb_rebalance_buffer()
 
 def _update_expert_weights(
     routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
@@ -50,10 +77,6 @@ def _update_expert_weights(
     nnodes: int,
     rank: int,
 ):
-    temp_buffers = create_temp_buffers(
-        next(iter(routed_experts_weights_of_layer.values()))
-    )
-
     world_size = torch.distributed.get_world_size()
     num_local_physical_experts = old_expert_location_metadata.num_local_physical_experts
     num_gpu_per_node = world_size // nnodes
@@ -68,7 +91,7 @@ def _update_expert_weights(
     for layer_id in sorted(routed_experts_weights_of_layer.keys()):
         update_expert_weights_single_layer(
             routed_experts_weights=routed_experts_weights_of_layer[layer_id],
-            temp_buffers=temp_buffers,
+            temp_buffers=get_global_eplb_rebalance_buffer(),
             old_physical_to_logical_map=old_physical_to_logical_map[layer_id],
             new_physical_to_logical_map=new_physical_to_logical_map[layer_id],
             num_local_physical_experts=num_local_physical_experts,
@@ -340,7 +363,7 @@ def update_expert_weights_single_layer(
         reqs = torch.distributed.batch_isend_irecv(p2p_ops)
         try:
             for req in reqs:
-                req.wait(timeout=30)
+                req.wait(timeout=datetime.timedelta(seconds=30))
         except RuntimeError:
             logger.error(
                 f"Context: {rank=} {old_physical_to_logical_map=} {new_physical_to_logical_map=} {num_local_physical_experts=} {num_gpu_per_node=}"

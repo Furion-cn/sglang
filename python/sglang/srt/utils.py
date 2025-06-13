@@ -2160,3 +2160,15 @@ class Withable(Generic[T]):
         finally:
             assert self._value is new_value
             self._value = None
+
+class LazyValue:
+    def __init__(self, creator: Callable):
+        self._creator = creator
+        self._value = None
+
+    @property
+    def value(self):
+        if self._creator is not None:
+            self._value = self._creator()
+            self._creator = None
+        return self._value
