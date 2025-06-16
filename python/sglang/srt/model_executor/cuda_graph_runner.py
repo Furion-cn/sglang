@@ -327,18 +327,16 @@ class CudaGraphRunner:
 
     def can_run(self, forward_batch: ForwardBatch):
         if self.enable_dp_attention or self.enable_sp_layernorm:
-            total_batch_size = (
-                sum(forward_batch.global_num_tokens_cpu) // self.num_tokens_per_bs
-                if self.model_runner.spec_algorithm.is_eagle()
-                else sum(forward_batch.global_num_tokens_cpu)
-            )
+            min_num_tokens, max_num_tokens = min(
+                forward_batch.global_num_tokens_cpu
+            ), max(forward_batch.global_num_tokens_cpu)
             is_bs_supported = forward_batch.can_run_dp_cuda_graph and (
-                total_batch_size in self.graphs
+                (min_num_tokens == max_num_tokens and max_num_tokens in self.graphs)
                 if self.disable_padding
-                else total_batch_size <= self.max_bs
+                else max_num_tokens <= self.max_bs
             )
             logger.info(
-                f"forward_batch.can_run_dp_cuda_graph-------- {total_batch_size} {self.max_bs} {is_bs_supported} {forward_batch.can_run_dp_cuda_graph}"
+                f"forward_batch.can_run_dp_cuda_graph-------- {max_num_tokens} {self.max_bs} {is_bs_supported} {forward_batch.can_run_dp_cuda_graph}"
             )
         else:
             is_bs_supported = (
@@ -438,16 +436,13 @@ class CudaGraphRunner:
         if self.enable_dp_attention or self.enable_sp_layernorm:
             self.global_num_tokens_gpu.copy_(
                 torch.tensor(
-                    [
-                        num_tokens // self.dp_size + (i < (num_tokens % self.dp_size))
-                        for i in range(self.dp_size)
-                    ],
+                    [num_tokens] * self.dp_size,
                     dtype=torch.int32,
                     device=input_ids.device,
                 )
             )
             global_num_tokens = self.global_num_tokens_gpu
-            gathered_buffer = self.gathered_buffer[:num_tokens]
+            gathered_buffer = self.gathered_buffer[: num_tokens * self.dp_size]
         else:
             global_num_tokens = None
             gathered_buffer = None
@@ -568,12 +563,9 @@ class CudaGraphRunner:
 
         # Pad
         if self.enable_dp_attention or self.enable_sp_layernorm:
-            total_batch_size = (
-                sum(forward_batch.global_num_tokens_cpu) / self.num_tokens_per_bs
-                if self.model_runner.spec_algorithm.is_eagle()
-                else sum(forward_batch.global_num_tokens_cpu)
+            index = bisect.bisect_left(
+                self.capture_bs, max(forward_batch.global_num_tokens_cpu)
             )
-            index = bisect.bisect_left(self.capture_bs, total_batch_size)
         else:
             index = bisect.bisect_left(self.capture_bs, raw_bs)
         bs = self.capture_bs[index]
