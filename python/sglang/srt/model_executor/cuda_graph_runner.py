@@ -338,7 +338,7 @@ class CudaGraphRunner:
                 else total_batch_size <= self.max_bs
             )
             logger.info(
-                f"forward_batch.can_run_dp_cuda_graph-------- {forward_batch.can_run_dp_cuda_graph} {total_batch_size}"
+                f"forward_batch.can_run_dp_cuda_graph-------- {total_batch_size} {self.max_bs} {is_bs_supported} {forward_batch.can_run_dp_cuda_graph}"
             )
         else:
             is_bs_supported = (
