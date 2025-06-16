@@ -330,7 +330,7 @@ class CudaGraphRunner:
             min_num_tokens, max_num_tokens = min(
                 forward_batch.global_num_tokens_cpu
             ), max(forward_batch.global_num_tokens_cpu)
-            is_bs_supported = forward_batch.can_run_dp_cuda_graph and (
+            is_bs_supported = (
                 (min_num_tokens == max_num_tokens and max_num_tokens in self.graphs)
                 if self.disable_padding
                 else max_num_tokens <= self.max_bs
