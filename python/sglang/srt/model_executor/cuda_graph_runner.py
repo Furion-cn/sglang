@@ -411,6 +411,7 @@ class CudaGraphRunner:
                 save_gemlite_cache()
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
+        logger.info(f"capture_one_batch_size............ {bs}")
         graph = torch.cuda.CUDAGraph()
         stream = self.stream
         num_tokens = bs * self.num_tokens_per_bs
