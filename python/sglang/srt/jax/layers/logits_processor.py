@@ -13,6 +13,7 @@ class LogitsProcessorOutput:
 
 class LogitsProcessor(nnx.Module):
     """Logits processor for the model."""
+    _requires_weight_loading = False
 
     def __init__(self, vocab_size: int):
         self.vocab_size = vocab_size

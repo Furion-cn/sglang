@@ -22,6 +22,7 @@ from typing import (
 )
 
 import filelock
+from orbax.checkpoint._src.serialization.type_handlers import Pytree
 import huggingface_hub.constants
 import numpy as np
 import safetensors.torch
@@ -29,6 +30,9 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 from tqdm.auto import tqdm
+
+import jax
+from flax import serialization
 
 from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import ModelConfig
@@ -401,6 +405,47 @@ def np_cache_weights_iterator(
             param = np.load(f)
         yield name, torch.from_numpy(param)
 
+def jax_weights_loader(
+    hf_weights_files: List[str],
+) -> Pytree:
+    enable_tqdm = (
+        jax.process_count() == 1 or jax.process_index() == 0
+    )
+
+    merged_params = {}
+    for msgpack_file in tqdm(
+        hf_weights_files,
+        desc="Loading jax checkpoint shards",
+        disable=not enable_tqdm,
+        bar_format=_BAR_FORMAT,
+    ):
+        with open(msgpack_file, "rb") as f:
+            params = serialization.msgpack_restore(f.read())
+        merged_params = merge_pytrees(merged_params, params)
+        del params
+    return merged_params
+
+def merge_pytrees(tree1: Dict[str, Any], tree2: Dict[str, Any]) -> Dict[str, Any]:
+    if not tree1:
+        return tree2
+    if not tree2:
+        return tree1
+    
+    merged = {}
+    all_keys = set(tree1.keys()) | set(tree2.keys())
+    
+    for key in all_keys:
+        if key in tree1 and key in tree2:
+            if isinstance(tree1[key], dict) and isinstance(tree2[key], dict):
+                merged[key] = merge_pytrees(tree1[key], tree2[key])
+            else:
+                merged[key] = tree2[key]
+        elif key in tree1:
+            merged[key] = tree1[key]
+        else:
+            merged[key] = tree2[key]
+    
+    return merged
 
 def decrypt(fn, key):
     raise NotImplementedError()

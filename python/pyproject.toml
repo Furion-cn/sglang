@@ -45,6 +45,15 @@ runtime_common = [
     "uvicorn",
     "uvloop",
     "xgrammar==0.1.19",
+    "jax>=0.4.13",
+    "flax>=0.7.4",
+    "grain>=0.2.10",
+    "orbax-checkpoint>=0.4.0",
+    "etils>=0.9.0",
+    "absl-py>=1.4.0",
+    "safetensors>=0.4.0",
+    "ml-dtypes>=0.2.0",
+    "tensorflow>=2.14.0",
 ]
 
 srt = [
