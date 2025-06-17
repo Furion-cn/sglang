@@ -1,6 +1,7 @@
 import dataclasses
 from typing import Union
 
+import jax
 from flax import linen as nn
 from jax import numpy as jnp
 from transformers import PretrainedConfig
@@ -26,8 +27,8 @@ class LogitsProcessor(nn.Module):
 
     @nn.compact
     def __call__(self,
-                 input_ids: jnp.Array,
-                 hidden_states: jnp.Array,
+                 input_ids: jax.Array,
+                 hidden_states: jax.Array,
                  lm_head: VocabParallelEmbedding,
                  logits_metadata: Union[LogitsMetadata, ForwardBatch],) -> LogitsProcessorOutput:
         pass

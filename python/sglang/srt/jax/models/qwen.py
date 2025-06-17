@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 
+import jax
 from flax import linen as nn
 from jax import numpy as jnp
 from transformers import PretrainedConfig
@@ -43,10 +44,10 @@ class QWenAttention(nn.Module):
 
     def __call__(
         self,
-        positions: jnp.Array,
-        hidden_states: jnp.Array,
+        positions: jax.Array,
+        hidden_states: jax.Array,
         forward_batch: ForwardBatch,
-    ) -> jnp.Array:
+    ) -> jax.Array:
         pass
 
 
@@ -60,10 +61,10 @@ class QWenBlock(nn.Module):
 
     def __call__(
         self,
-        positions: jnp.Array,
-        hidden_states: jnp.Array,
+        positions: jax.Array,
+        hidden_states: jax.Array,
         forward_batch: ForwardBatch,
-    ) -> jnp.Array:
+    ) -> jax.Array:
         pass
 
 
@@ -76,9 +77,8 @@ class QWenModel(nn.Module):
     def setup(self):
         self.vocab_size = self.config.vocab_size
 
-        vocab_size = ((self.config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(
-            vocab_size,
+            ((self.config.vocab_size + 63) // 64) * 64,
             self.config.hidden_size,
         )
         self.h = nn.ModuleList(
@@ -94,8 +94,8 @@ class QWenModel(nn.Module):
         self.ln_f = RMSNorm(epsilon=self.config.layer_norm_epsilon)
 
     def __call__(self,
-        input_ids: jnp.Array,
-        positions: jnp.Array,
+        input_ids: jax.Array,
+        positions: jax.Array,
         forward_batch: ForwardBatch,
     ):
         hidden_states = self.wte(input_ids)
@@ -119,10 +119,11 @@ class QWenLMHeadModel(nn.Module):
         vocab_size = ((self.config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(vocab_size, self.config.hidden_size)
         self.logits_processor = LogitsProcessor(self.config)
+        self.logits_processor = LogitsProcessor(self.config)
 
     def __call__(self,
-        input_ids: jnp.Array,
-        positions: jnp.Array,
+        input_ids: jax.Array,
+        positions: jax.Array,
         forward_batch: ForwardBatch,
     ):
         hidden_states = self.transformer(input_ids, positions, forward_batch)

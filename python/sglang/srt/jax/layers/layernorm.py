@@ -1,4 +1,3 @@
-
 from typing import Any, Callable, Optional, Sequence, Tuple
 
 import jax
@@ -14,11 +13,11 @@ class RMSNorm(nn.Module):
   dtype: Any = jnp.float32
   weight_dtype: Any = jnp.float32
   kernel_axes: Tuple[Optional[str], ...] = ()
-  scale_init: Callable[[jnp.ndarray, Sequence[int], jnp.dtype], jnp.ndarray] = nn.initializers.ones
+  scale_init: Callable[[jax.Array, Sequence[int], jnp.dtype], jax.Array] = nn.initializers.ones
   parameter_memory_host_offload: bool = False
 
   @nn.compact
-  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+  def __call__(self, x: jax.Array) -> jax.Array:
     """Applies layer normalization on the input."""
     x = jnp.asarray(x, jnp.float32)
     features = x.shape[-1]
