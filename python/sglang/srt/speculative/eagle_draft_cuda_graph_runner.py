@@ -250,12 +250,8 @@ class EAGLEDraftCudaGraphRunner:
 
         # Pad
         if self.enable_dp_attention or self.enable_sp_layernorm:
-            total_batch_size = (
-                sum(forward_batch.global_num_tokens_cpu) // self.num_tokens_per_bs
-                if self.model_runner.spec_algorithm.is_eagle()
-                else sum(forward_batch.global_num_tokens_cpu)
-            )
-            index = bisect.bisect_left(self.capture_bs, total_batch_size)
+            nums_tokens = max(forward_batch.global_num_tokens_cpu)
+            index = bisect.bisect_left(self.capture_bs, nums_tokens)
         else:
             index = bisect.bisect_left(self.capture_bs, raw_bs)
         bs = self.capture_bs[index]
