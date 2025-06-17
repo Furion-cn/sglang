@@ -13,6 +13,12 @@ from sglang.srt.jax.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+import flax.linen as nn
+from typing import Callable
+from jax import with_sharding_constraint, mesh_sharding, PartitionSpec
+import jax
+import jax.numpy as jnp
+from typing import Optional,Any
 
 
 class QWenMLP(nn.Module):
@@ -22,11 +28,37 @@ class QWenMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str = "silu",
         quant_config: Optional[QuantizationConfig] = None,
+        dense_init: Callable = nn.initializers.xavier_normal()
+        
     ):
-        pass
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.hidden_act = hidden_act
+        self.quant_config = quant_config
+        self.dense_init = dense_init
 
-    def __call__(self):
-        pass
+    @nn.compact
+    def __call__(self,hidden_states:jnp.ndarray):
+        y = nn.Dense(
+          features=2*self.intermediate_size,
+          use_bias=False,
+          kernel_init=nn.with_partitioning(self.dense_init, (None, 'model')),
+        )(hidden_states)
+
+        y=jax.nn.silu(y)
+
+        # Force a local sharding annotation.
+        y = with_sharding_constraint(y, mesh_sharding(PartitionSpec('data','model')))
+
+        W2 = self.param(
+          'W2',
+          nn.with_partitioning(self.dense_init, ('model', None)),
+          (self.hidden_size, y.shape[-1]))
+        z= jnp.dot(y,W2)
+        # Force a local sharding annotation.
+        z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
+
+        return z 
 
 
 class QWenAttention(nn.Module):
