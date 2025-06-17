@@ -114,25 +114,16 @@ class EAGLEDraftCudaGraphRunner:
             )
 
     def can_run(self, forward_batch: ForwardBatch):
-        bs_str = "bs : "
-        for bs in self.graphs.keys():
-            bs_str += str(bs)
-            bs_str += ", "
-
-        logger.info(f"draft forward can run all bs {bs_str}")
         if self.enable_dp_attention or self.enable_sp_layernorm:
-            if not forward_batch.can_run_dp_cuda_graph:
-                return False
-            total_batch_size = (
-                sum(forward_batch.global_num_tokens_cpu) // self.num_tokens_per_bs
-                if self.model_runner.spec_algorithm.is_eagle()
-                else sum(forward_batch.global_num_tokens_cpu)
-            )
-            is_bs_supported = (
-                total_batch_size in self.graphs
+            min_num_tokens, max_num_tokens = min(
+                forward_batch.global_num_tokens_cpu
+            ), max(forward_batch.global_num_tokens_cpu)
+            is_bs_supported = forward_batch.can_run_dp_cuda_graph and (
+                (min_num_tokens == max_num_tokens and max_num_tokens in self.graphs)
                 if self.disable_padding
-                else total_batch_size <= self.max_bs
+                else max_num_tokens <= self.max_bs
             )
+            logger.info(f"eagle draft cuda graph runner support {is_bs_supported}")
         else:
             is_bs_supported = (
                 forward_batch.batch_size in self.graphs
@@ -161,26 +152,20 @@ class EAGLEDraftCudaGraphRunner:
         if self.enable_dp_attention or self.enable_sp_layernorm:
             self.global_num_tokens_gpu.copy_(
                 torch.tensor(
-                    [
-                        num_tokens // self.dp_size + (i < (num_tokens % self.dp_size))
-                        for i in range(self.dp_size)
-                    ],
+                    [num_tokens] * self.dp_size,
                     dtype=torch.int32,
                     device=self.input_ids.device,
                 )
             )
             self.global_num_tokens_for_logprob_gpu.copy_(
                 torch.tensor(
-                    [
-                        num_tokens // self.dp_size + (i < (num_tokens % self.dp_size))
-                        for i in range(self.dp_size)
-                    ],
+                    [num_tokens] * self.dp_size,
                     dtype=torch.int32,
                     device=self.input_ids.device,
                 )
             )
             global_num_tokens = self.global_num_tokens_gpu
-            gathered_buffer = self.gathered_buffer[:num_tokens]
+            gathered_buffer = self.gathered_buffer[: num_tokens * self.dp_size]
             global_num_tokens_for_logprob = self.global_num_tokens_for_logprob_gpu
         else:
             global_num_tokens = None
