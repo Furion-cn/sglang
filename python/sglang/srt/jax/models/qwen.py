@@ -14,7 +14,7 @@ from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase, QKVParallelLinear
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.jax.layers.rotary_embedding import RotaryEmbedding
+from sglang.srt.jax.layers.embeddings import RotaryEmbedding
 from sglang.srt.jax.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,

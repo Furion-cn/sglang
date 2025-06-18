@@ -18,24 +18,27 @@ from typing import Callable, Tuple, Union
 
 import jax
 
-from flax import linen as nn
+from flax import nnx
 
-from sglang.srt.jax import Array, DType, Shape, PRNGKey
+from sglang.srt.jax.common_types import Array, DType, Shape, PRNGKey
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = Union[int, Tuple[int, ...]]
-NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
+NdInitializer = Callable[[PRNGKey, Shape, DType,
+                          InitializerAxis, InitializerAxis], Array]
 
-default_embed_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
+default_embed_init = nnx.initializers.variance_scaling(
+    1.0, "fan_in", "normal", out_axis=0)
 
-default_bias_init = jax.nn.initializers.constant(0.0)
+default_bias_init = nnx.initializers.constant(0.0)
 
 
 def nd_dense_init(scale, mode, distribution):
     """Initializer with in_axis, out_axis set at call time."""
 
     def init_fn(key, shape, dtype, in_axis, out_axis):
-        fn = jax.nn.initializers.variance_scaling(scale, mode, distribution, in_axis, out_axis)
+        fn = nnx.initializers.variance_scaling(
+            scale, mode, distribution, in_axis, out_axis)
         return fn(key, shape, dtype)
 
     return init_fn
