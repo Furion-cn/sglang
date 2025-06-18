@@ -4,12 +4,12 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
-from jax import PartitionSpec, mesh_sharding
+from jax.sharding import PartitionSpec, NamedSharding, Mesh
 from jax import numpy as jnp
-from jax import with_sharding_constraint
+from jax.lax import with_sharding_constraint
 from transformers import PretrainedConfig
 
-from python.sglang.srt.jax.layers.attention import Attention
+from sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase, QKVParallelLinear
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
@@ -28,16 +28,17 @@ class QWenMLP(nnx.Module):
                  intermediate_size: int,
                  hidden_act: str = "silu",
                  quant_config: Optional[QuantizationConfig] = None,
-                 dense_init: Callable = nn.initializers.xavier_normal()):
+                 dense_init: Callable = nn.initializers.xavier_normal(),
+                 ):
         self.w1=nn.Dense(
           features=2*intermediate_size,
           use_bias=False,
-          kernel_init=nn.with_partitioning(dense_init, (None, 'model')),
+          kernel_init=nn.with_partitioning(dense_init, (None,None)), # (None,'model')
         )
         self.act_func=jax.nn.silu
         self.w2=self.param(
           'W2',
-          nn.with_partitioning(dense_init, ('model', None)),
+          nn.with_partitioning(dense_init, (None,None)), # ('model',None)
           (2*intermediate_size, hidden_size))
 
     def __call__(self, hidden_states: jnp.ndarray):
@@ -46,11 +47,11 @@ class QWenMLP(nnx.Module):
         y=self.act_func(y)
 
         # Force a local sharding annotation.
-        y = with_sharding_constraint(y, mesh_sharding(PartitionSpec('data', 'model')))
+        # y = with_sharding_constraint(y, mesh_sharding(PartitionSpec('data', 'model')))
 
         z= jnp.dot(y,self.W2)
         # Force a local sharding annotation.
-        z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
+        #z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
         return z
 
 class QWenAttention(nnx.Module):
