@@ -14,7 +14,7 @@ from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase, QKVParallelLinear
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.jax.layers.rotary_embedding import RotaryEmbedding
+from sglang.srt.jax.layers.embeddings import RotaryEmbedding
 from sglang.srt.jax.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -63,28 +63,30 @@ class QWenAttention(nnx.Module):
     quant_config: Optional[QuantizationConfig] = None
     prefix: str = ""
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 max_position_embeddings: int,
-                 rope_theta: float,
-                 rope_scaling: Optional[Dict[str, Any]],
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        max_position_embeddings: int,
+        rope_theta: float,
+        rope_scaling: Optional[Dict[str, Any]],
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        dense_init: Callable = nn.initializers.xavier_normal()
+    ):
         head_size = hidden_size // num_heads
         self.c_attn = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=head_size,
             num_heads=num_heads,
-            num_kv_heads=num_heads,
-            bias=True,
+            kernel_init=nn.with_partitioning(dense_init, (None, 'model')),
+            use_bias=True,
             quant_config=quant_config,
-            prefix=add_prefix("c_attn", prefix),
         )
         self.c_proj = LinearBase(
             input_size=num_heads * head_size,
             output_size=hidden_size,
-            bias=False,
+            use_bias=False,
             quant_config=quant_config,
             prefix=add_prefix("c_proj", prefix),
         )

@@ -10,7 +10,7 @@ class QuantizeMethodBase(ABC):
 
     @abstractmethod
     def create_weights(
-        self, layer: nn.Module, *weight_args, **extra_weight_attrs
+        self, *weight_args, **extra_weight_attrs
     ):
         """Create weights for a layer.
 
@@ -18,7 +18,7 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def apply(self, layer: nn.Module, *args, **kwargs) -> jax.Array:
+    def apply(self, *args, **kwargs) -> jax.Array:
         """Apply the weights in layer to the input tensor.
 
         Expects create_weights to have been called before on the layer."""
