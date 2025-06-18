@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
+from flax import nnx
 
 
-class Attention(nn.Module):
+class Attention(nnx.Module):
     """attention layer."""
 
     def __call__(self,
@@ -11,7 +11,7 @@ class Attention(nn.Module):
                  k: jax.Array,
                  v: jax.Array,
                  attention_mask: jax.Array = None):
-        
+
         q = jnp.transpose(q, (0, 2, 1, 3))
         k = jnp.transpose(k, (0, 2, 1, 3))
         v = jnp.transpose(v, (0, 2, 1, 3))
@@ -36,5 +36,3 @@ class Attention(nn.Module):
         attn_output = jnp.swapaxes(attn_output, 1, 2)
 
         return attn_output
-        
-        

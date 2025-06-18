@@ -1,9 +1,9 @@
 from typing import Any, Callable, Dict, Optional
 
-import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
+from flax import nnx
 from jax import PartitionSpec, mesh_sharding
 from jax import numpy as jnp
 from jax import with_sharding_constraint
@@ -22,30 +22,25 @@ from sglang.srt.jax.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import add_prefix
 
-
-class QWenMLP(nn.Module):
-    hidden_size:int
-    intermediate_size:int
-    hidden_act:str="silu"
-    quant_config: Optional[QuantizationConfig]
-    dense_init: Callable = nn.initializers.xavier_normal()
-
-    def setup(
-        self,
-    ):
+class QWenMLP(nnx.Module):
+    def __init__(self,
+                 hidden_size: int,
+                 intermediate_size: int,
+                 hidden_act: str = "silu",
+                 quant_config: Optional[QuantizationConfig] = None,
+                 dense_init: Callable = nn.initializers.xavier_normal()):
         self.w1=nn.Dense(
-          features=2*self.intermediate_size,
+          features=2*intermediate_size,
           use_bias=False,
-          kernel_init=nn.with_partitioning(self.dense_init, (None, 'model')),
+          kernel_init=nn.with_partitioning(dense_init, (None, 'model')),
         )
         self.act_func=jax.nn.silu
         self.w2=self.param(
           'W2',
-          nn.with_partitioning(self.dense_init, ('model', None)),
-          (2*self.intermediate_size, self.hidden_size))
+          nn.with_partitioning(dense_init, ('model', None)),
+          (2*intermediate_size, hidden_size))
 
-
-    def __call__(self,hidden_states:jnp.ndarray):
+    def __call__(self, hidden_states: jnp.ndarray):
         y = self.w1(hidden_states)
 
         y=self.act_func(y)
@@ -56,11 +51,9 @@ class QWenMLP(nn.Module):
         z= jnp.dot(y,self.W2)
         # Force a local sharding annotation.
         z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
-
         return z
 
-
-class QWenAttention(nn.Module):
+class QWenAttention(nnx.Module):
     hidden_size: int
     num_heads: int
     max_position_embeddings: int
@@ -70,22 +63,30 @@ class QWenAttention(nn.Module):
     quant_config: Optional[QuantizationConfig] = None
     prefix: str = ""
 
-    def setup(self):
-        head_size = self.hidden_size // self.num_heads
+    def __init__(self,
+                 hidden_size: int,
+                 num_heads: int,
+                 max_position_embeddings: int,
+                 rope_theta: float,
+                 rope_scaling: Optional[Dict[str, Any]],
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        head_size = hidden_size // num_heads
         self.c_attn = QKVParallelLinear(
-            hidden_size=self.hidden_size,
+            hidden_size=hidden_size,
             head_size=head_size,
-            num_heads=self.num_heads,
+            num_heads=num_heads,
+            num_kv_heads=num_heads,
             bias=True,
-            quant_config=self.quant_config,
-            prefix=add_prefix("c_attn", self.prefix),
+            quant_config=quant_config,
+            prefix=add_prefix("c_attn", prefix),
         )
         self.c_proj = LinearBase(
-            input_size=self.num_heads * head_size,
-            output_size=self.hidden_size,
+            input_size=num_heads * head_size,
+            output_size=hidden_size,
             bias=False,
-            quant_config=self.quant_config,
-            prefix=add_prefix("c_proj", self.prefix),
+            quant_config=quant_config,
+            prefix=add_prefix("c_proj", prefix),
         )
         self.rotary_emb = RotaryEmbedding()
         self.attn = Attention()
@@ -104,36 +105,36 @@ class QWenAttention(nn.Module):
         return output
 
 
-class QWenBlock(nn.Module):
-    config: PretrainedConfig
-    layer_id: int
-    quant_config: Optional[QuantizationConfig] = None
+class QWenBlock(nnx.Module):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 layer_id: int,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        self.ln_1 = RMSNorm(config.hidden_size,
+                            eps=config.layer_norm_epsilon)
 
-    def setup(self):
-        self.ln_1 = RMSNorm(self.config.hidden_size,
-                            eps=self.config.layer_norm_epsilon)
-
-        rope_theta = getattr(self.config, "rope_theta", 10000)
-        rope_scaling = getattr(self.config, "rope_scaling", None)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         self.attn = QWenAttention(
-            self.config.hidden_size,
-            self.config.num_attention_heads,
-            self.config.max_position_embeddings,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.max_position_embeddings,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
-            layer_id=self.layer_id,
-            quant_config=self.quant_config,
-            prefix=add_prefix("attn", self.prefix),
+            layer_id=layer_id,
+            quant_config=quant_config,
+            prefix=add_prefix("attn", prefix),
         )
 
-        self.ln_2 = RMSNorm(self.config.hidden_size,
-                            eps=self.config.layer_norm_epsilon)
+        self.ln_2 = RMSNorm(config.hidden_size,
+                            eps=config.layer_norm_epsilon)
 
         self.mlp = QWenMLP(
-            self.config.hidden_size,
-            self.config.intermediate_size // 2,
-            quant_config=self.quant_config,
-            prefix=add_prefix("mlp", self.prefix),
+            config.hidden_size,
+            config.intermediate_size // 2,
+            quant_config=quant_config,
+            prefix=add_prefix("mlp", prefix),
         )
 
     def __call__(
@@ -159,30 +160,29 @@ class QWenBlock(nn.Module):
         return hidden_states
 
 
-class QWenModel(nn.Module):
+class QWenModel(nnx.Module):
     """QWen model"""
 
-    config: PretrainedConfig
-    quant_config: Optional[QuantizationConfig] = None
-
-    def setup(self):
-        self.vocab_size = self.config.vocab_size
-
+    def __init__(self,
+                 config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         self.wte = VocabParallelEmbedding(
-            ((self.config.vocab_size + 63) // 64) * 64,
-            self.config.hidden_size,
+            ((config.vocab_size + 63) // 64) * 64,
+            config.hidden_size,
         )
-        self.h = nn.ModuleList(
+        self.h = nnx.ModuleList(
             [
                 QWenBlock(
-                    self.config,
+                    config,
                     i,
-                    quant_config=self.quant_config,
+                    quant_config=quant_config,
+                    prefix=add_prefix(f"h.{i}", prefix),
                 )
-                for i in range(self.config.num_hidden_layers)
+                for i in range(config.num_hidden_layers)
             ]
         )
-        self.ln_f = RMSNorm(epsilon=self.config.layer_norm_epsilon)
+        self.ln_f = RMSNorm(epsilon=config.layer_norm_epsilon)
 
     def __call__(self,
                  input_ids: jax.Array,
@@ -201,16 +201,17 @@ class QWenModel(nn.Module):
         return hidden_states
 
 
-class QWenLMHeadModel(nn.Module):
+class QWenLMHeadModel(nnx.Module):
     """QWen language head model"""
 
-    config: PretrainedConfig
-
-    def setup(self, config: PretrainedConfig):
-        self.transformer = QWenModel(config)
-        vocab_size = ((self.config.vocab_size + 63) // 64) * 64
-        self.lm_head = ParallelLMHead(vocab_size, self.config.hidden_size)
-        self.logits_processor = LogitsProcessor(self.config)
+    def __init__(self,
+                 config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        self.transformer = QWenModel(config, quant_config, prefix)
+        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.lm_head = ParallelLMHead(vocab_size, config.hidden_size)
+        self.logits_processor = LogitsProcessor(config)
 
     def __call__(self,
                  input_ids: jax.Array,

@@ -1,20 +1,21 @@
+from flax import nnx
 
-from flax import linen as nn
 
-
-class VocabParallelEmbedding(nn.Module):
+class VocabParallelEmbedding(nnx.Module):
     """Vocab parallel embedding."""
 
-    num_embeddings: int
-    embedding_dim: int
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int):
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
 
-    @nn.compact
     def __call__(self):
         pass
+
 
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallel LM head."""
 
-    @nn.compact
     def __call__(self):
         pass
