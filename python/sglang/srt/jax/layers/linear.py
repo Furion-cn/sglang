@@ -2,15 +2,15 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 
 import jax
-from flax import linen as nn
+from flax import nnx
 from jax import numpy as jnp
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import PartitionSpec
 
-from sglang.srt.distributed import divide
 from sglang.srt.jax.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+
 
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
@@ -18,7 +18,7 @@ class LinearMethodBase(QuantizeMethodBase):
     @abstractmethod
     def create_weights(
         self,
-        layer: nn.Module,
+        layer: nnx.Module,
         input_size_per_partition: int,
         output_partition_sizes: List[int],
         input_size: int,
@@ -44,7 +44,7 @@ class LinearMethodBase(QuantizeMethodBase):
     @abstractmethod
     def apply(
         self,
-        layer: nn.Module,
+        layer: nnx.Module,
         x: jax.Array,
         bias: Optional[jax.Array] = None,
     ) -> jax.Array:
@@ -58,7 +58,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
-        layer: nn.Module,
+        layer: nnx.Module,
         input_size: int,
         output_size: int,
         params_dtype: jnp.dtype,
@@ -67,14 +67,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
         """Create weight parameters for the linear layer."""
         layer.weight = layer.param(
             'weight',
-            nn.with_partitioning(nn.initializers.normal(), partition_spec),
+            nnx.with_partitioning(nnx.initializers.normal(), partition_spec),
             (output_size, input_size),
             params_dtype
         )
 
     def apply(
         self,
-        layer: nn.Module,
+        layer: nnx.Module,
         x: jax.Array,
         bias: Optional[jax.Array] = None,
     ) -> jax.Array:
@@ -87,7 +87,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return output
 
 
-class LinearBase(nn.Module):
+class LinearBase(nnx.Module):
     """Base linear layer.
 
     Args:
@@ -101,21 +101,18 @@ class LinearBase(nn.Module):
         prefix: Prefix for the linear layer.
     """
 
-    input_size: int
-    output_size: int
-    bias: bool = True
-    skip_bias_add: bool = False
-    params_dtype: Optional[jnp.dtype] = None
-    quant_config: Optional[QuantizationConfig] = None
-    partition_spec: Optional[PartitionSpec] = None
-    prefix: str = ""
-
-    def setup(self):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[jnp.dtype] = jnp.float32,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 partition_spec: Optional[PartitionSpec] = None,
+                 prefix: str = ""):
         """Initialize parameters and quantization method."""
-        if self.params_dtype is None:
-            self.params_dtype = jnp.float32
-
-        if self.quant_config is None:
+        self.skip_bias_add = skip_bias_add
+        if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
         else:
             raise Exception("Quantization config is not supported")
@@ -123,16 +120,17 @@ class LinearBase(nn.Module):
         assert self.quant_method is not None
         self.quant_method.create_weights(
             self,
-            self.input_size,
-            self.output_size,
-            self.params_dtype,
-            self.partition_spec,
+            input_size,
+            output_size,
+            params_dtype,
+            partition_spec,
         )
-        if self.bias:
+        if bias:
             self.bias_param = self.param(
-                "bias", 
-                nn.with_partitioning(nn.initializers.zeros_init(), self.partition_spec),
-                (self.output_size,))
+                "bias",
+                nnx.with_partitioning(
+                    nnx.initializers.zeros_init(), partition_spec),
+                (output_size,))
         else:
             self.bias_param = None
 
@@ -141,20 +139,32 @@ class LinearBase(nn.Module):
 
         bias = self.bias_param if not self.skip_bias_add else None
         assert self.quant_method is not None
-        output = self.quant_method.apply(self, input, bias)
+        output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias_param if self.skip_bias_add else None
         return output, output_bias
-    
+
 
 class QKVParallelLinear(LinearBase):
     """QKVParallelLinear layer."""
 
-    hidden_size: int
-    head_size: int
-    num_heads: int
-    num_kv_heads: int
-
-    def setup(self):
-        self.input_size = self.hidden_size
-        self.output_size = (self.num_heads + 2 * self.num_kv_heads) * self.head_size
-        super().setup()
+    def __init__(self,
+                 hidden_size: int,
+                 head_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 bias: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[jnp.dtype] = jnp.float32,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 partition_spec: Optional[PartitionSpec] = None,
+                 prefix: str = ""):
+        super().__init__(
+            hidden_size,
+            (num_heads + 2 * num_kv_heads) * head_size,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            partition_spec=partition_spec,
+            prefix=prefix
+        )

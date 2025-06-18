@@ -2,8 +2,7 @@ import dataclasses
 from typing import Union
 
 import jax
-from flax import linen as nn
-from jax import numpy as jnp
+from flax import nnx
 from transformers import PretrainedConfig
 
 from sglang.srt.jax.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -16,16 +15,17 @@ class LogitsProcessorOutput:
     logits: jax.Array = None
 
 
-class LogitsProcessor(nn.Module):
+class LogitsProcessor(nnx.Module):
     """Logits processor for the model."""
-    config: PretrainedConfig
-    num_embeddings: int
-    embedding_dim: int
 
-    def setup(self):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 ):
         self.lm_head=self.param(
           'lm_head',
-          nn.with_partitioning(self.dense_init, (None, None)),
+          nnx.with_partitioning(self.dense_init, (None, None)),
           (self.embedding_dim, self.num_embeddings))
 
     def __call__(self,
