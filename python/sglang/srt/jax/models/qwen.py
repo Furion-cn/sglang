@@ -24,43 +24,38 @@ from sglang.srt.utils import add_prefix
 
 
 class QWenMLP(nn.Module):
+    hidden_size:int
+    intermediate_size:int
+    hidden_act:str="silu"
+    quant_config: Optional[QuantizationConfig]
+    dense_init: Callable = nn.initializers.xavier_normal()
+
     def setup(
         self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str = "silu",
-        quant_config: Optional[QuantizationConfig] = None,
-        dense_init: Callable = nn.initializers.xavier_normal()
-
     ):
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.hidden_act = hidden_act
-        self.quant_config = quant_config
-        self.dense_init = dense_init
+        self.w1=nn.Dense(
+          features=2*self.intermediate_size,
+          use_bias=False,
+          kernel_init=nn.with_partitioning(self.dense_init, (None, 'model')),
+        )
+        self.act_func=jax.nn.silu
+        self.w2=self.param(
+          'W2',
+          nn.with_partitioning(self.dense_init, ('model', None)),
+          (2*self.intermediate_size, self.hidden_size))
 
-    @nn.compact
-    def __call__(self, hidden_states: jnp.ndarray):
-        y = nn.Dense(
-            features=2*self.intermediate_size,
-            use_bias=False,
-            kernel_init=nn.with_partitioning(self.dense_init, (None, 'model')),
-        )(hidden_states)
 
-        y = jax.nn.silu(y)
+    def __call__(self,hidden_states:jnp.ndarray):
+        y = self.w1(hidden_states)
+
+        y=self.act_func(y)
 
         # Force a local sharding annotation.
-        y = with_sharding_constraint(
-            y, mesh_sharding(PartitionSpec('data', 'model')))
+        y = with_sharding_constraint(y, mesh_sharding(PartitionSpec('data', 'model')))
 
-        W2 = self.param(
-            'W2',
-            nn.with_partitioning(self.dense_init, ('model', None)),
-            (self.hidden_size, y.shape[-1]))
-        z = jnp.dot(y, W2)
+        z= jnp.dot(y,self.W2)
         # Force a local sharding annotation.
-        z = with_sharding_constraint(
-            z, mesh_sharding(PartitionSpec('data', None)))
+        z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
 
         return z
 
