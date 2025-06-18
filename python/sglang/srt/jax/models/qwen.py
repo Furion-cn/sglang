@@ -1,24 +1,26 @@
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
+import flax.linen as nn
 import jax
+import jax.numpy as jnp
 from flax import linen as nn
+from jax import PartitionSpec, mesh_sharding
 from jax import numpy as jnp
+from jax import with_sharding_constraint
 from transformers import PretrainedConfig
 
+from python.sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.layers.layernorm import RMSNorm
+from sglang.srt.jax.layers.linear import LinearBase, QKVParallelLinear
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.jax.layers.rotary_embedding import RotaryEmbedding
 from sglang.srt.jax.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-import flax.linen as nn
-from typing import Callable
-from jax import with_sharding_constraint, mesh_sharding, PartitionSpec
-import jax
-import jax.numpy as jnp
-from typing import Optional,Any
+from sglang.srt.utils import add_prefix
 
 
 class QWenMLP(nn.Module):
@@ -29,7 +31,7 @@ class QWenMLP(nn.Module):
         hidden_act: str = "silu",
         quant_config: Optional[QuantizationConfig] = None,
         dense_init: Callable = nn.initializers.xavier_normal()
-        
+
     ):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -38,41 +40,60 @@ class QWenMLP(nn.Module):
         self.dense_init = dense_init
 
     @nn.compact
-    def __call__(self,hidden_states:jnp.ndarray):
+    def __call__(self, hidden_states: jnp.ndarray):
         y = nn.Dense(
-          features=2*self.intermediate_size,
-          use_bias=False,
-          kernel_init=nn.with_partitioning(self.dense_init, (None, 'model')),
+            features=2*self.intermediate_size,
+            use_bias=False,
+            kernel_init=nn.with_partitioning(self.dense_init, (None, 'model')),
         )(hidden_states)
 
-        y=jax.nn.silu(y)
+        y = jax.nn.silu(y)
 
         # Force a local sharding annotation.
-        y = with_sharding_constraint(y, mesh_sharding(PartitionSpec('data','model')))
+        y = with_sharding_constraint(
+            y, mesh_sharding(PartitionSpec('data', 'model')))
 
         W2 = self.param(
-          'W2',
-          nn.with_partitioning(self.dense_init, ('model', None)),
-          (self.hidden_size, y.shape[-1]))
-        z= jnp.dot(y,W2)
+            'W2',
+            nn.with_partitioning(self.dense_init, ('model', None)),
+            (self.hidden_size, y.shape[-1]))
+        z = jnp.dot(y, W2)
         # Force a local sharding annotation.
-        z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
+        z = with_sharding_constraint(
+            z, mesh_sharding(PartitionSpec('data', None)))
 
-        return z 
+        return z
 
 
 class QWenAttention(nn.Module):
-    def setup(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        max_position_embeddings: int,
-        layer_id: int = 0,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
-        pass
+    hidden_size: int
+    num_heads: int
+    max_position_embeddings: int
+    layer_id: int
+    rope_theta: float
+    rope_scaling: Optional[Dict[str, Any]]
+    quant_config: Optional[QuantizationConfig] = None
+    prefix: str = ""
+
+    def setup(self):
+        head_size = self.hidden_size // self.num_heads
+        self.c_attn = QKVParallelLinear(
+            hidden_size=self.hidden_size,
+            head_size=head_size,
+            num_heads=self.num_heads,
+            bias=True,
+            quant_config=self.quant_config,
+            prefix=add_prefix("c_attn", self.prefix),
+        )
+        self.c_proj = LinearBase(
+            input_size=self.num_heads * head_size,
+            output_size=self.hidden_size,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=add_prefix("c_proj", self.prefix),
+        )
+        self.rotary_emb = RotaryEmbedding()
+        self.attn = Attention()
 
     def __call__(
         self,
@@ -80,7 +101,12 @@ class QWenAttention(nn.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        pass
+        qkv, _ = self.c_attn(hidden_states)
+        q, k, v = jnp.split(qkv, 3, axis=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.c_proj(attn_output)
+        return output
 
 
 class QWenBlock(nn.Module):
@@ -89,7 +115,31 @@ class QWenBlock(nn.Module):
     quant_config: Optional[QuantizationConfig] = None
 
     def setup(self):
-        pass
+        self.ln_1 = RMSNorm(self.config.hidden_size,
+                            eps=self.config.layer_norm_epsilon)
+
+        rope_theta = getattr(self.config, "rope_theta", 10000)
+        rope_scaling = getattr(self.config, "rope_scaling", None)
+        self.attn = QWenAttention(
+            self.config.hidden_size,
+            self.config.num_attention_heads,
+            self.config.max_position_embeddings,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            layer_id=self.layer_id,
+            quant_config=self.quant_config,
+            prefix=add_prefix("attn", self.prefix),
+        )
+
+        self.ln_2 = RMSNorm(self.config.hidden_size,
+                            eps=self.config.layer_norm_epsilon)
+
+        self.mlp = QWenMLP(
+            self.config.hidden_size,
+            self.config.intermediate_size // 2,
+            quant_config=self.quant_config,
+            prefix=add_prefix("mlp", self.prefix),
+        )
 
     def __call__(
         self,
@@ -97,12 +147,26 @@ class QWenBlock(nn.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        pass
+        residual = hidden_states
+        hidden_states = self.ln_1(hidden_states)
+        hidden_states = self.attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.ln_2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
 
 
 class QWenModel(nn.Module):
     """QWen model"""
-    
+
     config: PretrainedConfig
     quant_config: Optional[QuantizationConfig] = None
 
@@ -126,10 +190,10 @@ class QWenModel(nn.Module):
         self.ln_f = RMSNorm(epsilon=self.config.layer_norm_epsilon)
 
     def __call__(self,
-        input_ids: jax.Array,
-        positions: jax.Array,
-        forward_batch: ForwardBatch,
-    ):
+                 input_ids: jax.Array,
+                 positions: jax.Array,
+                 forward_batch: ForwardBatch,
+                 ):
         hidden_states = self.wte(input_ids)
         for i in range(len(self.h)):
             layer = self.h[i]
@@ -141,6 +205,7 @@ class QWenModel(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
+
 class QWenLMHeadModel(nn.Module):
     """QWen language head model"""
 
@@ -151,13 +216,12 @@ class QWenLMHeadModel(nn.Module):
         vocab_size = ((self.config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(vocab_size, self.config.hidden_size)
         self.logits_processor = LogitsProcessor(self.config)
-        self.logits_processor = LogitsProcessor(self.config)
 
     def __call__(self,
-        input_ids: jax.Array,
-        positions: jax.Array,
-        forward_batch: ForwardBatch,
-    ):
+                 input_ids: jax.Array,
+                 positions: jax.Array,
+                 forward_batch: ForwardBatch,
+                 ):
         hidden_states = self.transformer(input_ids, positions, forward_batch)
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head
