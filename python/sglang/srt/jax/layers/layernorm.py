@@ -32,7 +32,7 @@ class RMSNorm(nnx.Module):
         y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
         scale = self.param(
             "scale",
-            nnx.with_logical_partitioning(self.scale_init, self.kernel_axes),
+            nnx.with_partitioning(self.scale_init, self.kernel_axes),
             (features,),
             self.weight_dtype,
         )
