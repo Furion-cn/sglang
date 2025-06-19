@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from jax.lax import with_sharding_constraint
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import PartitionSpec
 from jax import numpy as jnp
 from flax.typing import Sharding
 

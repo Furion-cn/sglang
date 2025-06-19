@@ -15,8 +15,8 @@ mesh = Mesh(devices=np.array(jax.devices()).reshape(2, -1),
             axis_names=('data', 'model'))
 
 
-hidden_size = 16
-vocab_size = 15
+hidden_size = 4
+vocab_size = 4
 batch_size = 2
 
 
@@ -38,20 +38,18 @@ class TestLogitsProcessor(unittest.TestCase):
             nnx.update(model, sharded_state)
             return model
 
-        def _ref_logits_processor(hidden_states, lm_head):
-            logits = lm_head(hidden_states)
-            return logits
+        def _ref_logits_processor(hidden_states, weight):
+            return jnp.dot(hidden_states, weight, precision=jax.lax.Precision.HIGHEST, preferred_element_type=jnp.float32)
 
         with mesh:
             sharded_model = create_sharded_model()
             hidden_states = jnp.ones((batch_size, hidden_size))
             output = sharded_model(hidden_states)
             ref_output = _ref_logits_processor(
-                hidden_states, sharded_model.lm_head)
+                hidden_states, sharded_model.lm_head.kernel.value)
 
             # check shape
             assert output.logits.shape == (batch_size, vocab_size)
-
             # check correctness
             assert jnp.array_equal(output.logits, ref_output)
             print(f"✓ Logits processor output is correct!")
