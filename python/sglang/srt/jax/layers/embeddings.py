@@ -24,7 +24,7 @@ from flax import nnx
 
 from sglang.srt.jax import max_logging
 from sglang.srt.jax.common_types import Config, DType, Array
-from sglang.srt.jax.layers.initializers import Initializer, default_embed_init
+from sglang.srt.jax.layers.initializers import Initializer, default_embed_init, default_bias_init
 
 
 class Embed(nnx.Module):
@@ -45,7 +45,8 @@ class Embed(nnx.Module):
         cast_input_dtype: Optional[DType] = None,
         dtype: DType = jnp.float32,
         attend_dtype: Optional[DType] = None,
-        embedding_init: Initializer = default_embed_init
+        embedding_init: Initializer = default_embed_init,
+        rngs: nnx.Rngs = None,
     ):
         """
         Sets up the embedding parameters for the model.
@@ -69,22 +70,11 @@ class Embed(nnx.Module):
         self.attend_dtype = attend_dtype
         self.embedding_init = embedding_init
 
-        embedding = self.param(
-            "embedding",
-            nnx.with_logical_partitioning(
-                self.embedding_init, ("vocab", "embed")),
-            (self.num_embeddings, self.features),
-            self.config.weight_dtype,
+        self.weight = nnx.Param(
+            nnx.with_partitioning(self.embedding_init, ("vocab", "embed"))(
+                rngs.params, (self.num_embeddings, self.features), self.config.weight_dtype
+            )
         )
-        # Move embeddings to device if parameter offloading is enabled
-        if self.config.parameter_memory_host_offload:
-            max_logging.log(
-                "embeddings.py: Moving embedding parameter to device")
-            # pylint: disable=protected-access
-            self.embedding = jax.device_put(
-                embedding, jax._src.sharding_impls.TransferToMemoryKind("device"))
-        else:
-            self.embedding = embedding
 
     def __call__(self, inputs: Array) -> Array:
         """Embeds the inputs along the last dimension.
@@ -107,9 +97,9 @@ class Embed(nnx.Module):
             iota = lax.iota(jnp.int32, self.num_embeddings)
             one_hot = jnp.array(
                 inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-            output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+            output = jnp.dot(one_hot, jnp.asarray(self.weight, self.dtype))
         else:
-            output = jnp.asarray(self.embedding, self.dtype)[inputs]
+            output = jnp.asarray(self.weight, self.dtype)[inputs]
         output = nnx.with_logical_constraint(
             output, ("activation_embed_and_logits_batch",
                      "activation_length", "activation_embed")
@@ -130,7 +120,51 @@ class Embed(nnx.Module):
           in NLP models.
         """
         dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-        return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T, preferred_element_type=dtype)
+        return jnp.dot(query, jnp.asarray(self.weight, jnp.bfloat16).T, preferred_element_type=dtype)
+
+
+class ParallelLMHead(Embed):
+    def __init__(
+        self,
+        config: Config,
+        num_embeddings: int,
+        features: int,
+        cast_input_dtype: Optional[DType] = None,
+        dtype: DType = jnp.float32,
+        attend_dtype: Optional[DType] = None,
+        embedding_init: Initializer = default_embed_init,
+        rngs: nnx.Rngs = None,
+        use_bias: bool = False,
+        bias_init: Initializer = default_bias_init,
+    ):
+        super().__init__(
+            config=config,
+            num_embeddings=num_embeddings,
+            features=features,
+            cast_input_dtype=cast_input_dtype,
+            dtype=dtype,
+            attend_dtype=attend_dtype,
+            embedding_init=embedding_init,
+            rngs=rngs
+        )
+        if use_bias:
+            self.bias = nnx.Param(
+                nnx.with_partitioning(bias_init, ("vocab", "bias"))(
+                    rngs.params, (self.num_embeddings,
+                                  self.features), self.config.weight_dtype
+                )
+            )
+        else:
+            self.bias = None
+
+    def tie_weights(self, embed_tokens: Embed):
+        """Tie the weights with word embeddings."""
+        self.weight = embed_tokens.weight
+        return self
+
+    def forward(self, input_):
+        del input_
+        raise RuntimeError("LMHead's weights should be used in the sampler.")
 
 
 class RotaryEmbedding(nnx.Module):
@@ -148,6 +182,7 @@ class RotaryEmbedding(nnx.Module):
         self,
         min_timescale: int,
         max_timescale: int,
+        num_heads: int,
         embedding_dims: int = 0,
         cast_as_fprop_dtype: bool = True,
         fprop_dtype: DType = jnp.bfloat16
@@ -155,6 +190,7 @@ class RotaryEmbedding(nnx.Module):
         super().__init__()
         self.min_timescale = min_timescale
         self.max_timescale = max_timescale
+        self.num_heads = num_heads
         self.embedding_dims = embedding_dims
         self.cast_as_fprop_dtype = cast_as_fprop_dtype
         self.fprop_dtype = fprop_dtype
@@ -190,27 +226,31 @@ class RotaryEmbedding(nnx.Module):
             is packed. It is of shape [B, S].
 
         Returns:
-          a jax.Array of shape [B, S, N, H] which includes the inputs together with
+          a jax.Array of shape [B, S, H] which includes the inputs together with
           the rotary position embedding incorporated in it.
         """
         assert position is not None
-        if len(inputs.shape) != 4:
-            raise ValueError(
-                "Input is assumed to be a rank 4 tensor of shape" "[batch, sequence, heads, dims].")
-        if self.embedding_dims != inputs.shape[3]:
+        batch_size = inputs.shape[0]
+        seq_len = inputs.shape[1]
+        hidden_size = inputs.shape[2]
+        head_dim = hidden_size // self.num_heads
+        x = jnp.reshape(
+            inputs, (batch_size, seq_len, self.num_heads, head_dim))
+        if self.embedding_dims != head_dim:
             raise ValueError(
                 "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
             )
 
         position = position[:, :, jnp.newaxis, jnp.newaxis]
         sinusoid_inp = position / self.timescale
-        sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
-        cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
-        first_half, second_half = jnp.split(inputs, 2, axis=-1)
+        sin = jnp.sin(sinusoid_inp).astype(x.dtype)
+        cos = jnp.cos(sinusoid_inp).astype(x.dtype)
+        first_half, second_half = jnp.split(x, 2, axis=-1)
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
         if self.cast_as_fprop_dtype:
             first_part = first_part.astype(self.fprop_dtype)
             second_part = second_part.astype(self.fprop_dtype)
         x_out = jnp.concatenate((first_part, second_part), axis=-1)
+        x_out = jnp.reshape(x_out, (batch_size, seq_len, hidden_size))
         return x_out
