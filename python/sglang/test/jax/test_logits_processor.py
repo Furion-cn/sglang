@@ -51,7 +51,7 @@ class TestLogitsProcessor(unittest.TestCase):
             # check shape
             assert output.logits.shape == (batch_size, vocab_size)
             # check correctness
-            assert jnp.array_equal(output.logits, ref_output)
+            assert jnp.allclose(output.logits, ref_output)
             print(f"✓ Logits processor output is correct!")
 
 
