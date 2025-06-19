@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -10,32 +10,21 @@ class RMSNorm(nnx.Module):
     """RMS normalization."""
 
     def __init__(self,
+                 hidden_size: int,
                  epsilon: float = 1e-6,
-                 dtype: Any = jnp.float32,
-                 weight_dtype: Any = jnp.float32,
-                 kernel_axes: Tuple[Optional[str], ...] = (),
-                 scale_init: Callable[[jax.Array, Sequence[int],
-                                       jnp.dtype], jax.Array] = nnx.initializers.ones,
-                 parameter_memory_host_offload: bool = False,
-                 rngs: nnx.Rngs = nnx.Rngs(0)):
-        self.epsilon = epsilon
-        self.dtype = dtype
-        self.weight_dtype = weight_dtype
-        self.kernel_axes = kernel_axes
-        self.scale_init = scale_init
-        self.parameter_memory_host_offload = parameter_memory_host_offload
+                 kernel_axes: Optional[Sequence[str]] = None,
+                 rngs: nnx.Rngs = None):
+        self.variance_epsilon = epsilon
+        self.weight = nnx.Param(
+            nnx.with_partitioning(nnx.initializers.ones, kernel_axes)(
+                rngs.params(), (hidden_size,))
+        )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Applies layer normalization on the input."""
         x = jnp.asarray(x, jnp.float32)
-        features = x.shape[-1]
         mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-        y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
-        scale = self.param(
-            "scale",
-            nnx.with_partitioning(self.scale_init, self.kernel_axes),
-            (features,),
-            self.weight_dtype,
-        )
-        scale = jnp.asarray(scale, self.dtype)
+        y = jnp.asarray(
+            x * lax.rsqrt(mean2 + self.variance_epsilon), jnp.float32)
+        scale = jnp.asarray(self.weight, jnp.float32)
         return y * scale

@@ -1,8 +1,10 @@
 import unittest
-from sglang.srt.jax.layers.logits_processor import LogitsProcessor
-from jax import numpy as jnp
+
 import jax
 from flax import nnx
+from jax import numpy as jnp
+
+from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 
 
 class TestLogitsProcessor(unittest.TestCase):
