@@ -32,7 +32,7 @@ class QWenMLP(nnx.Module):
         intermediate_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        rngs: nnx.Rngs = None,
+        rngs: nnx.Rngs=None,
     ):
 
         self.w1 = nnx.Linear(
@@ -62,12 +62,14 @@ class QWenMLP(nnx.Module):
             rngs=rngs
         )
 
-        self.act_func = nnx.silu
+        self.act_func = jax.nn.silu
 
     def __call__(self, hidden_states: jnp.ndarray):
         a1 = self.w1(hidden_states)
         a2 = self.w2(hidden_states)
         intermediate_parallel = a1 * self.act_func(a2)
+        intermediate_parallel = jax.lax.with_sharding_constraint(
+            intermediate_parallel, PartitionSpec('data', 'tensor'))
         output = self.c_proj(intermediate_parallel)
         return output
 
