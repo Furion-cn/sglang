@@ -10,7 +10,12 @@ class Attention(nnx.Module):
                  q: jax.Array,
                  k: jax.Array,
                  v: jax.Array,
-                 attention_mask: jax.Array = None):
+                 attention_mask: jax.Array = None,
+                 is_causal: bool = True,
+                 scale=None):
+
+        if scale is None:
+            scale = 1.0 / jnp.sqrt(q.shape[-1])
 
         q = jnp.transpose(q, (0, 2, 1, 3))
         k = jnp.transpose(k, (0, 2, 1, 3))
@@ -19,11 +24,16 @@ class Attention(nnx.Module):
         # query-key product
         attn_weights = jnp.einsum("bnqh,bnkh->bnqk", q, k)
 
+        # scale
+        attn_weights = attn_weights * scale
+
         # apply causal mask
-        causal_mask = jnp.tril(jnp.ones((q.size(2), q.size(2)), dtype=bool))
-        causal_mask = causal_mask[None, None, :, :]
-        mask_value = jnp.finfo(attn_weights.dtype).min
-        attn_weights = jnp.where(causal_mask, attn_weights, mask_value)
+        if is_causal:
+            causal_mask = jnp.tril(
+                jnp.ones((q.shape[2], q.shape[2]), dtype=bool))
+            causal_mask = causal_mask[None, None, :, :]
+            mask_value = jnp.finfo(attn_weights.dtype).min
+            attn_weights = jnp.where(causal_mask, attn_weights, mask_value)
 
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask

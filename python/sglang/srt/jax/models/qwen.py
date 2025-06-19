@@ -54,15 +54,6 @@ class QWenMLP(nnx.Module):
         return z
 
 class QWenAttention(nnx.Module):
-    hidden_size: int
-    num_heads: int
-    max_position_embeddings: int
-    layer_id: int
-    rope_theta: float
-    rope_scaling: Optional[Dict[str, Any]]
-    quant_config: Optional[QuantizationConfig] = None
-    prefix: str = ""
-
     def __init__(self,
                  hidden_size: int,
                  num_heads: int,
@@ -100,7 +91,7 @@ class QWenAttention(nnx.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        attn_output = jax.nn.dot_product_attention(q, k, v, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
 
