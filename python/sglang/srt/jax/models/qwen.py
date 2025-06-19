@@ -12,15 +12,11 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 
 from sglang.srt.jax.layers.attention import Attention
-from sglang.srt.jax.layers.embeddings import RotaryEmbedding
+from sglang.srt.jax.layers.embeddings import (RotaryEmbedding, Embed, ParallelLMHead)
 from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.jax.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import add_prefix
 
@@ -102,6 +98,7 @@ class QWenAttention(nnx.Module):
         self.rotary_emb = RotaryEmbedding(
             min_timescale=1,
             max_timescale=10000,
+            num_heads=num_heads,
             embedding_dims=head_size,
         )
         self.attn = Attention()
@@ -188,9 +185,11 @@ class QWenModel(nnx.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  rngs: nnx.Rngs = None,
                  prefix: str = ""):
-        self.wte = VocabParallelEmbedding(
-            ((config.vocab_size + 63) // 64) * 64,
-            config.hidden_size,
+        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.embed_tokens = Embed(
+            config=config,
+            num_embeddings=vocab_size,
+            features=config.hidden_size,
             rngs=rngs,
         )
         self.h = [
@@ -212,7 +211,7 @@ class QWenModel(nnx.Module):
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
                  ):
-        hidden_states = self.wte(input_ids)
+        hidden_states = self.embed_tokens(input_ids)
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -234,10 +233,10 @@ class QWenLMHeadModel(nnx.Module):
                  prefix: str = ""):
         self.transformer = QWenModel(config, quant_config, rngs, prefix)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ParallelLMHead(vocab_size, config.hidden_size)
+        self.lm_head = ParallelLMHead(config, vocab_size, config.hidden_size, rngs=rngs)
         self.logits_processor = LogitsProcessor(
             config.hidden_size,
-            config.vocab_size,
+            vocab_size,
             rngs=rngs,
         )
 
