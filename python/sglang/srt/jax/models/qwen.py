@@ -93,7 +93,9 @@ class QWenAttention(nnx.Module):
             num_heads=num_heads,
             embedding_dims=head_size,
         )
-        self.attn = Attention()
+        self.attn = Attention(
+            scale=head_size**-0.5,
+        )
 
     def __call__(
         self,
