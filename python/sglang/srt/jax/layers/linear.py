@@ -63,13 +63,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: jnp.dtype,
         partition_spec: Optional[PartitionSpec] = None,
+        rngs: nnx.Rngs = nnx.Rngs(0),
     ):
         """Create weight parameters for the linear layer."""
         layer.weight = layer.param(
             'weight',
             nnx.with_partitioning(nnx.initializers.normal(), partition_spec),
             (output_size, input_size),
-            params_dtype
+            params_dtype,
+            rngs=rngs,
         )
 
     def apply(
@@ -109,6 +111,7 @@ class LinearBase(nnx.Module):
                  params_dtype: Optional[jnp.dtype] = jnp.float32,
                  quant_config: Optional[QuantizationConfig] = None,
                  partition_spec: Optional[PartitionSpec] = None,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
                  prefix: str = ""):
         """Initialize parameters and quantization method."""
         self.skip_bias_add = skip_bias_add
@@ -124,13 +127,16 @@ class LinearBase(nnx.Module):
             output_size,
             params_dtype,
             partition_spec,
+            rngs,
         )
         if bias:
             self.bias_param = self.param(
                 "bias",
                 nnx.with_partitioning(
                     nnx.initializers.zeros_init(), partition_spec),
-                (output_size,))
+                (output_size,),
+                rngs=rngs,
+            )
         else:
             self.bias_param = None
 
@@ -157,6 +163,7 @@ class QKVParallelLinear(LinearBase):
                  params_dtype: Optional[jnp.dtype] = jnp.float32,
                  quant_config: Optional[QuantizationConfig] = None,
                  partition_spec: Optional[PartitionSpec] = None,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
                  prefix: str = ""):
         super().__init__(
             hidden_size,
@@ -166,5 +173,6 @@ class QKVParallelLinear(LinearBase):
             params_dtype=params_dtype,
             quant_config=quant_config,
             partition_spec=partition_spec,
-            prefix=prefix
+            prefix=prefix,
+            rngs=rngs,
         )

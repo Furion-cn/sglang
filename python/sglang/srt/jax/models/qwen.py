@@ -26,16 +26,13 @@ from jax.sharding import PartitionSpec
 from flax.typing import Sharding
 
 
+
 class QWenMLP(nnx.Module):
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
         quant_config: Optional[QuantizationConfig] = None,
-        kernel_init: nnx.Initializer = nnx.initializers.lecun_normal(),
-        kernel_1_partition: Sharding = (None, None),
-        kernel_2_partition: Sharding = (None, None),
-        kernel_3_partition: Sharding = (None, None),
         *,  # Following arguments are keyword-only
         rngs: nnx.Rngs,
     ):
@@ -43,7 +40,7 @@ class QWenMLP(nnx.Module):
         self.w1 = nnx.Linear(
             hidden_size,
             intermediate_size//2,
-            kernel_init=nnx.with_partitioning(kernel_init, kernel_1_partition),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tensor")),
             use_bias=False,
             rngs=rngs
         )
@@ -51,7 +48,7 @@ class QWenMLP(nnx.Module):
         self.w2 = nnx.Linear(
             hidden_size,
             intermediate_size//2,
-            kernel_init=nnx.with_partitioning(kernel_init, kernel_2_partition),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tensor", None)),
             use_bias=False,
             rngs=rngs
         )
@@ -59,7 +56,7 @@ class QWenMLP(nnx.Module):
         self.c_proj = nnx.Linear(
             intermediate_size//2,
             hidden_size,
-            kernel_init=nnx.with_partitioning(kernel_init, kernel_3_partition),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("data", "tensor")),
             use_bias=False,
             rngs=rngs
         )
@@ -74,6 +71,7 @@ class QWenMLP(nnx.Module):
         return output
 
 
+
 class QWenAttention(nnx.Module):
     def __init__(self,
                  hidden_size: int,
@@ -82,6 +80,7 @@ class QWenAttention(nnx.Module):
                  rope_theta: float,
                  rope_scaling: Optional[Dict[str, Any]],
                  quant_config: Optional[QuantizationConfig] = None,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
                  prefix: str = ""):
         head_size = hidden_size // num_heads
         self.c_attn = QKVParallelLinear(
@@ -92,6 +91,7 @@ class QWenAttention(nnx.Module):
             bias=True,
             quant_config=quant_config,
             prefix=add_prefix("c_attn", prefix),
+            rngs=rngs,
         )
         self.c_proj = LinearBase(
             input_size=num_heads * head_size,
@@ -99,6 +99,7 @@ class QWenAttention(nnx.Module):
             bias=False,
             quant_config=quant_config,
             prefix=add_prefix("c_proj", prefix),
+            rngs=rngs,
         )
         self.rotary_emb = RotaryEmbedding()
         self.attn = Attention()
@@ -112,7 +113,7 @@ class QWenAttention(nnx.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = jax.nn.dot_product_attention(q, k, v, is_causal=True)
+        attn_output = self.attn(q, k, v, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -122,9 +123,11 @@ class QWenBlock(nnx.Module):
                  config: PretrainedConfig,
                  layer_id: int,
                  quant_config: Optional[QuantizationConfig] = None,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
                  prefix: str = ""):
         self.ln_1 = RMSNorm(config.hidden_size,
-                            eps=config.layer_norm_epsilon)
+                            eps=config.layer_norm_epsilon,
+                            rngs=rngs)
 
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -137,10 +140,12 @@ class QWenBlock(nnx.Module):
             layer_id=layer_id,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
+            rngs=rngs,
         )
 
         self.ln_2 = RMSNorm(config.hidden_size,
-                            eps=config.layer_norm_epsilon)
+                            eps=config.layer_norm_epsilon,
+                            rngs=rngs)
 
         self.mlp = QWenMLP(
             config.hidden_size,
@@ -178,23 +183,24 @@ class QWenModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  quant_config: Optional[QuantizationConfig] = None,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
                  prefix: str = ""):
         self.wte = VocabParallelEmbedding(
             ((config.vocab_size + 63) // 64) * 64,
             config.hidden_size,
+            rngs=rngs,
         )
-        self.h = nnx.ModuleList(
-            [
-                QWenBlock(
-                    config,
-                    i,
-                    quant_config=quant_config,
-                    prefix=add_prefix(f"h.{i}", prefix),
-                )
-                for i in range(config.num_hidden_layers)
-            ]
-        )
-        self.ln_f = RMSNorm(epsilon=config.layer_norm_epsilon)
+        self.h = [
+            QWenBlock(
+                config,
+                i,
+                quant_config=quant_config,
+                rngs=rngs,
+                prefix=add_prefix(f"h.{i}", prefix),
+            )
+            for i in range(config.num_hidden_layers)
+        ]
+        self.ln_f = RMSNorm(epsilon=config.layer_norm_epsilon, rngs=rngs)
 
     def __call__(self,
                  input_ids: jax.Array,
@@ -219,8 +225,9 @@ class QWenLMHeadModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  quant_config: Optional[QuantizationConfig] = None,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
                  prefix: str = ""):
-        self.transformer = QWenModel(config, quant_config, prefix)
+        self.transformer = QWenModel(config, quant_config, rngs, prefix)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config)
