@@ -21,38 +21,58 @@ from sglang.srt.jax.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import add_prefix
+import numpy as np
+from jax.sharding import PartitionSpec
+from flax.typing import Sharding
+
 
 class QWenMLP(nnx.Module):
-    def __init__(self,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 hidden_act: str = "silu",
-                 quant_config: Optional[QuantizationConfig] = None,
-                 dense_init: Callable = nn.initializers.xavier_normal(),
-                 ):
-        self.w1=nn.Dense(
-          features=2*intermediate_size,
-          use_bias=False,
-          kernel_init=nn.with_partitioning(dense_init, (None,None)), # (None,'model')
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        kernel_init: nnx.Initializer = nnx.initializers.lecun_normal(),
+        kernel_1_partition: Sharding = (None, None),
+        kernel_2_partition: Sharding = (None, None),
+        kernel_3_partition: Sharding = (None, None),
+        *,  # Following arguments are keyword-only
+        rngs: nnx.Rngs,
+    ):
+
+        self.w1 = nnx.Linear(
+            hidden_size,
+            intermediate_size//2,
+            kernel_init=nnx.with_partitioning(kernel_init, kernel_1_partition),
+            use_bias=False,
+            rngs=rngs
         )
-        self.act_func=jax.nn.silu
-        self.w2=self.param(
-          'W2',
-          nn.with_partitioning(dense_init, (None,None)), # ('model',None)
-          (2*intermediate_size, hidden_size))
+
+        self.w2 = nnx.Linear(
+            hidden_size,
+            intermediate_size//2,
+            kernel_init=nnx.with_partitioning(kernel_init, kernel_2_partition),
+            use_bias=False,
+            rngs=rngs
+        )
+
+        self.c_proj = nnx.Linear(
+            intermediate_size//2,
+            hidden_size,
+            kernel_init=nnx.with_partitioning(kernel_init, kernel_3_partition),
+            use_bias=False,
+            rngs=rngs
+        )
+
+        self.act_func = nnx.silu
 
     def __call__(self, hidden_states: jnp.ndarray):
-        y = self.w1(hidden_states)
+        a1 = self.w1(hidden_states)
+        a2 = self.w2(hidden_states)
+        intermediate_parallel = a1 * self.act_func(a2)
+        output = self.c_proj(intermediate_parallel)
+        return output
 
-        y=self.act_func(y)
-
-        # Force a local sharding annotation.
-        # y = with_sharding_constraint(y, mesh_sharding(PartitionSpec('data', 'model')))
-
-        z= jnp.dot(y,self.W2)
-        # Force a local sharding annotation.
-        #z = with_sharding_constraint(z, mesh_sharding(PartitionSpec('data', None)))
-        return z
 
 class QWenAttention(nnx.Module):
     hidden_size: int
