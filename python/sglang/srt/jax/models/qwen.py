@@ -4,10 +4,11 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax import numpy as jnp
+from jax.sharding import PartitionSpec
 from transformers import PretrainedConfig
 
 from sglang.srt.jax.layers.attention import Attention
-from sglang.srt.jax.layers.embeddings import (RotaryEmbedding, Embed, ParallelLMHead)
+from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
 from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
@@ -20,9 +21,7 @@ class QWenMLP(nnx.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-        rngs: nnx.Rngs=None,
+        rngs: nnx.Rngs = None,
     ):
 
         self.w1 = nnx.Linear(
@@ -172,7 +171,6 @@ class QWenModel(nnx.Module):
                  rngs: nnx.Rngs = None):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = Embed(
-            config=config,
             num_embeddings=vocab_size,
             features=config.hidden_size,
             rngs=rngs,
@@ -213,7 +211,7 @@ class QWenLMHeadModel(nnx.Module):
                  rngs: nnx.Rngs = None):
         self.transformer = QWenModel(config, rngs)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ParallelLMHead(config, vocab_size, config.hidden_size, rngs=rngs)
+        self.lm_head = ParallelLMHead(vocab_size, config.hidden_size, rngs=rngs)
         self.logits_processor = LogitsProcessor(vocab_size)
 
     def __call__(self,
@@ -223,5 +221,5 @@ class QWenLMHeadModel(nnx.Module):
                  ):
         hidden_states = self.transformer(input_ids, positions, forward_batch)
         return self.logits_processor(
-            input_ids, hidden_states, self.lm_head
+            hidden_states, self.lm_head
         )

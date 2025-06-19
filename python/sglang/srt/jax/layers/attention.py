@@ -6,18 +6,24 @@ from flax import nnx
 class Attention(nnx.Module):
     """attention layer."""
 
+    def __init__(self,
+                 scale: float = None,
+                 rngs: nnx.Rngs = None):
+        self.scale = scale
+
     def __call__(self,
                  q: jax.Array,
                  k: jax.Array,
                  v: jax.Array,
                  attention_mask: jax.Array = None,
-                 is_causal: bool = True,
-                 scale=None):
-        return jax.nn.dot_product_attention(q, k, v, is_causal=is_causal)
+                 is_causal: bool = True):
+        return jax.nn.dot_product_attention(q, k, v, is_causal=is_causal, scale=self.scale)
 
-    def _attn(self, q, k, v, attention_mask, is_causal, scale):
-        if scale is None:
+    def _attn(self, q, k, v, attention_mask, is_causal):
+        if self.scale is None:
             scale = 1.0 / jnp.sqrt(q.shape[-1])
+        else:
+            scale = self.scale
 
         q = jnp.transpose(q, (0, 2, 1, 3))
         k = jnp.transpose(k, (0, 2, 1, 3))

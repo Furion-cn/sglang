@@ -23,7 +23,7 @@ class LinearBase(nnx.Module):
                  output_size: int,
                  use_bias: bool = True,
                  skip_bias_add: bool = False,
-                 params_dtype: Optional[jnp.dtype] = jnp.float32,
+                 params_dtype: Optional[jnp.dtype] = jnp.bfloat16,
                  kernel_axes: Optional[Sequence[str]] = None,
                  rngs: nnx.Rngs = None):
         """Initialize parameters and quantization method."""
