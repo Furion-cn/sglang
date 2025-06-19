@@ -2,29 +2,27 @@ from typing import Any, Callable, Dict, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import linen as nn
 from flax import nnx
-from jax.sharding import PartitionSpec, NamedSharding, Mesh
+from flax.typing import Sharding
 from jax import numpy as jnp
 from jax.lax import with_sharding_constraint
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 
 from sglang.srt.jax.layers.attention import Attention
+from sglang.srt.jax.layers.embeddings import RotaryEmbedding
 from sglang.srt.jax.layers.layernorm import RMSNorm
-from sglang.srt.jax.layers.linear import LinearBase, QKVParallelLinear
+from sglang.srt.jax.layers.linear import LinearBase
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.jax.layers.embeddings import RotaryEmbedding
 from sglang.srt.jax.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import add_prefix
-import numpy as np
-from jax.sharding import PartitionSpec
-from flax.typing import Sharding
-
 
 
 class QWenMLP(nnx.Module):
@@ -33,14 +31,15 @@ class QWenMLP(nnx.Module):
         hidden_size: int,
         intermediate_size: int,
         quant_config: Optional[QuantizationConfig] = None,
-        *,  # Following arguments are keyword-only
-        rngs: nnx.Rngs,
+        prefix: str = "",
+        rngs: nnx.Rngs = None,
     ):
 
         self.w1 = nnx.Linear(
             hidden_size,
             intermediate_size//2,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tensor")),
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(), (None, "tensor")),
             use_bias=False,
             rngs=rngs
         )
@@ -48,7 +47,8 @@ class QWenMLP(nnx.Module):
         self.w2 = nnx.Linear(
             hidden_size,
             intermediate_size//2,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tensor", None)),
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(), ("tensor", None)),
             use_bias=False,
             rngs=rngs
         )
@@ -56,7 +56,8 @@ class QWenMLP(nnx.Module):
         self.c_proj = nnx.Linear(
             intermediate_size//2,
             hidden_size,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("data", "tensor")),
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(), ("data", "tensor")),
             use_bias=False,
             rngs=rngs
         )
@@ -71,7 +72,6 @@ class QWenMLP(nnx.Module):
         return output
 
 
-
 class QWenAttention(nnx.Module):
     def __init__(self,
                  hidden_size: int,
@@ -80,28 +80,30 @@ class QWenAttention(nnx.Module):
                  rope_theta: float,
                  rope_scaling: Optional[Dict[str, Any]],
                  quant_config: Optional[QuantizationConfig] = None,
-                 rngs: nnx.Rngs = nnx.Rngs(0),
+                 rngs: nnx.Rngs = None,
                  prefix: str = ""):
         head_size = hidden_size // num_heads
-        self.c_attn = QKVParallelLinear(
-            hidden_size=hidden_size,
-            head_size=head_size,
-            num_heads=num_heads,
-            num_kv_heads=num_heads,
-            bias=True,
-            quant_config=quant_config,
+        self.c_attn = LinearBase(
+            input_size=hidden_size,
+            output_size=(num_heads + 2 * num_heads) * head_size,
+            use_bias=True,
+            kernel_axes=(None, "tensor"),
             prefix=add_prefix("c_attn", prefix),
             rngs=rngs,
         )
         self.c_proj = LinearBase(
             input_size=num_heads * head_size,
             output_size=hidden_size,
-            bias=False,
-            quant_config=quant_config,
+            use_bias=False,
+            kernel_axes=("tensor", None),
             prefix=add_prefix("c_proj", prefix),
             rngs=rngs,
         )
-        self.rotary_emb = RotaryEmbedding()
+        self.rotary_emb = RotaryEmbedding(
+            min_timescale=1,
+            max_timescale=10000,
+            embedding_dims=head_size,
+        )
         self.attn = Attention()
 
     def __call__(
@@ -112,7 +114,8 @@ class QWenAttention(nnx.Module):
     ) -> jax.Array:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        q = self.rotary_emb(q, positions)
+        k = self.rotary_emb(k, positions)
         attn_output = self.attn(q, k, v, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
@@ -123,10 +126,10 @@ class QWenBlock(nnx.Module):
                  config: PretrainedConfig,
                  layer_id: int,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rngs: nnx.Rngs = nnx.Rngs(0),
+                 rngs: nnx.Rngs = None,
                  prefix: str = ""):
         self.ln_1 = RMSNorm(config.hidden_size,
-                            eps=config.layer_norm_epsilon,
+                            epsilon=config.layer_norm_epsilon,
                             rngs=rngs)
 
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -137,14 +140,13 @@ class QWenBlock(nnx.Module):
             config.max_position_embeddings,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
-            layer_id=layer_id,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
             rngs=rngs,
         )
 
         self.ln_2 = RMSNorm(config.hidden_size,
-                            eps=config.layer_norm_epsilon,
+                            epsilon=config.layer_norm_epsilon,
                             rngs=rngs)
 
         self.mlp = QWenMLP(
@@ -152,6 +154,7 @@ class QWenBlock(nnx.Module):
             config.intermediate_size // 2,
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
+            rngs=rngs,
         )
 
     def __call__(
@@ -183,7 +186,7 @@ class QWenModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rngs: nnx.Rngs = nnx.Rngs(0),
+                 rngs: nnx.Rngs = None,
                  prefix: str = ""):
         self.wte = VocabParallelEmbedding(
             ((config.vocab_size + 63) // 64) * 64,
@@ -200,7 +203,9 @@ class QWenModel(nnx.Module):
             )
             for i in range(config.num_hidden_layers)
         ]
-        self.ln_f = RMSNorm(epsilon=config.layer_norm_epsilon, rngs=rngs)
+        self.ln_f = RMSNorm(config.hidden_size,
+                            epsilon=config.layer_norm_epsilon,
+                            rngs=rngs)
 
     def __call__(self,
                  input_ids: jax.Array,
@@ -225,12 +230,16 @@ class QWenLMHeadModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rngs: nnx.Rngs = nnx.Rngs(0),
+                 rngs: nnx.Rngs = None,
                  prefix: str = ""):
         self.transformer = QWenModel(config, quant_config, rngs, prefix)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(vocab_size, config.hidden_size)
-        self.logits_processor = LogitsProcessor(config)
+        self.logits_processor = LogitsProcessor(
+            config.hidden_size,
+            config.vocab_size,
+            rngs=rngs,
+        )
 
     def __call__(self,
                  input_ids: jax.Array,
