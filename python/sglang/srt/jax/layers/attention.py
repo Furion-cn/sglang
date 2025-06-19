@@ -13,7 +13,9 @@ class Attention(nnx.Module):
                  attention_mask: jax.Array = None,
                  is_causal: bool = True,
                  scale=None):
+        return jax.nn.dot_product_attention(q, k, v, is_causal=is_causal)
 
+    def _attn(self, q, k, v, attention_mask, is_causal, scale):
         if scale is None:
             scale = 1.0 / jnp.sqrt(q.shape[-1])
 

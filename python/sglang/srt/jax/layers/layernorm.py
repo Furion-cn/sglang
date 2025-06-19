@@ -16,7 +16,8 @@ class RMSNorm(nnx.Module):
                  kernel_axes: Tuple[Optional[str], ...] = (),
                  scale_init: Callable[[jax.Array, Sequence[int],
                                        jnp.dtype], jax.Array] = nnx.initializers.ones,
-                 parameter_memory_host_offload: bool = False):
+                 parameter_memory_host_offload: bool = False,
+                 rngs: nnx.Rngs = nnx.Rngs(0)):
         self.epsilon = epsilon
         self.dtype = dtype
         self.weight_dtype = weight_dtype
