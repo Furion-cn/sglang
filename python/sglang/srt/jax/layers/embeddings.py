@@ -72,7 +72,7 @@ class Embed(nnx.Module):
 
         self.weight = nnx.Param(
             nnx.with_partitioning(self.embedding_init, ("vocab", "embed"))(
-                rngs.params, (self.num_embeddings, self.features), self.config.weight_dtype
+                rngs.params(), (self.num_embeddings, self.features), self.config.weight_dtype
             )
         )
 
