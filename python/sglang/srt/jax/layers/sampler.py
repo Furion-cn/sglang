@@ -82,9 +82,11 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
         min_p_mask = probs_sort < min_p_thresholds.reshape(-1, 1)
         probs_sort = jnp.where(min_p_mask, 0.0, probs_sort)
 
-    sampled_index = random.categorical(rng, probs_sort, shape=(1,))
+    sampled_index = random.categorical(rng, probs_sort)
     # int32 range is enough to represent the token ids
     probs_idx = probs_idx.astype(jnp.int32)
+    # sampled_index has shape (batch_size,), need to reshape to (batch_size, 1) for take_along_axis
+    sampled_index = sampled_index.reshape(-1, 1)
     batch_next_token_ids = jnp.take_along_axis(
-        probs_idx, axis=1, indices=sampled_index).reshape(-1)
+        probs_idx, axis=1, indices=sampled_index).reshape(-1, 1)
     return batch_next_token_ids
