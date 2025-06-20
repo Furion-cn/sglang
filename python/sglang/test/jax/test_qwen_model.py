@@ -71,7 +71,6 @@ class TestQwenModel(CustomTestCase):
                         top_ps=jnp.full((1, 1), 0.9),
                         top_ks=jnp.ones((1, 1)),
                         min_ps=jnp.full((1, 1), 0.0),
-                        is_all_greedy=True,
                         vocab_size=10000,
                     ))
                 x = jnp.concatenate(

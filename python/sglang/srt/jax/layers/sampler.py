@@ -63,28 +63,23 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
     """A top-k, top-p and min-p sampling implementation with native pytorch operations."""
     probs_sort = jnp.sort(
         probs, axis=-1)[:, ::-1]  # Sort and reverse for descending order
-    # Get indices and reverse for descending order
     probs_idx = jnp.argsort(probs, axis=-1)[:, ::-1]
     probs_sum = jnp.cumsum(probs_sort, axis=-1)
 
-    # Apply top-k filtering using jnp.where instead of in-place assignment
     top_k_mask = jnp.arange(
         0, probs.shape[-1]).reshape(1, -1) >= top_ks.reshape(-1, 1)
     probs_sort = jnp.where(top_k_mask, 0.0, probs_sort)
 
-    # Apply top-p filtering using jnp.where instead of in-place assignment
     top_p_mask = (probs_sum - probs_sort) > top_ps.reshape(-1, 1)
     probs_sort = jnp.where(top_p_mask, 0.0, probs_sort)
 
     if need_min_p_sampling:
         min_p_thresholds = probs_sort[:, 0] * min_ps
-        # Apply min-p filtering using jnp.where instead of in-place assignment
         min_p_mask = probs_sort < min_p_thresholds.reshape(-1, 1)
         probs_sort = jnp.where(min_p_mask, 0.0, probs_sort)
 
-    sampled_index = random.categorical(rng, probs_sort, shape=(1,))
-    # int32 range is enough to represent the token ids
+    sampled_index = random.categorical(rng, probs_sort).reshape(-1, 1)
     probs_idx = probs_idx.astype(jnp.int32)
     batch_next_token_ids = jnp.take_along_axis(
-        probs_idx, axis=1, indices=sampled_index).reshape(-1)
+        probs_idx, axis=1, indices=sampled_index).reshape(-1, 1)
     return batch_next_token_ids
