@@ -16,14 +16,14 @@ from sglang.srt.jax.layers.embeddings import Embed
 
 @dataclasses.dataclass
 class LogitsProcessorOutput:
-    logits: jax.Array
+    next_token_logits: jax.Array
 
 
 class LogitsProcessor(nnx.Module):
     """Logits processor for the model."""
 
-    def __init__(self):
-        pass
+    def __init__(self, vocab_size: int):
+        self.vocab_size = vocab_size
 
     def __call__(
         self,
@@ -34,4 +34,5 @@ class LogitsProcessor(nnx.Module):
         #    hidden_states, PartitionSpec('data', None))
         # hidden_states.shape = [batch, sequence, hidden_size]
         logits = lm_head.attend(hidden_states[:, -1:, :])
-        return LogitsProcessorOutput(logits=logits)
+        logits = logits[:, :, : self.vocab_size]
+        return LogitsProcessorOutput(next_token_logits=logits)
