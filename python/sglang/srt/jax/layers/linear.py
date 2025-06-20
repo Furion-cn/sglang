@@ -16,7 +16,6 @@ class LinearBase(nnx.Module):
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
         partition_spec: Partition spec for the linear layer.
-        prefix: Prefix for the linear layer.
     """
 
     def __init__(self,
@@ -24,9 +23,8 @@ class LinearBase(nnx.Module):
                  output_size: int,
                  use_bias: bool = True,
                  skip_bias_add: bool = False,
-                 params_dtype: Optional[jnp.dtype] = jnp.float32,
+                 params_dtype: Optional[jnp.dtype] = jnp.bfloat16,
                  kernel_axes: Optional[Sequence[str]] = None,
-                 prefix: str = "",
                  rngs: nnx.Rngs = None):
         """Initialize parameters and quantization method."""
         self.skip_bias_add = skip_bias_add

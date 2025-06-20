@@ -1,4 +1,5 @@
-from typing import Optional, Sequence
+from functools import partial
+from typing import Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -20,11 +21,18 @@ class RMSNorm(nnx.Module):
                 rngs.params(), (hidden_size,))
         )
 
-    def __call__(self, x: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, residual: Optional[jax.Array] = None) -> Union[jax.Array, Tuple[jax.Array, jax.Array]]:
         """Applies layer normalization on the input."""
-        x = jnp.asarray(x, jnp.float32)
-        mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
+        orig_dtype = x.dtype
+        x_f32 = jnp.asarray(x, jnp.float32)
+        if residual is not None:
+            x_f32 += jnp.asarray(residual, jnp.float32)
+            residual = x.astype(orig_dtype)
+        mean2 = jnp.mean(lax.square(x_f32), axis=-1, keepdims=True)
         y = jnp.asarray(
-            x * lax.rsqrt(mean2 + self.variance_epsilon), jnp.float32)
-        scale = jnp.asarray(self.weight, jnp.float32)
-        return y * scale
+            x_f32 * lax.rsqrt(mean2 + self.variance_epsilon), jnp.float32)
+        output = (y * jnp.asarray(self.weight, jnp.float32)).astype(orig_dtype)
+        if residual is None:
+            return output
+        else:
+            return output, residual
