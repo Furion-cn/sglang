@@ -236,11 +236,7 @@ class QWenLMHeadModel(nnx.Module):
         self.transformer = QWenModel(config, quant_config, rngs, prefix)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(config, vocab_size, config.hidden_size, rngs=rngs)
-        self.logits_processor = LogitsProcessor(
-            config.hidden_size,
-            vocab_size,
-            rngs=rngs,
-        )
+        self.logits_processor = LogitsProcessor(vocab_size)
 
     def __call__(self,
                  input_ids: jax.Array,
