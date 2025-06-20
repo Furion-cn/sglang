@@ -32,5 +32,5 @@ class LogitsProcessor(nnx.Module):
     ) -> LogitsProcessorOutput:
         hidden_states = with_sharding_constraint(
             hidden_states, PartitionSpec('data', None))
-        logits = jnp.dot(hidden_states, lm_head.weight.value)
+        logits = jnp.dot(hidden_states, lm_head.weight.value.T)
         return LogitsProcessorOutput(logits=logits)

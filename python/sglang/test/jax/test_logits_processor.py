@@ -18,7 +18,7 @@ mesh = Mesh(devices=np.array(jax.devices()).reshape(2, -1, 1, 1),
 
 
 hidden_size = 4
-vocab_size = 4
+vocab_size = 8
 batch_size = 2
 
 
@@ -60,7 +60,7 @@ class TestLogitsProcessor(unittest.TestCase):
             logits_processor = LogitsProcessor()
             output = logits_processor(hidden_states, sharded_lm_head)
             ref_output = _ref_logits_processor(
-                hidden_states, sharded_lm_head.weight.value)
+                hidden_states, sharded_lm_head.weight.value.T)
 
             # check shape
             assert output.logits.shape == (batch_size, vocab_size)
