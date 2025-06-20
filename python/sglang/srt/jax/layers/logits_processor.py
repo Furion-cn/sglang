@@ -30,7 +30,8 @@ class LogitsProcessor(nnx.Module):
         hidden_states: jax.Array,
         lm_head: Embed,
     ) -> LogitsProcessorOutput:
-        hidden_states = with_sharding_constraint(
-            hidden_states, PartitionSpec('data', None))
-        logits = jnp.dot(hidden_states, lm_head.weight.value.T)
+        # hidden_states = with_sharding_constraint(
+        #    hidden_states, PartitionSpec('data', None))
+        # hidden_states.shape = [batch, sequence, hidden_size]
+        logits = lm_head.attend(hidden_states[:, -1:, :])
         return LogitsProcessorOutput(logits=logits)
