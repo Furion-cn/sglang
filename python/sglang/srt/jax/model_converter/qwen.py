@@ -295,7 +295,7 @@ def compare_weights(original_weights: dict, converted_weights: dict, tolerance: 
       converter_logging.log(f"❌ Value mismatch at {path}: max difference = {max_diff} (tolerance = {tolerance})")
       return False
     
-    converter_logging.log(f"✓ {path}: shapes {arr1.shape}, max_diff = {max_diff:.2e}")
+    converter_logging.log(f"✅ {path}: shapes {arr1.shape}, max_diff = {max_diff:.2e}")
     return True
   
   def get_jax_weight_by_pytorch_key(pytorch_key: str, jax_weights: dict):
