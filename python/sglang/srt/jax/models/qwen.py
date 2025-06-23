@@ -28,7 +28,7 @@ class QWenMLP(nnx.Module):
 
         self.w1 = nnx.Linear(
             hidden_size,
-            intermediate_size//2,
+            intermediate_size,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(), (None, "tensor")),
             use_bias=False,
@@ -38,7 +38,7 @@ class QWenMLP(nnx.Module):
 
         self.w2 = nnx.Linear(
             hidden_size,
-            intermediate_size//2,
+            intermediate_size,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(), ("tensor", None)),
             use_bias=False,
@@ -47,7 +47,7 @@ class QWenMLP(nnx.Module):
         )
 
         self.c_proj = nnx.Linear(
-            intermediate_size//2,
+            intermediate_size,
             hidden_size,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(), ("data", "tensor")),
