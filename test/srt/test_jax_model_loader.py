@@ -97,7 +97,36 @@ class MockJAXModel:
             except:
                 pass
             
-            print(f"{prefix}{type(pytree).__name__}: shape={shape}, dtype={dtype}, size={size:,}, memory={memory_str}{stats_str}")
+            # Print tensor data preview
+            data_preview = ""
+            try:
+                if len(shape) >= 2 and shape[0] > 0 and shape[1] > 0:
+                    # For 2D+ tensors, show first 2 rows with head and tail 3 columns
+                    if shape[1] <= 6:
+                        # If total columns <= 6, show all
+                        preview_data = pytree[:2, :]
+                        data_preview = f"\n{prefix}  First 2 rows (all {shape[1]} cols):\n{prefix}    {preview_data}"
+                    else:
+                        # Show first 3 and last 3 columns
+                        head_cols = pytree[:2, :3]
+                        tail_cols = pytree[:2, -3:]
+                        data_preview = f"\n{prefix}  First 2 rows (head 3 + tail 3 cols):\n{prefix}    Head: {head_cols}\n{prefix}    Tail: {tail_cols}"
+                elif len(shape) == 1 and shape[0] > 0:
+                    # For 1D tensors, show head and tail 3 elements
+                    if shape[0] <= 6:
+                        preview_data = pytree[:]
+                        data_preview = f"\n{prefix}  All {shape[0]} elements:\n{prefix}    {preview_data}"
+                    else:
+                        head_elements = pytree[:3]
+                        tail_elements = pytree[-3:]
+                        data_preview = f"\n{prefix}  Head 3 + tail 3 elements:\n{prefix}    Head: {head_elements}\n{prefix}    Tail: {tail_elements}"
+                elif len(shape) == 0:
+                    # For scalar tensors
+                    data_preview = f"\n{prefix}  Value: {pytree}"
+            except Exception as e:
+                data_preview = f"\n{prefix}  Data preview error: {str(e)}"
+            
+            print(f"{prefix}{type(pytree).__name__}: shape={shape}, dtype={dtype}, size={size:,}, memory={memory_str}{stats_str}{data_preview}")
         elif hasattr(pytree, '__len__') and not isinstance(pytree, str):
             # Other sequence types
             print(f"{prefix}{type(pytree).__name__} (length={len(pytree)})")

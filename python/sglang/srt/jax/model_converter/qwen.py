@@ -36,7 +36,7 @@ MODEL_PARAMS_DICT = {
         "num_heads": 32,
         "num_kv_heads": 32,
         "dims_per_head": 128,
-        "vocab": 151851,
+        "vocab": 151936,
         "base_emb_dim": 4096,
         "base_mlp_dim": 22016,
     },
@@ -84,43 +84,6 @@ def _qwen_hf_to_jax_mapping(layer_idx: int = -1) -> dict:
       f"transformer.h.{layer_idx}.mlp.c_proj.weight": f"layers.{layer_idx}.feed_forward.c_proj.weight",
   }
 
-def permute_to_match_maxtext_rope(arr):
-  """
-  Permutes the Qwen model's rotary position embedding weights to match MaxText's RoPE implementation.
-  
-  Qwen uses a different RoPE format where frequencies are concatenated as (freqs, freqs),
-  while MaxText expects an interleaved format. This function converts from Qwen's format
-  to MaxText's expected format.
-  
-  Qwen RoPE implementation:
-  - freqs = torch.outer(seq, inv_freq)  # [seq_len, dim//2]
-  - emb = torch.cat((freqs, freqs), dim=-1)  # [seq_len, dim] - concatenated format
-  
-  MaxText expects:
-  - Interleaved format where cos/sin values alternate
-
-  Args:
-    arr (np.ndarray): Qwen model's RoPE weight array to permute.
-
-  Returns:
-    np.ndarray: Permutated array compatible with MaxText's RoPE implementation.
-  """
-  assert arr.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
-  
-  # Qwen format: [cos_0, cos_1, ..., cos_n/2-1, sin_0, sin_1, ..., sin_n/2-1]
-  # Jax format: [cos_0, sin_0, cos_1, sin_1, ..., cos_n/2-1, sin_n/2-1]
-  
-  half_dim = arr.shape[-1] // 2
-  cos_part = arr[..., :half_dim]
-  sin_part = arr[..., half_dim:]
-  
-  result = np.empty_like(arr)
-  result[..., ::2] = cos_part
-  result[..., 1::2] = sin_part
-  
-  return result
-
-
 def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
@@ -134,10 +97,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     jax_weights (dict): Dictionary containing the converted weights.
   """
   base_num_decoder_layers = model_params["num_layers"]
-  base_num_query_heads = model_params["num_heads"]
-  head_dim = model_params["dims_per_head"]
-  base_num_kv_heads = model_params["num_kv_heads"]
-  vocab_size = model_params["vocab"]
 
   converter_logging.log(f"Loading the base model from {base_model_path}")
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
@@ -179,17 +138,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   # logits dense #################################################
   converter_logging.log("Processing logits dense")
   
-  converter_logging.log(f"Using original vocab_size: {vocab_size}")
-
   lm_head_weight = chkpt_vars["lm_head.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
   
-  if lm_head_weight.shape[0] >= vocab_size:
-    processed_weight = lm_head_weight[:vocab_size, :]
-  else:
-    processed_weight = np.zeros((vocab_size, lm_head_weight.shape[1]), dtype=lm_head_weight.dtype)
-    processed_weight[:lm_head_weight.shape[0], :] = lm_head_weight
-  
-  jax_weights["lm_head"]["embedding"] = processed_weight
+  jax_weights["lm_head"]["embedding"] = lm_head_weight
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -197,7 +148,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   converter_logging.log("Processing token embeddings")
 
   jax_weights["transformer"]["embed_tokens"]["embedding"] = (
-      chkpt_vars["model.embed_tokens.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)[:vocab_size, :]
+      chkpt_vars["model.embed_tokens.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -223,26 +174,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     wqkv = chkpt_vars[f"layers.{layer_idx}.attention.wqkv.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     bqkv = chkpt_vars[f"layers.{layer_idx}.attention.wqkv.bias"].to(torch.float32).numpy().astype(CAST_DTYPE)
-    
-    if model_size.startswith("qwen"):
-      converter_logging.log(f"Applying Qwen RoPE permutation for layer {layer_idx}")
-      q_dim = base_num_query_heads * head_dim
-      k_dim = base_num_kv_heads * head_dim
-      v_dim = base_num_kv_heads * head_dim
-      
-      wq = wqkv[:, :q_dim].reshape([base_num_query_heads * head_dim, base_num_query_heads, head_dim])
-      wk = wqkv[:, q_dim:q_dim + k_dim].reshape([base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-      wv = wqkv[:, q_dim + k_dim:q_dim + k_dim + v_dim].reshape([base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-      
-      wq = permute_to_match_maxtext_rope(wq)
-      wk = permute_to_match_maxtext_rope(wk)
-      
-      wqkv = np.concatenate([
-          wq.reshape([base_num_query_heads * head_dim, q_dim]),
-          wk.reshape([base_num_query_heads * head_dim, k_dim]),
-          wv.reshape([base_num_query_heads * head_dim, v_dim])
-      ], axis=1)
-    
     w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     
     jax_weights["transformer"]["h"][layer_idx]["attn"]["c_attn"]["weight"] = wqkv
@@ -307,6 +238,180 @@ def save_flax_msgpack(maxtext_model_path: str, jax_weights: dict):
     f.write(serialized_weights)
   
   converter_logging.log(f"Saved Flax msgpack to {msgpack_path}")
+
+def load_flax_msgpack(msgpack_path: str) -> dict:
+  converter_logging.log(f"Loading weights from {msgpack_path}")
+  with open(msgpack_path, "rb") as f:
+    serialized_weights = f.read()
+  
+  jax_weights = serialization.from_bytes(None, serialized_weights)
+  converter_logging.log(f"Successfully loaded weights from {msgpack_path}")
+  return jax_weights
+
+def load_pytorch_weights(base_model_path: str) -> dict:
+  converter_logging.log(f"Loading original PyTorch weights from {base_model_path}")
+  ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
+  pytorch_weights = {}
+  
+  for i, ckpt_path in enumerate(ckpt_paths):
+    converter_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+      for key in f.keys():
+        pytorch_weights[key] = f.get_tensor(key).to(torch.float32).numpy()
+  
+  converter_logging.log(f"Successfully loaded {len(pytorch_weights)} PyTorch weights")
+  return pytorch_weights
+
+def compare_weights(original_weights: dict, converted_weights: dict, tolerance: float = 1e-5) -> bool:
+  converter_logging.log("Starting PyTorch vs JAX weight comparison...")
+  
+  def compare_arrays(arr1, arr2, path: str, tolerance: float) -> bool:
+    if arr1.shape != arr2.shape:
+      converter_logging.log(f"❌ Shape mismatch at {path}: {arr1.shape} vs {arr2.shape}")
+      return False
+    
+    if hasattr(arr1, 'device'):
+      arr1 = np.array(arr1)
+    if hasattr(arr2, 'device'):
+      arr2 = np.array(arr2)
+    
+    if arr1.dtype != arr2.dtype:
+      if arr1.dtype == np.float32 and arr2.dtype == ml_dtypes.bfloat16:
+        arr2 = arr2.astype(np.float32)
+        converter_logging.log(f"Converting {path} from bfloat16 to float32 for comparison")
+      elif arr1.dtype == ml_dtypes.bfloat16 and arr2.dtype == np.float32:
+        arr1 = arr1.astype(np.float32)
+        converter_logging.log(f"Converting {path} from bfloat16 to float32 for comparison")
+      else:
+        converter_logging.log(f"❌ Dtype mismatch at {path}: {arr1.dtype} vs {arr2.dtype}")
+        return False
+    
+    max_diff = np.max(np.abs(arr1 - arr2))
+    if hasattr(max_diff, 'item'):
+      max_diff = max_diff.item()
+    
+    if max_diff > tolerance:
+      converter_logging.log(f"❌ Value mismatch at {path}: max difference = {max_diff} (tolerance = {tolerance})")
+      return False
+    
+    converter_logging.log(f"✓ {path}: shapes {arr1.shape}, max_diff = {max_diff:.2e}")
+    return True
+  
+  def get_jax_weight_by_pytorch_key(pytorch_key: str, jax_weights: dict):
+    layer = 0
+    if "transformer.h." in pytorch_key:
+      parts = pytorch_key.split(".")
+      try:
+        layer = int(parts[2])  # transformer.h.{layer_idx}.*
+      except (IndexError, ValueError):
+        converter_logging.log(f"Failed to extract layer index from {pytorch_key}")
+        return None
+    
+    try:
+      mapping = _qwen_hf_to_jax_mapping(layer)
+      if pytorch_key not in mapping:
+        converter_logging.log(f"PyTorch key {pytorch_key} not found in mapping for layer {layer}")
+        return None
+        
+      jax_key = mapping[pytorch_key]
+      converter_logging.log(f"Mapping {pytorch_key} -> {jax_key}")
+      
+      if jax_key == "model.embed_tokens.weight":
+        return jax_weights.get("transformer", {}).get("embed_tokens", {}).get("embedding")
+      elif jax_key == "model.norm.weight":
+        return jax_weights.get("transformer", {}).get("ln_f", {}).get("weight")
+      elif jax_key == "lm_head.weight":
+        return jax_weights.get("lm_head", {}).get("embedding")
+      elif jax_key.startswith(f"layers.{layer}."):
+        h_dict = jax_weights.get("transformer", {}).get("h", {})
+        layer_str = str(layer)
+        if layer_str not in h_dict:
+          converter_logging.log(f"Layer {layer_str} not found in JAX weights. Available layers: {list(h_dict.keys())}")
+          return None
+        layer_weights = h_dict[layer_str]
+          
+        if "attention_norm.weight" in jax_key:
+          return layer_weights.get("ln_1", {}).get("weight")
+        elif "ffn_norm.weight" in jax_key:
+          return layer_weights.get("ln_2", {}).get("weight")
+        elif "attention.wqkv.weight" in jax_key:
+          jax_weight = layer_weights.get("attn", {}).get("c_attn", {}).get("weight")
+          if jax_weight is not None:
+            converter_logging.log(f"Applying inverse RoPE permutation and transpose for layer {layer} c_attn weight comparison")
+            
+            return jax_weight.transpose()
+          return jax_weight
+        elif "attention.wqkv.bias" in jax_key:
+          return layer_weights.get("attn", {}).get("c_attn", {}).get("bias")
+        elif "attention.wo.weight" in jax_key:
+          jax_weight = layer_weights.get("attn", {}).get("c_proj", {}).get("weight")
+          if jax_weight is not None:
+            converter_logging.log(f"Applying transpose for layer {layer} c_proj weight comparison")
+            return jax_weight.transpose()
+          return jax_weight
+        elif "feed_forward.w1.weight" in jax_key:
+          jax_weight = layer_weights.get("mlp", {}).get("w1", {}).get("kernel")
+          if jax_weight is not None:
+            converter_logging.log(f"Applying transpose for layer {layer} w1 weight comparison")
+            return jax_weight.transpose()
+          return jax_weight
+        elif "feed_forward.w2.weight" in jax_key:
+          jax_weight = layer_weights.get("mlp", {}).get("w2", {}).get("kernel")
+          if jax_weight is not None:
+            converter_logging.log(f"Applying transpose for layer {layer} w2 weight comparison")
+            return jax_weight.transpose()
+          return jax_weight
+        elif "feed_forward.c_proj.weight" in jax_key:
+          jax_weight = layer_weights.get("mlp", {}).get("c_proj", {}).get("kernel")
+          if jax_weight is not None:
+            converter_logging.log(f"Applying transpose for layer {layer} c_proj weight comparison")
+            return jax_weight.transpose()
+          return jax_weight
+      
+      converter_logging.log(f"No mapping found for JAX key: {jax_key}")
+      return None
+    except Exception as e:
+      converter_logging.log(f"Error mapping {pytorch_key}: {str(e)}")
+      return None
+  
+  matched_count = 0
+  total_count = len(original_weights)
+  
+  for pytorch_key, pytorch_weight in original_weights.items():
+    jax_weight = get_jax_weight_by_pytorch_key(pytorch_key, converted_weights)
+    
+    if jax_weight is None:
+      converter_logging.log(f"❌ No corresponding JAX weight found for PyTorch key: {pytorch_key}")
+      continue
+    
+    if compare_arrays(pytorch_weight, jax_weight, pytorch_key, tolerance):
+      matched_count += 1
+  
+  converter_logging.log(f"Matched {matched_count}/{total_count} weights")
+  
+  if matched_count == total_count:
+    converter_logging.log("✅ Weight comparison PASSED: All weights match within tolerance")
+    return True
+  else:
+    converter_logging.log("❌ Weight comparison FAILED: Some weights could not be matched")
+    return False
+
+def verify_conversion(base_model_path: str, model_size: str, maxtext_model_path: str, huggingface_ckpt: bool = True, tolerance: float = 1e-2) -> bool:
+  converter_logging.log("Starting conversion verification...")
+  
+  converter_logging.log("Loading original PyTorch weights...")
+  original_weights = load_pytorch_weights(base_model_path)
+  
+  msgpack_path = os.path.join(maxtext_model_path, "flax_model.msgpack")
+  if not os.path.exists(msgpack_path):
+    converter_logging.log(f"❌ Msgpack file not found: {msgpack_path}")
+    return False
+  
+  converter_logging.log("Loading converted weights from msgpack...")
+  converted_weights = load_flax_msgpack(msgpack_path)
+  
+  return compare_weights(original_weights, converted_weights, tolerance)
 
 def save_weights_to_checkpoint(
     maxtext_model_path: str, jax_weights: dict, device_count: int, use_ocdbt: bool, use_zarr3: bool
@@ -411,6 +516,7 @@ if __name__ == "__main__":
   parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=False)
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
+  parser.add_argument("--check", action="store_true", help="Verify conversion by comparing original and converted weights")
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
@@ -419,11 +525,26 @@ if __name__ == "__main__":
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
   base_weights_path = args.maxtext_model_path
 
-  save_weights_to_checkpoint(
-      args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
-      SIMULATED_CPU_DEVICES_COUNT,
-      args.use_ocdbt,
-      args.use_zarr3,
-  )
-  converter_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
+  if args.check:
+    converter_logging.log("Running in verification mode...")
+    success = verify_conversion(
+        args.base_model_path,
+        args.model_size,
+        args.maxtext_model_path,
+        args.huggingface_checkpoint
+    )
+    if success:
+      converter_logging.log("✅ Conversion verification PASSED")
+      exit(0)
+    else:
+      converter_logging.log("❌ Conversion verification FAILED")
+      exit(1)
+  else:
+    save_weights_to_checkpoint(
+        args.maxtext_model_path,
+        convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
+        SIMULATED_CPU_DEVICES_COUNT,
+        args.use_ocdbt,
+        args.use_zarr3,
+    )
+    converter_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
