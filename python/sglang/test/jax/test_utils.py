@@ -4,6 +4,7 @@ from typing import Sequence, Tuple
 import jax
 import numpy as np
 from jax._src import mesh_utils
+import torch
 
 mesh_axes = [
     "data",  # data parallelism
@@ -22,9 +23,11 @@ def create_device_mesh(ici_parallelism: Sequence[int],
     if devices is None:
         devices = jax.devices()
 
-    ici_parallelism = fill_unspecified_parallelism(ici_parallelism, len(devices))
+    ici_parallelism = fill_unspecified_parallelism(
+        ici_parallelism, len(devices))
     if num_slices > 1:
-        dcn_parallelism = fill_unspecified_parallelism(dcn_parallelism, num_slices)
+        dcn_parallelism = fill_unspecified_parallelism(
+            dcn_parallelism, num_slices)
         devices_array = mesh_utils.create_hybrid_device_mesh(
             ici_parallelism,
             dcn_parallelism,
@@ -52,3 +55,8 @@ def fill_unspecified_parallelism(parallelism: Sequence[int], num_devices: int) -
     assert determined_val >= 1 and determined_val.is_integer, "Unspecified value unable to be determined with the given parallelism values"
     parallelism[unspecified_axis_idx] = int(determined_val)
     return parallelism
+
+
+def convert_jax_array_to_torch_tensor(jax_array: jax.Array) -> torch.Tensor:
+    numpy_array = np.array(jax_array)
+    return torch.from_numpy(numpy_array)
