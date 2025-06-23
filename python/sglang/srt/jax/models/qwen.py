@@ -27,7 +27,7 @@ class QWenMLP(nnx.Module):
 
         self.w1 = nnx.Linear(
             hidden_size,
-            intermediate_size//2,
+            intermediate_size,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(), (None, "tensor")),
             use_bias=False,
@@ -36,7 +36,7 @@ class QWenMLP(nnx.Module):
 
         self.w2 = nnx.Linear(
             hidden_size,
-            intermediate_size//2,
+            intermediate_size,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(), ("tensor", None)),
             use_bias=False,
@@ -44,7 +44,7 @@ class QWenMLP(nnx.Module):
         )
 
         self.c_proj = nnx.Linear(
-            intermediate_size//2,
+            intermediate_size,
             hidden_size,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(), ("data", "tensor")),
@@ -55,9 +55,9 @@ class QWenMLP(nnx.Module):
         self.act_func = jax.nn.silu
 
     def __call__(self, hidden_states: jnp.ndarray):
-        a1 = self.w1(hidden_states)
-        a2 = self.w2(hidden_states)
-        intermediate_parallel = a1 * self.act_func(a2)
+        gate = self.w1(hidden_states)
+        up = self.w2(hidden_states)
+        intermediate_parallel = up * self.act_func(gate)
         intermediate_parallel = jax.lax.with_sharding_constraint(
             intermediate_parallel, PartitionSpec('data', 'tensor'))
         output = self.c_proj(intermediate_parallel)
