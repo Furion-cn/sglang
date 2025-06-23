@@ -14,6 +14,7 @@ from sglang.srt.jax.layers.linear import LinearBase
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.jax.utils import flatten_pytree_with_paths, get_expected_param_paths, update_state_recursive
 
 
 class QWenMLP(nnx.Module):
@@ -209,10 +210,25 @@ class QWenLMHeadModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  rngs: nnx.Rngs = None):
+        self.config = config
         self.transformer = QWenModel(config, rngs)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(vocab_size, config.hidden_size, rngs=rngs)
         self.logits_processor = LogitsProcessor(vocab_size)
+    
+    def load_pytree_weights(self, pytree):        
+        flat_weights = flatten_pytree_with_paths(pytree)
+        model_state = nnx.state(self)
+        expected_paths = get_expected_param_paths(model_state)
+        missing_paths = expected_paths - set(flat_weights.keys())
+        if missing_paths:
+            raise ValueError(f"Missing weights for parameters: {sorted(missing_paths)}")
+        
+        update_state_recursive(model_state, flat_weights)
+
+        pspecs = nnx.get_partition_spec(model_state)
+        pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
+        nnx.update(self, pstate)
 
     def __call__(self,
                  input_ids: jax.Array,
@@ -223,3 +239,5 @@ class QWenLMHeadModel(nnx.Module):
         return self.logits_processor(
             hidden_states, self.lm_head
         )
+
+EntryClass = QWenLMHeadModel

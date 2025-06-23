@@ -6,6 +6,7 @@ import dataclasses
 import fnmatch
 import glob
 import json
+import jax
 import logging
 import math
 import os
@@ -21,6 +22,7 @@ from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from orbax.checkpoint._src.serialization.type_handlers import Pytree
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
@@ -49,6 +51,7 @@ from sglang.srt.model_loader.weight_utils import (
     get_quant_config,
     gguf_quant_weights_iterator,
     initialize_dummy_weights,
+    jax_weights_loader,
     np_cache_weights_iterator,
     pt_weights_iterator,
     safetensors_weights_iterator,
@@ -1421,12 +1424,150 @@ class RemoteModelLoader(BaseModelLoader):
         logger.info("Loaded weights from remote storage in %.2f seconds.", end - start)
         return model.eval()
 
+class JAXModelLoader(BaseModelLoader):
+    @dataclasses.dataclass
+    class JAXSource:
+        model_or_path: str
+        revision: Optional[str]
+
+        @classmethod
+        def init_new(cls, model_config: ModelConfig):
+            return cls(
+                model_config.model_path,
+                model_config.revision,
+            )
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.load_format != LoadFormat.JAX:
+            raise ValueError(
+                f"JAXModelLoader only supports JAX load format, "
+                f"got {load_config.load_format}"
+            )
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        source = self.JAXSource.init_new(model_config)
+        self._prepare_jax_weights(
+            source.model_or_path, 
+            source.revision
+        )
+
+    def load_model(
+        self,
+        *,
+        model_config: ModelConfig,
+        device_config: DeviceConfig,
+        mesh: jax.sharding.Mesh,
+    ) -> Any:
+        with mesh:
+            # Initialize JAX model
+            model = self._initialize_jax_model(model_config)
+            
+            # Load PyTree weights
+            pytree = self._get_jax_pytree(model_config)
+            
+            # Load weights into model
+            self._load_pytree_weights(model, pytree)
+        
+            return model
+
+    def _initialize_jax_model(self, model_config: ModelConfig) -> Any:
+        model_class, _ = get_model_architecture(model_config)
+        
+        # Check if this is a JAX model
+        if not hasattr(model_class, 'load_pytree_weights'):
+            raise ValueError(
+                f"Model class {model_class.__name__} does not support JAX PyTree loading. "
+                "Please ensure you're using a JAX-compatible model."
+            )
+        
+        from flax import nnx
+        
+        return model_class(config=model_config.hf_config, rngs=nnx.Rngs(0))
+
+    def _get_jax_pytree(self, model_config: ModelConfig) -> Pytree:
+        source = self.JAXSource.init_new(model_config)
+        _, hf_weights_files = self._prepare_jax_weights(
+            source.model_or_path, source.revision
+        )
+        
+        # Load PyTree directly using JAX weights loader
+        pytree = jax_weights_loader(hf_weights_files)
+        return pytree
+
+    def _load_pytree_weights(self, model: Any, pytree: Pytree) -> None:
+        if hasattr(model, 'load_pytree_weights'):
+            model.load_pytree_weights(pytree)
+        else:
+            raise NotImplementedError(
+                f"Model {type(model).__name__} does not implement load_pytree_weights method."
+            )
+
+    def _maybe_download_from_modelscope(
+        self, model: str, revision: Optional[str]
+    ) -> Optional[str]:
+        if get_bool_env_var("SGLANG_USE_MODELSCOPE"):
+            # download model from ModelScope hub,
+            # lazy import so that modelscope is not required for normal use.
+            from modelscope.hub.snapshot_download import snapshot_download
+
+            if not os.path.exists(model):
+                model_path = snapshot_download(
+                    model_id=model,
+                    cache_dir=self.load_config.download_dir,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    revision=revision,
+                    ignore_file_pattern=self.load_config.ignore_patterns,
+                )
+            else:
+                model_path = model
+            return model_path
+        return None
+
+    def _prepare_jax_weights(
+        self, model_name_or_path: str, revision: Optional[str]
+    ) -> Tuple[str, List[str]]:
+        model_path = self._maybe_download_from_modelscope(model_name_or_path, revision)
+        if model_path is not None:
+            model_name_or_path = model_path
+
+        is_local = os.path.isdir(model_name_or_path)
+        
+        if is_local:
+            hf_folder = model_name_or_path
+        else:
+            from huggingface_hub import snapshot_download
+            
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                cache_dir=self.load_config.download_dir,
+                tqdm_class=None,
+                revision=revision,
+                ignore_patterns=self.load_config.ignore_patterns,
+            )
+
+        hf_weights_files = []
+        for file in os.listdir(hf_folder):
+            if file.endswith('.msgpack'):
+                hf_weights_files.append(os.path.join(hf_folder, file))
+        
+        if len(hf_weights_files) == 0:
+            raise RuntimeError(
+                f"Cannot find any JAX model weights (.msgpack files) in `{model_name_or_path}`"
+            )
+
+        return hf_folder, hf_weights_files
+
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)
+
+    if load_config.load_format == LoadFormat.JAX:
+        return JAXModelLoader(load_config)
 
     if load_config.load_format == LoadFormat.DUMMY:
         return DummyModelLoader(load_config)

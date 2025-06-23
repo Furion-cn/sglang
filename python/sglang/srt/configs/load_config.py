@@ -26,7 +26,7 @@ class LoadFormat(str, enum.Enum):
 
 
 @dataclass
-class LoadConfig:
+class  LoadConfig:
     """
     download_dir: Directory to download and load the weights, default to the
         default cache directory of huggingface.
