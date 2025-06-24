@@ -7,12 +7,7 @@ from transformers import AutoTokenizer, PretrainedConfig
 
 from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.layers.sampler import Sampler
-<<<<<<< HEAD
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.jax.models.qwen import QWenLMHeadModel
-=======
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
->>>>>>> 4f2cc3796 (debug tracer)
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
 

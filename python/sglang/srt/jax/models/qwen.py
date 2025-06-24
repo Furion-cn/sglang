@@ -2,8 +2,10 @@ from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import torch
+import torch.nn.functional as F
 from flax import nnx
-from jax import numpy as jnp
 from jax.sharding import PartitionSpec
 from transformers import PretrainedConfig
 
@@ -79,10 +81,14 @@ class QWenAttention(nnx.Module):
                  rope_theta: float = 10000,
                  rope_scaling: Optional[Dict[str, Any]] = None,
                  rngs: nnx.Rngs = None):
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
         head_size = hidden_size // num_heads
+        self.scaling = head_size**-0.5
+
         self.c_attn = LinearBase(
             input_size=hidden_size,
-            output_size=(num_heads + 2 * num_heads) * head_size,
+            output_size=3 * hidden_size,
             use_bias=True,
             kernel_axes=(None, "tensor"),
             rngs=rngs,
@@ -94,6 +100,8 @@ class QWenAttention(nnx.Module):
             kernel_axes=("tensor", None),
             rngs=rngs,
         )
+
+        # Use torch version of RotaryEmbedding directly
         self.rotary_emb = RotaryEmbedding(
             head_size=head_size,
             rotary_dim=head_size,
@@ -102,9 +110,51 @@ class QWenAttention(nnx.Module):
             is_neox_style=False,
             dtype=jnp.bfloat16,
         )
+
         self.attn = Attention(
+            num_heads=num_heads,
             scale=head_size**-0.5,
+            rngs=rngs,
         )
+
+    def _forward_torch_attention(self, q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
+        """Forward attention using PyTorch scaled_dot_product_attention for simplified bsz=1 case."""
+        # Convert to PyTorch tensors (simplified for bsz=1)
+        q_pt = torch.from_numpy(np.asarray(q.astype(jnp.float32)))
+        k_pt = torch.from_numpy(np.asarray(k.astype(jnp.float32)))
+        v_pt = torch.from_numpy(np.asarray(v.astype(jnp.float32)))
+
+        # Since bsz=1, we have a single sequence with shape [seq_len, total_dim]
+        seq_len = q_pt.shape[0]
+        total_dim = q_pt.shape[-1]
+        head_dim = total_dim // self.num_heads
+
+        # Reshape to [seq_len, num_heads, head_dim] for attention
+        q_reshaped = q_pt.view(seq_len, self.num_heads, head_dim)
+        k_reshaped = k_pt.view(seq_len, self.num_heads, head_dim)
+        v_reshaped = v_pt.view(seq_len, self.num_heads, head_dim)
+
+        # Transpose to [1, num_heads, seq_len, head_dim] for scaled_dot_product_attention
+        q_attn = q_reshaped.transpose(0, 1).unsqueeze(
+            0)  # [1, num_heads, seq_len, head_dim]
+        k_attn = k_reshaped.transpose(0, 1).unsqueeze(
+            0)  # [1, num_heads, seq_len, head_dim]
+        v_attn = v_reshaped.transpose(0, 1).unsqueeze(
+            0)  # [1, num_heads, seq_len, head_dim]
+
+        # Apply attention with causal masking
+        attn_out = F.scaled_dot_product_attention(
+            q_attn, k_attn, v_attn,
+            scale=self.scaling if hasattr(self, 'scaling') else head_dim**-0.5,
+            is_causal=True
+        )
+
+        # Remove batch dimension and transpose back to [seq_len, num_heads, head_dim], then reshape to [seq_len, total_dim]
+        attn_output_pt = attn_out.squeeze(0).transpose(
+            0, 1).contiguous().view(seq_len, total_dim)
+
+        # Convert back to JAX
+        return jnp.asarray(attn_output_pt.detach().numpy()).astype(jnp.bfloat16)
 
     def __call__(
         self,
@@ -116,6 +166,9 @@ class QWenAttention(nnx.Module):
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, is_causal=True)
+        # Apply attention using the new method
+        # attn_output = self._forward_torch_attention(q, k, v)
+
         output, _ = self.c_proj(attn_output)
         return output
 
