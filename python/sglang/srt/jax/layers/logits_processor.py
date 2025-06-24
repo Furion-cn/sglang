@@ -1,9 +1,11 @@
 import dataclasses
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from sglang.srt.jax.layers.embeddings import Embed
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 
 
 @dataclasses.dataclass
@@ -22,10 +24,20 @@ class LogitsProcessor(nnx.Module):
         self,
         hidden_states: jax.Array,
         lm_head: Embed,
+        forward_batch: ForwardBatch,
     ) -> LogitsProcessorOutput:
         # hidden_states = with_sharding_constraint(
         #    hidden_states, PartitionSpec('data', None))
-        # hidden_states.shape = [batch, sequence, hidden_size]
-        logits = lm_head.attend(hidden_states[:, -1:, :])
-        logits = logits[:, :, : self.vocab_size]
+        # hidden_states.shape = [total_tokens, hidden_size]
+
+        # Extract the last token of each sequence based on seq_lens
+        # forward_batch.extend_start_loc gives start position of each sequence
+        # forward_batch.seq_lens gives length of each sequence
+        last_token_indices = forward_batch.extend_start_loc + forward_batch.seq_lens - 1
+        # Shape: [batch_size, hidden_size]
+        last_hidden_states = hidden_states[last_token_indices]
+
+        logits = lm_head.attend(last_hidden_states)
+        logits = logits[:,
+                        :self.vocab_size] if logits.ndim > 1 else logits[:self.vocab_size]
         return LogitsProcessorOutput(next_token_logits=logits)

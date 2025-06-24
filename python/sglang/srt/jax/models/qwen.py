@@ -12,9 +12,12 @@ from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedd
 from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
-from sglang.srt.jax.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.jax.utils import flatten_pytree_with_paths, get_expected_param_paths, update_state_recursive
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.jax.utils import (
+    flatten_pytree_with_paths,
+    get_expected_param_paths,
+    update_state_recursive,
+)
 
 
 class QWenMLP(nnx.Module):
@@ -243,7 +246,7 @@ class QWenLMHeadModel(nnx.Module):
                  ):
         hidden_states = self.transformer(input_ids, positions, forward_batch)
         return self.logits_processor(
-            hidden_states, self.lm_head
+            hidden_states, self.lm_head, forward_batch
         )
 
 

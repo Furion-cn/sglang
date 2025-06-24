@@ -204,18 +204,16 @@ class RotaryEmbedding(nnx.Module):
           the rotary position embedding incorporated in it.
         """
         assert position is not None
-        batch_size = inputs.shape[0]
-        seq_len = inputs.shape[1]
-        hidden_size = inputs.shape[2]
+        total_tokens = inputs.shape[0]
+        hidden_size = inputs.shape[1]
         head_dim = hidden_size // self.num_heads
-        x = jnp.reshape(inputs, (batch_size, seq_len,
-                        self.num_heads, head_dim))
+        x = jnp.reshape(inputs, (total_tokens, self.num_heads, head_dim))
         if self.embedding_dims != head_dim:
             raise ValueError(
                 "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
             )
 
-        position = position[:, :, jnp.newaxis, jnp.newaxis]
+        position = position[:, jnp.newaxis, jnp.newaxis]
         sinusoid_inp = position / self.timescale
         sin = jnp.sin(sinusoid_inp).astype(x.dtype)
         cos = jnp.cos(sinusoid_inp).astype(x.dtype)
@@ -223,5 +221,5 @@ class RotaryEmbedding(nnx.Module):
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
         x_out = jnp.concatenate((first_part, second_part), axis=-1)
-        x_out = jnp.reshape(x_out, (batch_size, seq_len, hidden_size))
+        x_out = jnp.reshape(x_out, (total_tokens, hidden_size))
         return x_out
