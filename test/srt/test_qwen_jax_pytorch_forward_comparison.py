@@ -28,16 +28,12 @@ os.environ['VLLM_USE_MODELSCOPE'] = 'false'
 # Add the parent directory to the path to import sglang modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
 
-# Direct imports - fail if not available
-import jax
 import jax.numpy as jnp
-from flax import nnx
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel as JAXQWenLMHeadModel
 from sglang.srt.model_loader.loader import JAXModelLoader, get_model_loader
 from sglang.test.jax.test_utils import create_device_mesh
 
 import torch
-from sglang.srt.models.qwen import QWenLMHeadModel as PyTorchQWenLMHeadModel
 
 from transformers import AutoTokenizer, AutoConfig
 
@@ -50,7 +46,6 @@ from sglang.srt.distributed.parallel_state import (
     initialize_model_parallel,
 )
 
-# Import TorchNative attention backend for CPU
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 
 
@@ -58,6 +53,16 @@ class MockModelRunner:
     """Mock ModelRunner for TorchNativeAttnBackend"""
     def __init__(self):
         self.device = torch.device("cpu")
+
+
+class MockTokenToKVPool:
+    """Mock TokenToKVPool for testing purposes"""
+    def __init__(self):
+        pass
+    
+    def set_kv_buffer(self, layer, loc, cache_k, cache_v):
+        """Mock implementation of set_kv_buffer"""
+        pass
 
 
 class MockForwardBatch:
@@ -70,7 +75,7 @@ class MockForwardBatch:
         self.seq_len = 10
         self.max_seq_len = 512
         self.req_to_token_pool = {}
-        self.token_to_kv_pool = {}
+        self.token_to_kv_pool = MockTokenToKVPool()
         self.out_cache_loc = torch.zeros(1, 10, dtype=torch.int32)
         self.out_cache_cont_start = torch.zeros(1, dtype=torch.int32)
         self.out_cache_cont_end = torch.zeros(1, dtype=torch.int32)
@@ -95,7 +100,6 @@ class TestQWenForwardComparison(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures"""
-        # Initialize distributed environment for PyTorch models
         try:
             init_distributed_environment(
                 backend="gloo",  # Use gloo backend for CPU
