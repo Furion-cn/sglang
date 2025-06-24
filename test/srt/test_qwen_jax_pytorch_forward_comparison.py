@@ -21,6 +21,10 @@ import numpy as np
 from pathlib import Path
 from unittest.mock import patch
 
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['VLLM_USE_MODELSCOPE'] = 'false'
+
 # Add the parent directory to the path to import sglang modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
 
@@ -46,20 +50,37 @@ from sglang.srt.distributed.parallel_state import (
     initialize_model_parallel,
 )
 
+# Import TorchNative attention backend for CPU
+from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
+
 
 class MockForwardBatch:
-    """Mock ForwardBatch for PyTorch model testing"""
+    """Mock ForwardBatch for testing purposes with TorchNative backend"""
     
-    def __init__(self, batch_size=1, seq_len=10):
-        self.batch_size = batch_size
-        self.seq_len = seq_len
+    def __init__(self):
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        self.forward_mode = ForwardMode.DECODE
+        self.batch_size = 1
+        self.seq_len = 10
+        self.max_seq_len = 512
         self.req_to_token_pool = {}
         self.token_to_kv_pool = {}
-        self.req_pool_indices = torch.arange(batch_size)
-        self.seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32)
-        self.start_loc = torch.cumsum(torch.cat([torch.tensor([0]), self.seq_lens[:-1]]), dim=0)
-        self.max_seq_len = seq_len
-        self.total_num_tokens = batch_size * seq_len
+        self.out_cache_loc = torch.zeros(1, 10, dtype=torch.int32)
+        self.out_cache_cont_start = torch.zeros(1, dtype=torch.int32)
+        self.out_cache_cont_end = torch.zeros(1, dtype=torch.int32)
+        
+        # Use TorchNative backend for CPU compatibility
+        self.attn_backend = TorchNativeAttnBackend()
+        print("Using TorchNative attention backend for CPU")
+        
+        # Add required attributes for attention backends
+        self.extend_num_tokens = 0
+        self.prefix_lens = torch.zeros(1, dtype=torch.int32)
+        self.position_ids_offsets = torch.zeros(1, dtype=torch.int32)
+        self.seq_lens = torch.ones(1, dtype=torch.int32) * 10
+        self.start_loc = torch.zeros(1, dtype=torch.int32)
+        self.triton_max_seq_len = 512
+        self.triton_max_extend_len = 512
 
 
 class TestQWenForwardComparison(unittest.TestCase):
@@ -80,6 +101,13 @@ class TestQWenForwardComparison(unittest.TestCase):
         except AssertionError:
             # ignore this error: tensor model parallel group is already initialized
             pass
+        
+        # Force CPU mode for all operations
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+        os.environ['JAX_PLATFORMS'] = 'cpu'
+        
+        # Print attention backend availability
+        self._print_backend_info()
         
         # Configuration
         # Support both old MODEL_PATH and new separate paths
@@ -108,6 +136,13 @@ class TestQWenForwardComparison(unittest.TestCase):
         """Clean up after tests"""
         global_tracer.disable()
         global_tracer.clear_records()
+    
+    def _print_backend_info(self):
+        """Print information about attention backend"""
+        print("\n=== Attention Backend Information ===")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print("Using TorchNative backend for CPU compatibility")
+        print("====================================\n")
     
     def _get_positions_jax(self, x):
         """Get position embeddings for JAX model"""
@@ -203,8 +238,8 @@ class TestQWenForwardComparison(unittest.TestCase):
                 model_override_args="{}"
             )
             
-            # Create device config
-            device_config = DeviceConfig()
+            # Create device config for CPU
+            device_config = DeviceConfig(device="cpu")
             
             # Get PyTorch model loader
             pytorch_loader = get_model_loader(pytorch_load_config)
@@ -282,7 +317,9 @@ class TestQWenForwardComparison(unittest.TestCase):
         print("\n--- PyTorch Forward Pass ---")
         torch_input_ids = torch.tensor(input_ids, dtype=torch.long).reshape(1, -1)
         torch_positions = self._get_positions_pytorch(torch_input_ids)
-        mock_batch = MockForwardBatch(batch_size=1, seq_len=len(input_ids))
+        
+        # Create mock forward batch with TorchNative backend
+        mock_batch = MockForwardBatch()
         
         pytorch_output = pytorch_model(torch_input_ids, torch_positions, mock_batch)
         pytorch_records = global_tracer.get_records()
@@ -385,8 +422,8 @@ class TestQWenForwardComparison(unittest.TestCase):
         torch_input_ids = torch.tensor(input_ids, dtype=torch.long).reshape(1, -1)
         torch_positions = self._get_positions_pytorch(torch_input_ids)
         
-        # Create mock forward batch
-        mock_batch = MockForwardBatch(batch_size=1, seq_len=len(input_ids))
+        # Create mock forward batch with TorchNative backend
+        mock_batch = MockForwardBatch()
         
         with torch.no_grad():
             pytorch_logits = pytorch_model(torch_input_ids, torch_positions, mock_batch)
