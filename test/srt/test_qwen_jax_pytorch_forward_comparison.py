@@ -55,54 +55,75 @@ class MockModelRunner:
         self.device = torch.device("cpu")
 
 
-class MockTokenToKVPool:
-    """Mock TokenToKVPool for testing purposes with actual memory buffers"""
-    def __init__(self, num_layers=32, max_seq_len=512, num_heads=32, head_dim=128):
-        import torch
-        self.num_layers = num_layers
-        self.max_seq_len = max_seq_len
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        
-        # Initialize KV cache buffers for each layer
-        self.key_buffers = {}
-        self.value_buffers = {}
-        
-        for layer_id in range(num_layers):
-            # Shape: [batch_size, num_heads, max_seq_len, head_dim]
-            self.key_buffers[layer_id] = torch.zeros(1, num_heads, max_seq_len, head_dim)
-            self.value_buffers[layer_id] = torch.zeros(1, num_heads, max_seq_len, head_dim)
+class MockReqToTokenPool:
+    """Mock implementation of ReqToTokenPool for testing"""
     
-    def set_kv_buffer(self, layer, loc, cache_k, cache_v):
-        """Set KV buffer with actual storage"""
-        if hasattr(layer, 'layer_id'):
-            layer_id = layer.layer_id
+    def __init__(self):
+        self.size = 100
+        self.max_context_len = 512
+        self.req_to_token = torch.zeros(
+            (self.size, self.max_context_len), dtype=torch.int32
+        )
+        self.free_slots = list(range(self.size))
+    
+    def write(self, indices, values):
+        self.req_to_token[indices] = values
+    
+    def available_size(self):
+        return len(self.free_slots)
+    
+    def alloc(self, need_size: int):
+        if need_size > len(self.free_slots):
+            return None
+        select_index = self.free_slots[:need_size]
+        self.free_slots = self.free_slots[need_size:]
+        return select_index
+    
+    def free(self, free_index):
+        if isinstance(free_index, int):
+            self.free_slots.append(free_index)
         else:
-            # Fallback: assume layer is an integer or has some identifier
-            layer_id = getattr(layer, 'id', 0)
+            self.free_slots.extend(free_index)
+    
+    def clear(self):
+        self.free_slots = list(range(self.size))
+
+
+class MockTokenToKVPool:
+    """Mock implementation of TokenToKVPool for testing"""
+    
+    def __init__(self):
+        # Create actual memory buffers for more realistic testing
+        self.size = 1000
+        self.page_size = 16
+        self.num_layers = 32
+        self.num_heads = 32
+        self.head_dim = 128
         
-        if layer_id in self.key_buffers and cache_k is not None:
-            # Store the cache tensors (simplified - just copy the data)
-            seq_len = min(cache_k.shape[-2], self.max_seq_len)
-            self.key_buffers[layer_id][:, :, :seq_len, :] = cache_k[:, :, :seq_len, :]
-            
-        if layer_id in self.value_buffers and cache_v is not None:
-            seq_len = min(cache_v.shape[-2], self.max_seq_len)
-            self.value_buffers[layer_id][:, :, :seq_len, :] = cache_v[:, :, :seq_len, :]
+        # Initialize key and value buffers
+        self.key_buffer = torch.zeros(
+            (self.size, self.num_layers, self.page_size, self.num_heads, self.head_dim),
+            dtype=torch.float16
+        )
+        self.value_buffer = torch.zeros(
+            (self.size, self.num_layers, self.page_size, self.num_heads, self.head_dim),
+            dtype=torch.float16
+        )
+        
+        # Track free pages
+        self.free_pages = list(range(self.size))
     
-    def get_key_buffer(self, layer_id: int):
-        """Get key buffer for the specified layer"""
-        return self.key_buffers.get(layer_id, torch.empty(0))
+    def get_key_buffer(self, layer_id):
+        """Return the key buffer for a specific layer"""
+        return self.key_buffer[:, layer_id]
     
-    def get_value_buffer(self, layer_id: int):
-        """Get value buffer for the specified layer"""
-        return self.value_buffers.get(layer_id, torch.empty(0))
+    def get_value_buffer(self, layer_id):
+        """Return the value buffer for a specific layer"""
+        return self.value_buffer[:, layer_id]
     
-    def get_kv_buffer(self, layer_id: int):
-        """Get both key and value buffers for the specified layer"""
-        key_buffer = self.get_key_buffer(layer_id)
-        value_buffer = self.get_value_buffer(layer_id)
-        return key_buffer, value_buffer
+    def get_kv_buffer(self, layer_id):
+        """Return both key and value buffers for a specific layer"""
+        return self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
 
 
 class MockForwardBatch:
@@ -114,7 +135,7 @@ class MockForwardBatch:
         self.batch_size = 1
         self.seq_len = 10
         self.max_seq_len = 512
-        self.req_to_token_pool = {}
+        self.req_to_token_pool = MockReqToTokenPool()
         self.token_to_kv_pool = MockTokenToKVPool()
         self.out_cache_loc = torch.zeros(1, 10, dtype=torch.int32)
         self.out_cache_cont_start = torch.zeros(1, dtype=torch.int32)
