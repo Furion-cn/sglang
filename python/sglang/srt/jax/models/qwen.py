@@ -40,7 +40,7 @@ class QWenMLP(nnx.Module):
             hidden_size,
             intermediate_size,
             kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), ("tensor", None)),
+                nnx.initializers.lecun_normal(), (None, "tensor")),
             use_bias=False,
             dtype=dtype,
             rngs=rngs,
@@ -50,7 +50,7 @@ class QWenMLP(nnx.Module):
             intermediate_size,
             hidden_size,
             kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), ("data", "tensor")),
+                nnx.initializers.lecun_normal(), ("tensor", None)),
             use_bias=False,
             dtype=dtype,
             rngs=rngs
@@ -63,7 +63,7 @@ class QWenMLP(nnx.Module):
         a2 = self.w2(hidden_states)
         intermediate_parallel = a1 * self.act_func(a2)
         intermediate_parallel = jax.lax.with_sharding_constraint(
-            intermediate_parallel, PartitionSpec('data', 'tensor'))
+            intermediate_parallel, PartitionSpec(None, 'tensor'))
         output = self.c_proj(intermediate_parallel)
         return output
 
@@ -220,15 +220,16 @@ class QWenLMHeadModel(nnx.Module):
         self.lm_head = ParallelLMHead(
             vocab_size, config.hidden_size, rngs=rngs)
         self.logits_processor = LogitsProcessor(vocab_size)
-    
-    def load_pytree_weights(self, pytree):        
+
+    def load_pytree_weights(self, pytree):
         flat_weights = flatten_pytree_with_paths(pytree)
         model_state = nnx.state(self)
         expected_paths = get_expected_param_paths(model_state)
         missing_paths = expected_paths - set(flat_weights.keys())
         if missing_paths:
-            raise ValueError(f"Missing weights for parameters: {sorted(missing_paths)}")
-        
+            raise ValueError(
+                f"Missing weights for parameters: {sorted(missing_paths)}")
+
         update_state_recursive(model_state, flat_weights)
 
         pspecs = nnx.get_partition_spec(model_state)
@@ -244,5 +245,6 @@ class QWenLMHeadModel(nnx.Module):
         return self.logits_processor(
             hidden_states, self.lm_head
         )
+
 
 EntryClass = QWenLMHeadModel
