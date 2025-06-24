@@ -39,33 +39,7 @@ def _get_positions(x):
     ]).reshape(x.shape[0], x.shape[1])
 
 
-@nnx.jit
-def inference(x):
-    sampler = Sampler(rngs=nnx.Rngs(0))
-    for i in range(5):
-        positions = _get_positions(x)
-        y = model(x, positions, None)
-        # y.next_token_logits.block_until_ready()
-        next_token_ids = sampler(
-            y, sampling_info=SamplingBatchInfo(
-                temperatures=jnp.full((1, 1), 0.6),
-                top_ps=jnp.full((1, 1), 0.9),
-                top_ks=jnp.ones((1, 1)),
-                min_ps=jnp.full((1, 1), 0.0),
-                vocab_size=10000,
-            ))
-        x = jnp.concatenate(
-            [x, next_token_ids], axis=-1)
-
-        # 解码当前生成的 token
-        # current_token_id = int(next_token_ids[0, 0])
-        # decoded_token = tokenizer.decode([current_token_id])
-        # print(
-        #     f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
-    return x
-
-
-with jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", create_perfetto_link=True), mesh:
+with mesh:
     model = _setup_model()
     tokenizer = AutoTokenizer.from_pretrained(
         "Qwen/Qwen-7B", trust_remote_code=True)
@@ -76,14 +50,32 @@ with jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", 
     print(f"输入文本: {input_text}")
     print(f"输入 tokens: {x}")
 
-    x = inference(x)
+    sampler = Sampler(rngs=nnx.Rngs(0))
+    with jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", create_perfetto_link=True):
+        for i in range(5):
+            positions = _get_positions(x)
+            y = model(x, positions, None)
+            # y.next_token_logits.block_until_ready()
+            next_token_ids = sampler(
+                y, sampling_info=SamplingBatchInfo(
+                    temperatures=jnp.full((1, 1), 0.6),
+                    top_ps=jnp.full((1, 1), 0.9),
+                    top_ks=jnp.ones((1, 1)),
+                    min_ps=jnp.full((1, 1), 0.0),
+                    vocab_size=10000,
+                ))
+            x = jnp.concatenate(
+                [x, next_token_ids], axis=-1)
+
+            # 解码当前生成的 token
+            current_token_id = int(next_token_ids[0, 0])
+            decoded_token = tokenizer.decode([current_token_id])
+            print(
+                f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
+        x.block_until_ready()
 
     # 解码完整的生成序列
     full_sequence = [int(token) for token in x[0]]
     decoded_full = tokenizer.decode(full_sequence)
     print(f"\n完整生成序列: {full_sequence}")
     print(f"完整解码文本: '{decoded_full}'")
-
-    import time
-
-    time.sleep(200)
