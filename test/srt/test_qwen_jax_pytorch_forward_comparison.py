@@ -133,33 +133,124 @@ class MockTokenToKVPool:
 
 
 class MockForwardBatch:
-    """Mock ForwardBatch for testing purposes with TorchNative backend"""
+    """Mock implementation of ForwardBatch for testing"""
     
     def __init__(self):
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        
+        # Basic attributes
         self.forward_mode = ForwardMode.DECODE
         self.batch_size = 1
         self.seq_len = 10
         self.max_seq_len = 512
+        
+        # Memory pools
         self.req_to_token_pool = MockReqToTokenPool()
         self.token_to_kv_pool = MockTokenToKVPool()
-        self.out_cache_loc = torch.zeros(1, 10, dtype=torch.int32)
-        self.out_cache_cont_start = torch.zeros(1, dtype=torch.int32)
-        self.out_cache_cont_end = torch.zeros(1, dtype=torch.int32)
+        
+        # Required tensor attributes
+        self.input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], dtype=torch.int64)
+        self.req_pool_indices = torch.zeros(1, dtype=torch.int32)
+        self.seq_lens = torch.ones(1, dtype=torch.int32) * 10
+        self.out_cache_loc = torch.zeros(10, dtype=torch.int32)
+        self.positions = torch.arange(10, dtype=torch.int64)
+        
+        # Sequence length info
+        self.seq_lens_sum = 10
+        self.seq_lens_cpu = None
+        
+        # For extend mode
+        self.extend_num_tokens = 0
+        self.extend_seq_lens = torch.ones(1, dtype=torch.int32) * 10
+        self.extend_prefix_lens = torch.zeros(1, dtype=torch.int32)
+        self.extend_start_loc = torch.zeros(1, dtype=torch.int32)
+        self.extend_prefix_lens_cpu = [0]
+        self.extend_seq_lens_cpu = [10]
+        self.extend_logprob_start_lens_cpu = None
+        self.extend_input_logprob_token_ids_gpu = None
+        
+        # For logprob
+        self.return_logprob = False
+        self.top_logprobs_nums = None
+        self.token_ids_logprobs = None
+        
+        # Temperature and sampling
+        self.temp_scaled_logprobs = False
+        self.temperature = None
+        self.top_p_normalized_logprobs = False
+        self.top_p = None
+        
+        # Multimodal
+        self.mm_inputs = None
+        
+        # Encoder-decoder
+        self.encoder_cached = None
+        self.encoder_lens = None
+        self.encoder_lens_cpu = None
+        self.encoder_out_cache_loc = None
+        
+        # LoRA
+        self.lora_paths = None
+        
+        # Input embeddings
+        self.input_embeds = None
+        
+        # Sampling info
+        self.sampling_info = None
         
         # Use TorchNative backend for CPU compatibility
         mock_model_runner = MockModelRunner()
         self.attn_backend = TorchNativeAttnBackend(mock_model_runner)
         print("Using TorchNative attention backend for CPU")
         
-        # Add required attributes for attention backends
-        self.extend_num_tokens = 0
-        self.prefix_lens = torch.zeros(1, dtype=torch.int32)
-        self.position_ids_offsets = torch.zeros(1, dtype=torch.int32)
-        self.seq_lens = torch.ones(1, dtype=torch.int32) * 10
-        self.start_loc = torch.zeros(1, dtype=torch.int32)
-        self.triton_max_seq_len = 512
-        self.triton_max_extend_len = 512
+        # DP attention
+        self.global_num_tokens_cpu = None
+        self.global_num_tokens_gpu = None
+        self.global_num_tokens_for_logprob_cpu = None
+        self.global_num_tokens_for_logprob_gpu = None
+        self.dp_local_start_pos = None
+        self.dp_local_num_tokens = None
+        self.gathered_buffer = None
+        self.can_run_dp_cuda_graph = False
+        self.global_forward_mode = None
+        
+        # Speculative decoding
+        self.spec_info = None
+        self.spec_algorithm = None
+        self.capture_hidden_mode = None
+        
+        # Padding
+        self.padded_static_len = -1
+        self.num_token_non_padded = None
+        
+        # Qwen2-VL
+        self.mrope_positions = None
+        
+        # Two-batch overlap
+        self.tbo_split_seq_index = None
+        self.tbo_parent_token_range = None
+        self.tbo_children = None
+        self.can_run_tbo = False
+        
+        # MLA chunked prefix cache
+        self.attn_attend_prefix_cache = None
+        self.num_prefix_chunks = None
+        self.prefix_chunk_idx = None
+        self.prefix_chunk_len = None
+        self.prefix_chunk_starts = None
+        self.prefix_chunk_seq_lens = None
+        self.prefix_chunk_cu_seq_lens = None
+        self.prefix_chunk_max_seq_lens = None
+        self.prefix_chunk_num_tokens = None
+        self.prefix_chunk_kv_indices = None
+    
+    def contains_mm_inputs(self):
+        """Check if batch contains multimodal inputs"""
+        return self.mm_inputs is not None and any(mm is not None for mm in self.mm_inputs)
+    
+    def contains_image_inputs(self):
+        """Check if batch contains image inputs"""
+        return False  # Mock implementation
 
 
 class TestQWenForwardComparison(unittest.TestCase):
