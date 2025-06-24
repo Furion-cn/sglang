@@ -136,6 +136,7 @@ class Session:
             return_logprob=req.return_logprob,
             top_logprobs_num=req.top_logprobs_num,
             token_ids_logprob=req.token_ids_logprob,
+            enable_debug_trace=req.enable_debug_trace,
         )
         if last_req is not None:
             new_req.multimodal_inputs = last_req.mm_inputs

@@ -153,6 +153,7 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+from sglang.debug_tracer import global_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -999,6 +1000,7 @@ class Scheduler(
                 bootstrap_port=recv_req.bootstrap_port,
                 bootstrap_room=recv_req.bootstrap_room,
                 data_parallel_rank=recv_req.data_parallel_rank,
+                enable_debug_trace=recv_req.enable_debug_trace,
             )
             req.tokenizer = self.tokenizer
 
@@ -1602,6 +1604,14 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
 
+        # Check if any request has debug trace enabled and start session if needed
+        debug_enabled = any(getattr(req, 'enable_debug_trace', False) for req in batch.reqs)
+        if debug_enabled and not global_tracer.is_session_active():
+            global_tracer.start_session()
+            if hasattr(self, 'tokenizer') and self.tokenizer:
+                global_tracer.set_tokenizer(self.tokenizer)
+            print(f"Debug trace session started in scheduler process (forward_ct={self.forward_ct})")
+
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
         if self.forward_sleep_time is not None:
@@ -1676,6 +1686,17 @@ class Scheduler(
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
         launch_done: Optional[threading.Event] = None,
     ):
+        # Handle None batch case first
+        if batch is None:
+            if self.enable_overlap and launch_done is not None:
+                self.tp_worker.resolve_last_batch_result(launch_done)
+            return
+        
+        # Check if any finished requests had debug trace enabled before processing
+        finished_debug_reqs = []
+        if hasattr(batch, 'reqs') and batch.reqs is not None:
+            finished_debug_reqs = [req for req in batch.reqs if hasattr(req, 'enable_debug_trace') and req.enable_debug_trace and req.finished()]
+        
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
@@ -1684,8 +1705,12 @@ class Scheduler(
             if self.enable_overlap:
                 self.tp_worker.resolve_last_batch_result(launch_done)
                 self.set_next_batch_sampling_info_done(batch)
-        elif batch.forward_mode.is_dummy_first():
-            self.set_next_batch_sampling_info_done(batch)
+            return
+
+        # End debug session if any finished requests had debug trace enabled
+        if finished_debug_reqs and global_tracer.is_session_active():
+            print(f"Debug trace session ending due to {len(finished_debug_reqs)} finished requests")
+            global_tracer.end_session()
 
         if self.return_health_check_ct:
             # Return some signal for the health check.

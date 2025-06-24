@@ -109,6 +109,9 @@ class GenerateReqInput:
     # For data parallel rank routing
     data_parallel_rank: Optional[int] = None
 
+    # For debug tracing - internal use only
+    enable_debug_trace: bool = False
+
     def contains_mm_input(self) -> bool:
         return has_valid_data(self.image_data) or has_valid_data(self.audio_data)
 
@@ -427,6 +430,9 @@ class GenerateReqInput:
             data_parallel_rank=(
                 self.data_parallel_rank if self.data_parallel_rank is not None else None
             ),
+            enable_debug_trace=(
+                self.enable_debug_trace
+            ),
         )
 
 
@@ -476,6 +482,9 @@ class TokenizedGenerateReqInput:
 
     # For data parallel rank routing
     data_parallel_rank: Optional[int] = None
+
+    # For debug tracing - internal use only
+    enable_debug_trace: bool = False
 
 
 @dataclass

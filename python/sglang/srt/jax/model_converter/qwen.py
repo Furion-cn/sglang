@@ -117,7 +117,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # initialize the data structure for storing jax_weights to match QWenLMHeadModel structure
+  # initialize the data structure for storing jax_weights to match QWenLMHeadJaxModel structure
   jax_weights = {
       "transformer": {
           "embed_tokens": {"embedding": None},

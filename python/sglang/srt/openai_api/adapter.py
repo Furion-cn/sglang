@@ -81,6 +81,7 @@ from sglang.srt.openai_api.utils import (
 )
 from sglang.srt.reasoning_parser import ReasoningParser
 from sglang.utils import convert_json_schema_to_str, get_exception_traceback
+from sglang.debug_tracer import global_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -1307,6 +1308,7 @@ def v1_chat_generate_request(
         bootstrap_port=all_requests[0].bootstrap_port,
         bootstrap_room=all_requests[0].bootstrap_room,
         return_hidden_states=return_hidden_states,
+        enable_debug_trace=getattr(all_requests[0], 'enable_debug_trace', False),
     )
 
     return adapted_request, all_requests if len(all_requests) > 1 else all_requests[0]
@@ -1533,7 +1535,15 @@ async def v1_chat_completions(
         request_json = await raw_request.json()
     except Exception as e:
         return create_error_response("Invalid request body, error: ", str(e))
+    
+    # Check if debug tracing is enabled
+    enable_debug = global_tracer.enabled
+    
     all_requests = [ChatCompletionRequest(**request_json)]
+    # Add debug flag to the request if enabled
+    if enable_debug:
+        all_requests[0].enable_debug_trace = True
+    
     created = int(time.time())
     adapted_request, request = v1_chat_generate_request(
         all_requests, tokenizer_manager, request_ids=[all_requests[0].rid]
