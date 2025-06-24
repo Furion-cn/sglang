@@ -271,9 +271,10 @@ class RotaryEmbedding(nnx.Module):
         
     def _precompute_freqs_cis(self, seq_len: int, theta: float = 10000.0, dtype: jnp.dtype = jnp.bfloat16) -> jnp.ndarray:
         """Calculate the frequencies."""
-        print(f'{seq_len=} {theta=} {dtype=}')
         freqs = 1.0 / (theta ** (jnp.arange(0, self.embedding_dims, 2)
                                 [: (self.embedding_dims // 2)].astype(dtype) / self.embedding_dims))
+        print(f'RotaryEmbedding._precompute_freqs_cis {self.embedding_dims=} {seq_len=} {theta=} {dtype=}')
+        print(f'RotaryEmbedding._precompute_freqs_cis {freqs=}')
         t = jnp.arange(seq_len*2)  # type: ignore
         freqs = jnp.outer(t, freqs).astype(dtype)  # type: ignore
         sin, cos = jnp.sin(freqs), jnp.cos(freqs)

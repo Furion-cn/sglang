@@ -145,7 +145,7 @@ class QWenAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb.forward_native(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.c_proj(attn_output)
         return output
