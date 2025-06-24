@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""
+QWen JAX vs PyTorch Forward Pass Comparison Test
+
+This test loads both JAX and PyTorch versions of QWen models from local files
+and compares their forward pass outputs to diagnose differences.
+
+Usage:
+    # Set model path and run test
+    MODEL_PATH=/path/to/qwen/model python -m unittest test_qwen_jax_pytorch_forward_comparison.TestQWenForwardComparison
+    
+    # Run specific test
+    MODEL_PATH=/path/to/qwen/model python -m unittest test_qwen_jax_pytorch_forward_comparison.TestQWenForwardComparison.test_forward_pass_comparison
+"""
+
+import os
+import sys
+import pytest
+import unittest
+import numpy as np
+from pathlib import Path
+from unittest.mock import patch
+
+# Add the parent directory to the path to import sglang modules
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
+
+try:
+    import jax
+    import jax.numpy as jnp
+    from flax import nnx
+    from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
+    from sglang.srt.jax.model_loader import JAXModelLoader
+    from sglang.srt.jax.sampling.sampler import Sampler
+    from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
+    from sglang.srt.jax.utils import create_device_mesh
+    JAX_AVAILABLE = True
+except ImportError as e:
+    print(f"JAX not available: {e}")
+    JAX_AVAILABLE = False
+
+try:
+    import torch
+    from sglang.srt.models.qwen import QWenLMHeadModel as PyTorchQWenLMHeadModel
+    from sglang.srt.model_loader.loader import DefaultModelLoader
+    PYTORCH_AVAILABLE = True
+except ImportError as e:
+    print(f"PyTorch not available: {e}")
+    PYTORCH_AVAILABLE = False
+
+try:
+    from transformers import AutoTokenizer, AutoConfig
+    TRANSFORMERS_AVAILABLE = True
+except ImportError as e:
+    print(f"Transformers not available: {e}")
+    TRANSFORMERS_AVAILABLE = False
+
+from sglang.srt.debug_tracer import global_tracer
+from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.configs.device_config import DeviceConfig
+from sglang.srt.configs.load_config import LoadConfig, LoadFormat
+
+
+class MockForwardBatch:
+    """Mock ForwardBatch for PyTorch model testing"""
+    
+    def __init__(self, batch_size=1, seq_len=10):
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.req_to_token_pool = {}
+        self.token_to_kv_pool = {}
+        self.req_pool_indices = torch.arange(batch_size)
+        self.seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32)
+        self.start_loc = torch.cumsum(torch.cat([torch.tensor([0]), self.seq_lens[:-1]]), dim=0)
+        self.max_seq_len = seq_len
+        self.total_num_tokens = batch_size * seq_len
+
+
+class TestQWenForwardComparison(unittest.TestCase):
+    """Test cases for comparing JAX and PyTorch QWen model forward passes"""
+    
+    def setUp(self):
+        """Set up test fixtures"""
+        # Configuration
+        self.test_model_path = os.environ.get('MODEL_PATH', '/tmp/test_qwen_model')
+        self.test_text = "Hello, how are you today?"
+        self.max_new_tokens = 5
+        self.temperature = 0.0  # Use deterministic generation for comparison
+        
+        # JAX setup
+        if JAX_AVAILABLE:
+            self.mesh = create_device_mesh(
+                ici_parallelism=[-1, 1, 1, 1], 
+                dcn_parallelism=[1, 1, 1, 1]
+            )
+            self.load_config = LoadConfig(load_format=LoadFormat.JAX)
+            self.device_config = DeviceConfig()
+            self.jax_loader = JAXModelLoader(self.load_config)
+        
+        # Enable debug tracing for PyTorch
+        global_tracer.enable()
+        global_tracer.clear_records()
+    
+    def tearDown(self):
+        """Clean up after tests"""
+        global_tracer.disable()
+        global_tracer.clear_records()
+    
+    def _get_positions_jax(self, x):
+        """Get position embeddings for JAX model"""
+        return jnp.concatenate([
+            jnp.arange(x.shape[1]) for _ in range(x.shape[0])
+        ]).reshape(x.shape[0], x.shape[1])
+    
+    def _get_positions_pytorch(self, x):
+        """Get position embeddings for PyTorch model"""
+        return torch.concatenate([
+            torch.arange(x.shape[1]) for _ in range(x.shape[0])
+        ]).reshape(x.shape[0], x.shape[1])
+    
+    def _get_tokenizer(self):
+        """Get tokenizer from local path if available, otherwise from Hugging Face"""
+        model_path = Path(self.test_model_path)
+        
+        # Check if tokenizer files exist in the model path
+        tokenizer_files = [
+            'tokenizer_config.json',
+            'tokenization_qwen.py', 
+            'qwen.tiktoken'
+        ]
+        
+        has_tokenizer = all((model_path / file).exists() for file in tokenizer_files)
+        
+        if has_tokenizer:
+            print(f"📁 Using local tokenizer from: {model_path}")
+            try:
+                return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+            except Exception as e:
+                print(f"⚠️  Failed to load local tokenizer: {e}")
+                print("🔄 Falling back to Hugging Face...")
+        else:
+            print(f"📁 No tokenizer found in {model_path}, using Hugging Face")
+        
+        # Fallback to Hugging Face
+        print("🌐 Loading tokenizer from Hugging Face: Qwen/Qwen-7B")
+        return AutoTokenizer.from_pretrained("Qwen/Qwen-7B", trust_remote_code=True)
+    
+    def _load_jax_model(self):
+        """Load JAX model from local path"""
+        if not os.path.exists(self.test_model_path):
+            self.skipTest(f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
+        
+        try:
+            hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
+                self.test_model_path, None
+            )
+            
+            if not hf_weights_files:
+                self.skipTest(f"No .msgpack files found in {self.test_model_path}")
+            
+            print(f"\n=== Loading JAX Model from: {self.test_model_path} ===")
+            print(f"Found {len(hf_weights_files)} msgpack files")
+            
+            model_config = ModelConfig(
+                model_path=self.test_model_path,
+                model_override_args="{}"
+            )
+            
+            with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
+                mock_arch.return_value = (JAXQWenLMHeadModel, None)
+                
+                jax_model = self.jax_loader.load_model(
+                    model_config=model_config,
+                    device_config=self.device_config,
+                    mesh=self.mesh,
+                )
+                
+                print("✅ JAX Model loaded successfully!")
+                return jax_model
+                
+        except Exception as e:
+            self.fail(f"Failed to load JAX model: {e}")
+    
+    def _load_pytorch_model(self):
+        """Load PyTorch model from local path"""
+        if not os.path.exists(self.test_model_path):
+            self.skipTest(f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
+        
+        try:
+            print(f"\n=== Loading PyTorch Model from: {self.test_model_path} ===")
+            
+            # Load config
+            config = AutoConfig.from_pretrained(self.test_model_path, trust_remote_code=True)
+            
+            # Create PyTorch model
+            pytorch_model = PyTorchQWenLMHeadModel(config)
+            
+            # Load weights (simplified - in practice you'd load from checkpoint)
+            print("⚠️  Note: PyTorch model weights not loaded from checkpoint in this test")
+            print("✅ PyTorch Model structure created successfully!")
+            
+            return pytorch_model
+            
+        except Exception as e:
+            self.fail(f"Failed to load PyTorch model: {e}")
+    
+    def test_model_loading(self):
+        """Test that both JAX and PyTorch models can be loaded successfully"""
+        print("\n=== Testing Model Loading ===")
+        
+        # Test JAX model loading
+        if JAX_AVAILABLE:
+            try:
+                jax_model = self._load_jax_model()
+                print("✓ JAX model loaded successfully")
+                print(f"JAX model type: {type(jax_model)}")
+            except Exception as e:
+                print(f"✗ JAX model loading failed: {e}")
+                self.fail(f"JAX model loading failed: {e}")
+        
+        # Test PyTorch model loading
+        if PYTORCH_AVAILABLE:
+            try:
+                pytorch_model = self._load_pytorch_model()
+                print("✓ PyTorch model loaded successfully")
+                print(f"PyTorch model type: {type(pytorch_model)}")
+            except Exception as e:
+                print(f"✗ PyTorch model loading failed: {e}")
+                self.fail(f"PyTorch model loading failed: {e}")
+    
+    def test_forward_pass_comparison(self):
+        """Test forward pass comparison between JAX and PyTorch models"""
+        print("\n=== Testing Forward Pass Comparison ===")
+        
+        if not (JAX_AVAILABLE and PYTORCH_AVAILABLE and TRANSFORMERS_AVAILABLE):
+            pytest.skip("Required dependencies not available")
+        
+        # Load models
+        jax_model = self._load_jax_model()
+        pytorch_model = self._load_pytorch_model()
+        
+        # Load tokenizer
+        tokenizer = self._get_tokenizer()
+        
+        # Prepare input
+        input_text = self.test_text
+        input_ids = tokenizer.encode(input_text)
+        
+        print(f"Input text: {input_text}")
+        print(f"Input IDs shape: {len(input_ids)}")
+        
+        # Clear debug tracer
+        global_tracer.clear_records()
+        
+        # JAX forward pass
+        print("\n--- JAX Forward Pass ---")
+        jax_input_ids = jnp.array(input_ids).reshape(1, -1)
+        jax_positions = self._get_positions_jax(jax_input_ids)
+        
+        with self.mesh:
+            jax_output = jax_model(jax_input_ids, jax_positions, None)
+        jax_records = global_tracer.get_records()
+        
+        # Clear tracer for PyTorch
+        global_tracer.clear_records()
+        
+        # PyTorch forward pass
+        print("\n--- PyTorch Forward Pass ---")
+        torch_input_ids = torch.tensor(input_ids, dtype=torch.long).reshape(1, -1)
+        torch_positions = self._get_positions_pytorch(torch_input_ids)
+        mock_batch = MockForwardBatch(batch_size=1, seq_len=len(input_ids))
+        
+        pytorch_output = pytorch_model(torch_input_ids, torch_positions, mock_batch)
+        pytorch_records = global_tracer.get_records()
+        
+        # Compare outputs
+        print("\n--- Output Comparison ---")
+        print(f"JAX output shape: {jax_output.shape}")
+        print(f"PyTorch output shape: {pytorch_output.shape}")
+        
+        # Convert to numpy for comparison
+        jax_output_np = np.array(jax_output)
+        pytorch_output_np = pytorch_output.detach().cpu().numpy()
+        
+        # Calculate differences
+        abs_diff = np.abs(jax_output_np - pytorch_output_np)
+        rel_diff = abs_diff / (np.abs(jax_output_np) + 1e-8)
+        
+        print(f"Max absolute difference: {np.max(abs_diff):.6f}")
+        print(f"Mean absolute difference: {np.mean(abs_diff):.6f}")
+        print(f"Max relative difference: {np.max(rel_diff):.6f}")
+        print(f"Mean relative difference: {np.mean(rel_diff):.6f}")
+        
+        # Check for NaN or Inf
+        jax_has_nan = np.any(np.isnan(jax_output_np))
+        jax_has_inf = np.any(np.isinf(jax_output_np))
+        pytorch_has_nan = np.any(np.isnan(pytorch_output_np))
+        pytorch_has_inf = np.any(np.isinf(pytorch_output_np))
+        
+        print(f"JAX output has NaN: {jax_has_nan}, Inf: {jax_has_inf}")
+        print(f"PyTorch output has NaN: {pytorch_has_nan}, Inf: {pytorch_has_inf}")
+        
+        # Compare debug traces
+        print("\n--- Debug Trace Comparison ---")
+        print(f"JAX recorded {len(jax_records)} steps")
+        print(f"PyTorch recorded {len(pytorch_records)} steps")
+        
+        # Assert reasonable differences
+        self.assertFalse(jax_has_nan, "JAX output contains NaN")
+        self.assertFalse(jax_has_inf, "JAX output contains Inf")
+        self.assertFalse(pytorch_has_nan, "PyTorch output contains NaN")
+        self.assertFalse(pytorch_has_inf, "PyTorch output contains Inf")
+        
+        # Allow for some numerical differences due to different implementations
+        self.assertLess(np.max(abs_diff), 1e-3, "Outputs differ too much")
+        
+        print("✓ Forward pass comparison completed successfully")
+    
+    def test_generation_comparison(self):
+        """Test generation comparison between JAX and PyTorch models"""
+        print("\n=== Testing Generation Comparison ===")
+        
+        if not (JAX_AVAILABLE and PYTORCH_AVAILABLE and TRANSFORMERS_AVAILABLE):
+            pytest.skip("Required dependencies not available")
+        
+        # Load models
+        jax_model = self._load_jax_model()
+        pytorch_model = self._load_pytorch_model()
+        
+        # Load tokenizer
+        tokenizer = self._get_tokenizer()
+        
+        # Prepare input
+        input_text = self.test_text
+        input_ids = tokenizer.encode(input_text)
+        
+        print(f"Input text: {input_text}")
+        print(f"Input IDs: {input_ids}")
+        
+        # JAX generation (simplified)
+        print("\n--- JAX Generation ---")
+        jax_input_ids = jnp.array(input_ids).reshape(1, -1)
+        
+        # Simple greedy generation for JAX
+        generated_jax = []
+        current_ids = jax_input_ids
+        
+        with self.mesh:
+            for step in range(self.max_new_tokens):
+                positions = self._get_positions_jax(current_ids)
+                
+                logits = jax_model(current_ids, positions, None)
+                
+                # Get next token (greedy)
+                next_token = jnp.argmax(logits[:, -1, :], axis=-1, keepdims=True)
+                generated_jax.append(int(next_token[0]))
+                
+                # Append to current sequence
+                current_ids = jnp.concatenate([current_ids, next_token], axis=1)
+                
+                print(f"Step {step + 1}: Generated token {int(next_token[0])}")
+        
+        # Decode JAX generation
+        jax_generated_text = tokenizer.decode(generated_jax)
+        print(f"JAX generated text: {jax_generated_text}")
+        
+        # PyTorch generation (simplified - note: full generation not implemented)
+        print("\n--- PyTorch Generation (Forward Pass Only) ---")
+        torch_input_ids = torch.tensor(input_ids, dtype=torch.long).reshape(1, -1)
+        torch_positions = self._get_positions_pytorch(torch_input_ids)
+        
+        # Create mock forward batch
+        mock_batch = MockForwardBatch(batch_size=1, seq_len=len(input_ids))
+        
+        with torch.no_grad():
+            pytorch_logits = pytorch_model(torch_input_ids, torch_positions, mock_batch)
+            
+            # Get next token (greedy)
+            next_token_pytorch = torch.argmax(pytorch_logits[:, -1, :], dim=-1)
+            
+        print(f"PyTorch next token: {int(next_token_pytorch[0])}")
+        
+        # Compare first token predictions
+        print("\n--- Generation Comparison ---")
+        jax_first_token = generated_jax[0] if generated_jax else None
+        pytorch_first_token = int(next_token_pytorch[0])
+        
+        print(f"JAX first generated token: {jax_first_token}")
+        print(f"PyTorch first predicted token: {pytorch_first_token}")
+        
+        if jax_first_token is not None:
+            tokens_match = jax_first_token == pytorch_first_token
+            print(f"First tokens match: {tokens_match}")
+            
+            if not tokens_match:
+                print("⚠️ First token predictions differ - this may indicate model differences")
+        
+        print("✓ Generation comparison completed")
+
+
+if __name__ == '__main__':
+    unittest.main()

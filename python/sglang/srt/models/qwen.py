@@ -40,6 +40,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
+from sglang.srt.debug_tracer import global_tracer
 
 
 class QWenMLP(nn.Module):
@@ -76,10 +77,16 @@ class QWenMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        global_tracer.print(x, "mlp_input", "MLP")
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.c_proj(x)
-        return x
+        gate, up = gate_up.chunk(2, dim=-1)
+        global_tracer.print(gate, "mlp_gate", "MLP")
+        global_tracer.print(up, "mlp_up", "MLP")
+        intermediate_parallel = self.act_fn(gate_up)
+        global_tracer.print(intermediate_parallel, "mlp_intermediate", "MLP")
+        output, _ = self.c_proj(intermediate_parallel)
+        global_tracer.print(output, "mlp_output", "MLP")
+        return output
 
 
 class QWenAttention(nn.Module):
@@ -143,11 +150,20 @@ class QWenAttention(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        global_tracer.print(hidden_states, "attn_input", "ATTENTION")
         qkv, _ = self.c_attn(hidden_states)
+        global_tracer.print(qkv, "attn_qkv", "ATTENTION")
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+        global_tracer.print(q, "attn_q", "ATTENTION")
+        global_tracer.print(k, "attn_k", "ATTENTION")
+        global_tracer.print(v, "attn_v", "ATTENTION")
         q, k = self.rotary_emb(positions, q, k)
+        global_tracer.print(q, "attn_q_rope", "ATTENTION")
+        global_tracer.print(k, "attn_k_rope", "ATTENTION")
         attn_output = self.attn(q, k, v, forward_batch)
+        global_tracer.print(attn_output, "attn_output", "ATTENTION")
         output, _ = self.c_proj(attn_output)
+        global_tracer.print(output, "attn_final_output", "ATTENTION")
         return output
 
 
@@ -190,21 +206,26 @@ class QWenBlock(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        global_tracer.print(hidden_states, "block_input", "BLOCK")
         # Self Attention
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
+        global_tracer.print(hidden_states, "block_after_ln1", "BLOCK")
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
         hidden_states = residual + hidden_states
+        global_tracer.print(hidden_states, "block_after_attn_residual", "BLOCK")
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.ln_2(hidden_states)
+        global_tracer.print(hidden_states, "block_after_ln2", "BLOCK")
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+        global_tracer.print(hidden_states, "block_output", "BLOCK")
         return hidden_states
 
 
@@ -244,7 +265,9 @@ class QWenModel(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        global_tracer.print(input_ids, "model_input_ids", "MODEL")
         hidden_states = self.wte(input_ids)
+        global_tracer.print(hidden_states, "model_embeddings", "MODEL")
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -252,7 +275,9 @@ class QWenModel(nn.Module):
                 hidden_states,
                 forward_batch,
             )
+            global_tracer.print(hidden_states, f"model_layer_{i}_output", "MODEL")
         hidden_states = self.ln_f(hidden_states)
+        global_tracer.print(hidden_states, "model_final_output", "MODEL")
         return hidden_states
 
 
@@ -281,10 +306,14 @@ class QWenLMHeadModel(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        global_tracer.print(input_ids, "lmhead_input_ids", "LMHEAD")
         hidden_states = self.transformer(input_ids, positions, forward_batch)
-        return self.logits_processor(
+        global_tracer.print(hidden_states, "lmhead_hidden_states", "LMHEAD")
+        logits = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
+        global_tracer.print(logits, "lmhead_logits", "LMHEAD")
+        return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
