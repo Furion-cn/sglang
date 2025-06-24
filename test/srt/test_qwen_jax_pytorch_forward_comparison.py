@@ -54,6 +54,12 @@ from sglang.srt.distributed.parallel_state import (
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 
 
+class MockModelRunner:
+    """Mock ModelRunner for TorchNativeAttnBackend"""
+    def __init__(self):
+        self.device = torch.device("cpu")
+
+
 class MockForwardBatch:
     """Mock ForwardBatch for testing purposes with TorchNative backend"""
     
@@ -70,7 +76,8 @@ class MockForwardBatch:
         self.out_cache_cont_end = torch.zeros(1, dtype=torch.int32)
         
         # Use TorchNative backend for CPU compatibility
-        self.attn_backend = TorchNativeAttnBackend()
+        mock_model_runner = MockModelRunner()
+        self.attn_backend = TorchNativeAttnBackend(mock_model_runner)
         print("Using TorchNative attention backend for CPU")
         
         # Add required attributes for attention backends
@@ -406,7 +413,7 @@ class TestQWenForwardComparison(unittest.TestCase):
                 
                 # Get next token (greedy)
                 next_token = jnp.argmax(logits[:, -1, :], axis=-1, keepdims=True)
-                generated_jax.append(int(next_token[0]))
+                generated_jax.append(int(next_token[0, 0]))
                 
                 # Append to current sequence
                 current_ids = jnp.concatenate([current_ids, next_token], axis=1)
