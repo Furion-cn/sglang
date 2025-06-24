@@ -49,11 +49,20 @@ class UnifiedDebugTracer:
                 'dtype': str(tensor.dtype),
                 'min': float(tensor_cpu.min()),
                 'max': float(tensor_cpu.max()),
-                'mean': float(tensor_cpu.mean()),
-                'std': float(tensor_cpu.std()),
-                'has_nan': torch.isnan(tensor_cpu).any().item(),
-                'has_inf': torch.isinf(tensor_cpu).any().item(),
             }
+            
+            if tensor_cpu.dtype in [torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8]:
+                tensor_float = tensor_cpu.float()
+                stats['mean'] = float(tensor_float.mean())
+                stats['std'] = float(tensor_float.std())
+            else:
+                stats['mean'] = float(tensor_cpu.mean())
+                stats['std'] = float(tensor_cpu.std())
+                
+            stats.update({
+                'has_nan': torch.isnan(tensor_cpu.float()).any().item(),
+                'has_inf': torch.isinf(tensor_cpu.float()).any().item(),
+            })
         except Exception as e:
             stats = {
                 'framework': 'pytorch',
