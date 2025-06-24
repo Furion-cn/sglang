@@ -418,7 +418,7 @@ class TestQWenForwardComparison(unittest.TestCase):
                 # Append to current sequence
                 current_ids = jnp.concatenate([current_ids, next_token], axis=1)
                 
-                print(f"Step {step + 1}: Generated token {int(next_token[0])}")
+                print(f"Step {step + 1}: Generated token {int(next_token[0, 0])}")
         
         # Decode JAX generation
         jax_generated_text = tokenizer.decode(generated_jax)
