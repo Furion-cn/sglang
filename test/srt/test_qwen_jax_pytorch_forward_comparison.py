@@ -187,7 +187,7 @@ class TestQWenForwardComparison(unittest.TestCase):
             self.fail(f"Failed to load JAX model: {e}")
     
     def _load_pytorch_model(self):
-        """Load PyTorch model from local path"""
+        """Load PyTorch model from local path with actual weights"""
         if not os.path.exists(self.pytorch_model_path):
             self.skipTest(f"PyTorch model path {self.pytorch_model_path} not found. Set PYTORCH_MODEL_PATH environment variable.")
         
@@ -200,9 +200,53 @@ class TestQWenForwardComparison(unittest.TestCase):
             # Create PyTorch model
             pytorch_model = PyTorchQWenLMHeadModel(config)
             
-            # Load weights (simplified - in practice you'd load from checkpoint)
-            print("⚠️  Note: PyTorch model weights not loaded from checkpoint in this test")
-            print("✅ PyTorch Model structure created successfully!")
+            # Load actual weights from model files
+            print("📥 Loading PyTorch model weights from checkpoint files...")
+            
+            # Find weight files in the model directory
+            import glob
+            weight_files = []
+            for pattern in ["*.safetensors", "*.bin", "*.pt"]:
+                weight_files.extend(glob.glob(os.path.join(self.pytorch_model_path, pattern)))
+            
+            if not weight_files:
+                raise RuntimeError(f"No weight files found in {self.pytorch_model_path}. Expected *.safetensors, *.bin, or *.pt files.")
+            
+            # Load weights from files
+            state_dict = {}
+            for weight_file in weight_files:
+                print(f"  Loading weights from: {os.path.basename(weight_file)}")
+                if weight_file.endswith('.safetensors'):
+                    import safetensors.torch
+                    file_state_dict = safetensors.torch.load_file(weight_file, device="cpu")
+                else:
+                    file_state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
+                state_dict.update(file_state_dict)
+            
+            # Load state dict into model
+            missing_keys, unexpected_keys = pytorch_model.load_state_dict(state_dict, strict=False)
+            
+            if missing_keys:
+                print(f"⚠️  Missing keys in state dict: {len(missing_keys)} keys")
+                if len(missing_keys) <= 5:
+                    for key in missing_keys:
+                        print(f"    - {key}")
+                else:
+                    for key in missing_keys[:3]:
+                        print(f"    - {key}")
+                    print(f"    ... and {len(missing_keys) - 3} more")
+            
+            if unexpected_keys:
+                print(f"⚠️  Unexpected keys in state dict: {len(unexpected_keys)} keys")
+                if len(unexpected_keys) <= 5:
+                    for key in unexpected_keys:
+                        print(f"    - {key}")
+                else:
+                    for key in unexpected_keys[:3]:
+                        print(f"    - {key}")
+                    print(f"    ... and {len(unexpected_keys) - 3} more")
+            
+            print(f"✅ PyTorch Model loaded successfully with {len(state_dict)} weight tensors!")
             
             return pytorch_model
             
@@ -350,7 +394,10 @@ class TestQWenForwardComparison(unittest.TestCase):
             for step in range(self.max_new_tokens):
                 positions = self._get_positions_jax(current_ids)
                 
-                logits = jax_model(current_ids, positions, None)
+                logits_output = jax_model(current_ids, positions, None)
+                
+                # Extract logits from LogitsProcessorOutput
+                logits = logits_output.next_token_logits
                 
                 # Get next token (greedy)
                 next_token = jnp.argmax(logits[:, -1, :], axis=-1, keepdims=True)

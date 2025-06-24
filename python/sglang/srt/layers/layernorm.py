@@ -52,8 +52,10 @@ class RMSNorm(CustomOp):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
-        if _use_aiter:
-            self._forward_method = self.forward_aiter
+        # TODO: remove this hack code
+        self._forward_method = self.forward_native
+        # if _use_aiter:
+        #     self._forward_method = self.forward_aiter
 
     def forward_cuda(
         self,
