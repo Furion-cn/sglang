@@ -30,7 +30,7 @@ import jax.numpy as jnp
 from flax import nnx
 from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
 from sglang.srt.model_loader.loader import JAXModelLoader
-from sglang.srt.jax.utils import create_device_mesh
+from sglang.test.jax.test_utils import create_device_mesh
 
 import torch
 from sglang.srt.models.qwen import QWenLMHeadModel as PyTorchQWenLMHeadModel
