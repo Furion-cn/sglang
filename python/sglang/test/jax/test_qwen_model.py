@@ -1,16 +1,19 @@
+import unittest
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from transformers import AutoTokenizer, PretrainedConfig
 
+from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.layers.sampler import Sampler
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen import QWenLMHeadModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
-from sglang.test.test_utils import CustomTestCase
 
 
-class TestQwenModel(CustomTestCase):
+class TestQwenModel(unittest.TestCase):
     """Test cases for the Qwen model."""
 
     def setUp(self):
@@ -36,57 +39,92 @@ class TestQwenModel(CustomTestCase):
         nnx.update(model, sharded_state)
         return model
 
-    def _get_positions(self, x):
-        return jnp.concatenate([
-            jnp.arange(x.shape[1]) for _ in range(x.shape[0])
-        ]).reshape(x.shape[0], x.shape[1])
+    def _create_batch(self, input_ids):
+        """Convert input_ids [batch_size, seq_len] to ForwardBatch format"""
+        batch_size, max_seq_len = input_ids.shape
+
+        # For this example, assume all sequences have the same length
+        seq_lens = jnp.full((batch_size,), max_seq_len, dtype=jnp.int32)
+
+        # Flatten input_ids
+        input_ids_flat = input_ids.reshape(-1)
+
+        # Create positions for each token
+        positions_flat = jnp.concatenate([
+            jnp.arange(seq_len) for seq_len in seq_lens
+        ])
+
+        # Create start locations for each sequence
+        extend_start_loc = jnp.cumsum(
+            jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
+
+        return ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=batch_size,
+            input_ids=input_ids_flat,
+            seq_lens=seq_lens,
+            positions=positions_flat,
+            extend_start_loc=extend_start_loc,
+            total_tokens=len(input_ids_flat)
+        )
 
     def test_qwen_model_prefill(self):
         with self.mesh:
             model = self._setup_model()
             x = jax.random.randint(jax.random.PRNGKey(0),
                                    (128, 2), 0, 10000)
-            positions = self._get_positions(x)
-            y = model(x, positions, None)
-            self.assertEqual(y.logits.shape, (128, 10000))
+            forward_batch = self._create_batch(x)
+            y = model(forward_batch.input_ids,
+                      forward_batch.positions, forward_batch)
+            # Now y is LogitsProcessorOutput with next_token_logits for each sequence
+            # Shape: [batch_size, vocab_size] = [128, 10000]
+            self.assertEqual(y.next_token_logits.shape, (128, 10000))
 
     def test_qwen_model_decode(self):
         with self.mesh:
             model = self._setup_model()
             sampler = Sampler(rngs=nnx.Rngs(0))
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen-7B")
+            tokenizer = AutoTokenizer.from_pretrained(
+                "Qwen/Qwen-7B", trust_remote_code=True)
 
-            # 初始输入
             input_text = "1+1=?"
             x = jnp.array(tokenizer.encode(input_text)).reshape(1, -1)
             print(f"输入文本: {input_text}")
             print(f"输入 tokens: {x}")
 
             for i in range(10):
-                positions = self._get_positions(x)
-                y = model(x, positions, None)
+                # Create ForwardBatch for each iteration
+                forward_batch = self._create_batch(x)
+                y = model(forward_batch.input_ids,
+                          forward_batch.positions, forward_batch)
+
+                # The LogitsProcessor now automatically extracts the last token logits
+                # y.next_token_logits shape: [batch_size, vocab_size]
+
+                # Sample next token
                 next_token_ids = sampler(
-                    y, sampling_info=SamplingBatchInfo(
+                    y,  # Pass the LogitsProcessorOutput directly
+                    sampling_info=SamplingBatchInfo(
                         temperatures=jnp.full((1, 1), 0.6),
                         top_ps=jnp.full((1, 1), 0.9),
                         top_ks=jnp.ones((1, 1)),
                         min_ps=jnp.full((1, 1), 0.0),
                         vocab_size=10000,
                     ))
-                x = jnp.concatenate(
-                    [x, next_token_ids], axis=-1)
 
-                # 解码当前生成的 token
+                # Update sequence with new token for next iteration
+                x = jnp.concatenate([x, next_token_ids], axis=-1)
+
                 current_token_id = int(next_token_ids[0, 0])
                 decoded_token = tokenizer.decode([current_token_id])
                 print(
                     f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
 
-            # 解码完整的生成序列
             full_sequence = [int(token) for token in x[0]]
             decoded_full = tokenizer.decode(full_sequence)
             print(f"\n完整生成序列: {full_sequence}")
             print(f"完整解码文本: '{decoded_full}'")
 
-            self.assertEqual(y.next_token_logits.shape, (1, 1, 10048))
+            # Shape assertions: [batch_size, vocab_size] for next token logits
+            self.assertEqual(y.next_token_logits.shape, (1, 10048))
             self.assertEqual(x.shape, (1, 14))
