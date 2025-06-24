@@ -1,0 +1,647 @@
+--- PyTorch Generation (Forward Pass Only) ---
+Using TorchNative attention backend for CPU
+[PYTORCH][LMHEAD] lmhead_input_ids: shape=(1, 7), min=11.000000, max=9707.000000, mean=2195.428467, std=3506.966064
+[PYTORCH][MODEL] model_input_ids: shape=(1, 7), min=11.000000, max=9707.000000, mean=2195.428467, std=3506.966064
+[PYTORCH][MODEL] model_embeddings: shape=(1, 7, 4096), min=-0.320312, max=0.347656, mean=0.000084, std=0.017960
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=-0.320312, max=0.347656, mean=0.000084, std=0.017960
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=-1.602539, max=5.230469, mean=0.001234, std=0.094849
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=-1.602539, max=5.230469, mean=0.001234, std=0.094849
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=-6.113281, max=5.199219, mean=0.005127, std=1.031250
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=-4.734375, max=5.199219, mean=0.001613, std=0.821777
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=-6.113281, max=5.132812, mean=0.013687, std=1.583008
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=-0.598145, max=0.743652, mean=0.000075, std=0.081360
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=-4.730469, max=5.191406, mean=0.003693, std=0.821777
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=-6.097656, max=5.136719, mean=0.010529, std=1.583008
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=-6.097656, max=5.136719, mean=0.009109, std=1.464844
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=-6.238281, max=5.437500, mean=-0.010803, std=1.406250
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=-6.238281, max=5.433594, mean=-0.010719, std=1.406250
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=-0.740234, max=0.760742, mean=-0.001314, std=0.167236
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=-0.740234, max=0.760742, mean=-0.001314, std=0.167236
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=-2.025391, max=1.855469, mean=-0.016449, std=0.223145
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=-1.558594, max=1.361328, mean=0.001599, std=0.214111
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=-2.500000, max=1.577148, mean=-0.000363, std=0.028534
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=-3.361328, max=2.927734, mean=0.000100, std=0.077148
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=-6.207031, max=5.503906, mean=-0.010620, std=1.408203
+[PYTORCH][MODEL] model_layer_0_output: shape=(1, 7, 4096), min=-6.207031, max=5.503906, mean=-0.010620, std=1.408203
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=-6.207031, max=5.503906, mean=-0.010620, std=1.408203
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=-6.226562, max=7.242188, mean=-0.001479, std=0.148682
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=-6.226562, max=7.242188, mean=-0.001479, std=0.148682
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=-7.593750, max=6.808594, mean=-0.001098, std=0.742676
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=-5.929688, max=6.566406, mean=-0.002510, std=0.717773
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=-7.593750, max=6.808594, mean=0.000063, std=1.063477
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=-1.128906, max=1.117188, mean=-0.000845, std=0.095947
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=-5.929688, max=6.566406, mean=-0.004807, std=0.717773
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=-7.593750, max=6.808594, mean=0.000576, std=1.063477
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=-512.000000, max=512.000000, mean=1.647461, std=158.000000
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=-1151.000000, max=687.000000, mean=0.867676, std=114.250000
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=-1153.000000, max=689.000000, mean=0.856934, std=114.250000
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=-2.248047, max=6.683594, mean=0.002218, std=0.228394
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=-2.248047, max=6.683594, mean=0.002218, std=0.228394
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=-2.951172, max=2.812500, mean=-0.005619, std=0.324463
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=-2.068359, max=2.107422, mean=0.000530, std=0.274414
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=-3.039062, max=1.628906, mean=-0.000031, std=0.052612
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=-10.531250, max=6.839844, mean=-0.000269, std=0.139282
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=-1156.000000, max=691.000000, mean=0.856934, std=114.250000
+[PYTORCH][MODEL] model_layer_1_output: shape=(1, 7, 4096), min=-1156.000000, max=691.000000, mean=0.856934, std=114.250000
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=-1156.000000, max=691.000000, mean=0.856934, std=114.250000
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=-4.007812, max=4.429688, mean=0.001254, std=0.220581
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=-4.007812, max=4.429688, mean=0.001254, std=0.220581
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=-5.968750, max=6.589844, mean=0.011406, std=0.715820
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=-5.128906, max=4.664062, mean=0.013672, std=0.696777
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=-5.968750, max=6.589844, mean=0.021118, std=1.008789
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=-4.265625, max=2.197266, mean=-0.000577, std=0.185059
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=-5.128906, max=4.664062, mean=0.011894, std=0.696777
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=-5.968750, max=6.589844, mean=0.016388, std=1.008789
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_2_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_3_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=-512.000000, max=512.000000, mean=-1.239258, std=162.500000
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=-1053.000000, max=1378.000000, mean=-0.150391, std=136.125000
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_4_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_5_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_6_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_7_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=-512.000000, max=512.000000, mean=0.241333, std=159.750000
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=-3242.000000, max=2128.000000, mean=0.045135, std=144.375000
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_8_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_9_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_10_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_11_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_12_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_13_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_14_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_15_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_16_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_17_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_18_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_19_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_20_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_21_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_22_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_23_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_24_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_25_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_26_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_27_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_28_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_29_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_30_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln1: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_qkv: shape=(1, 7, 12288), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_v: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_q_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_k_rope: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][ATTENTION] attn_final_output: shape=(7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_attn_residual: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_after_ln2: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_input: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_gate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_up: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_intermediate: shape=(1, 7, 11008), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MLP] mlp_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][BLOCK] block_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_layer_31_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][MODEL] model_final_output: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN
+[PYTORCH][LMHEAD] lmhead_hidden_states: shape=(1, 7, 4096), min=nan, max=nan, mean=nan, std=nan, HAS_NAN

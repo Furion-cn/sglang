@@ -144,37 +144,37 @@ class MockTokenToKVPool:
 class MockForwardBatch:
     """Mock implementation of ForwardBatch for testing"""
     
-    def __init__(self):
+    def __init__(self, actual_seq_len=7):
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
         
         # Basic attributes
         self.forward_mode = ForwardMode.DECODE
         self.batch_size = 1
-        self.seq_len = 10
+        self.seq_len = actual_seq_len
         self.max_seq_len = 512
         
         # Memory pools
         self.req_to_token_pool = MockReqToTokenPool()
         self.token_to_kv_pool = MockTokenToKVPool()
         
-        # Required tensor attributes
-        self.input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], dtype=torch.int64)
+        # Required tensor attributes - use actual sequence length
+        self.input_ids = torch.arange(1, actual_seq_len + 1, dtype=torch.int64).unsqueeze(0)
         self.req_pool_indices = torch.zeros(1, dtype=torch.int32)
-        self.seq_lens = torch.ones(1, dtype=torch.int32) * 10
-        self.out_cache_loc = torch.zeros(10, dtype=torch.int32)
-        self.positions = torch.arange(10, dtype=torch.int64)
+        self.seq_lens = torch.ones(1, dtype=torch.int32) * actual_seq_len
+        self.out_cache_loc = torch.arange(actual_seq_len, dtype=torch.int32)
+        self.positions = torch.arange(actual_seq_len, dtype=torch.int64)
         
         # Sequence length info
-        self.seq_lens_sum = 10
+        self.seq_lens_sum = actual_seq_len
         self.seq_lens_cpu = None
         
         # For extend mode
         self.extend_num_tokens = 0
-        self.extend_seq_lens = torch.ones(1, dtype=torch.int32) * 10
+        self.extend_seq_lens = torch.ones(1, dtype=torch.int32) * actual_seq_len
         self.extend_prefix_lens = torch.zeros(1, dtype=torch.int32)
         self.extend_start_loc = torch.zeros(1, dtype=torch.int32)
         self.extend_prefix_lens_cpu = [0]
-        self.extend_seq_lens_cpu = [10]
+        self.extend_seq_lens_cpu = [actual_seq_len]
         self.extend_logprob_start_lens_cpu = None
         self.extend_input_logprob_token_ids_gpu = None
         
@@ -497,7 +497,7 @@ class TestQWenForwardComparison(unittest.TestCase):
         torch_positions = self._get_positions_pytorch(torch_input_ids)
         
         # Create mock forward batch with TorchNative backend
-        mock_batch = MockForwardBatch()
+        mock_batch = MockForwardBatch(actual_seq_len=torch_input_ids.shape[1])
         
         pytorch_output = pytorch_model(torch_input_ids, torch_positions, mock_batch)
         pytorch_records = global_tracer.get_records()
@@ -601,7 +601,7 @@ class TestQWenForwardComparison(unittest.TestCase):
         torch_positions = self._get_positions_pytorch(torch_input_ids)
         
         # Create mock forward batch with TorchNative backend
-        mock_batch = MockForwardBatch()
+        mock_batch = MockForwardBatch(actual_seq_len=torch_input_ids.shape[1])
         
         with torch.no_grad():
             pytorch_logits = pytorch_model(torch_input_ids, torch_positions, mock_batch)
