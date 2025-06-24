@@ -22,10 +22,6 @@ from typing import List
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
-from sglang.srt.model_loader.loader import JAXModelLoader
-from sglang.test.test_utils import CustomTestCase
-from sglang.test.jax.test_utils import create_device_mesh
 from sglang.srt.jax.layers.sampler import Sampler
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
@@ -52,7 +48,7 @@ def sequence_extend(sequences: List[Sequence], next_token_ids: List[int]):
 
 class TestQWenLoadWeights(CustomTestCase):
     """Test cases for QWenLMHeadJaxModel using JAXModelLoader"""
-    
+
     def setUp(self):
         """Set up test fixtures"""
         self.test_model_path = os.environ.get(
@@ -71,40 +67,53 @@ class TestQWenLoadWeights(CustomTestCase):
             jnp.arange(x.shape[1]) for _ in range(x.shape[0])
         ]).reshape(x.shape[0], x.shape[1])
 
-    def _create_batch(self, sequences: List[Sequence]):
-        """Convert input_ids [batch_size, seq_len] to ForwardBatch format"""
-        batch_size = len(sequences)
-        seq_len = []
-        input_ids_array = []
-        
-        for seq in sequences:
-            input_ids_array += seq.input_ids
-            seq_len.append(seq.seq_len)
+    def _create_batch_from_texts(self, texts, tokenizer):
+        """Create initial batch from texts with tokenization (no padding needed)
 
-        # For this example, assume all sequences have the same length
-        seq_lens = jnp.array(seq_len, dtype=jnp.int32)
+        Args:
+            texts: List[str] input texts to process
+            tokenizer: tokenizer to use for encoding
 
-        # Flatten input_ids
-        input_ids_flat = jnp.array(input_ids_array, dtype=jnp.int32)
+        Returns:
+            tuple: (input_ids_array, actual_seq_lens, forward_batch)
+        """
+        # Tokenize each question
+        tokenized_inputs = []
+        actual_seq_lens = []
+        for text in texts:
+            tokens = tokenizer.encode(text)
+            tokenized_inputs.append(tokens)
+            actual_seq_lens.append(len(tokens))
 
-        # Create positions for each token
-        positions_flat = jnp.concatenate([
-            jnp.arange(seq_len) for seq_len in seq_lens
-        ])
+        # Concatenate all tokens directly without padding
+        input_ids_flat = []
+        positions_flat = []
+        for tokens in tokenized_inputs:
+            input_ids_flat.extend(tokens)
+            # Create positions at the same time
+            positions_flat.extend(range(len(tokens)))
 
-        # Create start locations for each sequence
+        # Create required arrays
+        input_ids_array = jnp.array(input_ids_flat, dtype=jnp.int32)
+        positions_array = jnp.array(positions_flat, dtype=jnp.int32)
+        seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)
+
+        # Create start locations
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
 
-        return ForwardBatch(
+        # Create ForwardBatch
+        forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
-            batch_size=batch_size,
-            input_ids=input_ids_flat,
+            batch_size=len(actual_seq_lens),
+            input_ids=input_ids_array,
             seq_lens=seq_lens,
-            positions=positions_flat,
+            positions=positions_array,
             extend_start_loc=extend_start_loc,
-            total_tokens=len(input_ids_flat)
+            total_tokens=len(input_ids_array)
         )
+
+        return input_ids_array, actual_seq_lens, forward_batch
 
     def _get_tokenizer(self):
         """Get tokenizer from local path if available, otherwise from Hugging Face"""
@@ -175,7 +184,7 @@ class TestQWenLoadWeights(CustomTestCase):
 
             with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
                 mock_arch.return_value = (QWenLMHeadJaxModel, None)
-                
+
                 print("\n🔄 Loading model with JAXModelLoader...")
                 model = self.jax_loader.load_model(
                     model_config=model_config,
@@ -184,7 +193,7 @@ class TestQWenLoadWeights(CustomTestCase):
                 )
 
                 print("✅ Model loaded successfully!")
-                
+
                 self.assertIsInstance(model, QWenLMHeadJaxModel)
                 self.assertIsNotNone(model.config)
 
@@ -205,45 +214,104 @@ class TestQWenLoadWeights(CustomTestCase):
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
 
-                input_text = ["the capital of France is", "China is a"]
-                sequences = self._batch_tokenize(input_text)
+                # Multiple questions to simulate batch > 1 scenario
+                input_texts = [
+                    "the capital of France is",
+                    "what is the largest planet in",
+                    "the founder of Apple company was"
+                ]
+
+                input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
+                    input_texts, tokenizer)
+
+                print(f"Input text batch: {input_texts}")
+                print(f"Batch size: {len(input_texts)}")
+                print(f"Actual sequence lengths: {actual_seq_lens}")
+                print(f"Input tokens shape: {input_ids_array.shape}")
+                print(f"Input tokens: {input_ids_array}")
 
                 with self.mesh:
-                    for i in range(1):
-                        # Create ForwardBatch for each iteration
-                        forward_batch = self._create_batch(sequences)
+                    for i in range(10):
+                        # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
 
                         # The LogitsProcessor now automatically extracts the last token logits
                         # y.next_token_logits shape: [batch_size, vocab_size]
 
-                        # Sample next token
+                        # Sample next token for each sequence in the batch
                         next_token_ids = sampler(
                             y,  # Pass the LogitsProcessorOutput directly
                             sampling_info=SamplingBatchInfo(
-                                temperatures=jnp.full((1, 1), 0.1),
-                                top_ps=jnp.full((1, 1), 0.8),
-                                top_ks=jnp.full((1, 1), 50),
-                                min_ps=jnp.full((1, 1), 0.01),
+                                temperatures=jnp.full(
+                                    (len(input_texts), 1), 1.0),
+                                top_ps=jnp.full((len(input_texts), 1), 1.0),
+                                top_ks=jnp.ones((len(input_texts), 1)),
+                                min_ps=jnp.full((len(input_texts), 1), 0.0),
                                 vocab_size=model.config.vocab_size,
                             ))
 
-                        # Update sequence with new token for next iteration
-                        sequence_extend(sequences, next_token_ids)
+                        # Update sequences with new tokens for next iteration
+                        # Insert new tokens at the end of their respective sequences
+                        new_input_ids = []
+                        start_idx = 0
+                        for batch_idx, seq_len in enumerate(actual_seq_lens):
+                            # Current sequence tokens + new token
+                            seq_tokens = input_ids_array[start_idx:start_idx +
+                                                         seq_len].tolist()
+                            seq_tokens.append(
+                                int(next_token_ids[batch_idx, 0]))
+                            new_input_ids.extend(seq_tokens)
+                            start_idx += seq_len
 
-                        # 解码当前生成的 token
-                        for next_token_id in next_token_ids:
-                            current_token_id = int(next_token_id[0])
-                            decoded_token = tokenizer.decode([current_token_id])
+                        input_ids_array = jnp.array(
+                            new_input_ids, dtype=jnp.int32)
+                        # Update actual sequence lengths
+                        actual_seq_lens = [
+                            length + 1 for length in actual_seq_lens]
+
+                        # Decode current generated tokens (for each sequence in batch)
+                        print(f"\nStep {i+1}:")
+                        for batch_idx in range(len(input_texts)):
+                            current_token_id = int(
+                                next_token_ids[batch_idx, 0])
+                            decoded_token = tokenizer.decode(
+                                [current_token_id])
                             print(
-                                f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
+                                f"  Batch {batch_idx}: token_id={current_token_id}, decoded='{decoded_token}'")
 
-                full_sequence = [seq.input_ids for seq in sequences]
-                decoded_full = [tokenizer.decode(
-                    seq.input_ids) for seq in sequences]
-                print(f"\n完整生成序列: {full_sequence}")
-                print(f"完整解码文本: '{decoded_full}'")
+                        # Update ForwardBatch attributes to avoid recreation
+                        seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)
+                        extend_start_loc = jnp.cumsum(
+                            jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
+
+                        # Add new positions (next position for each sequence)
+                        new_positions = jnp.array(
+                            [seq_len - 1 for seq_len in actual_seq_lens], dtype=jnp.int32)
+                        forward_batch.positions = jnp.concatenate(
+                            [forward_batch.positions, new_positions])
+                        forward_batch.input_ids = input_ids_array
+                        forward_batch.seq_lens = seq_lens
+                        forward_batch.extend_start_loc = extend_start_loc
+                        forward_batch.total_tokens = len(input_ids_array)
+
+                # Decode complete results for each sequence
+                print(f"\n=== Complete Generation Results ===")
+                start_idx = 0
+                for batch_idx in range(len(input_texts)):
+                    # Extract tokens for each sequence from flattened array
+                    seq_len = actual_seq_lens[batch_idx]
+                    end_idx = start_idx + seq_len
+                    full_sequence = [int(token)
+                                     for token in input_ids_array[start_idx:end_idx]]
+                    decoded_full = tokenizer.decode(full_sequence)
+                    print(f"Sequence {batch_idx}: {full_sequence}")
+                    print(f"Decoded text {batch_idx}: '{decoded_full}'")
+                    print(
+                        f"Original question {batch_idx}: '{input_texts[batch_idx]}'")
+                    print(f"Actual length {batch_idx}: {seq_len}")
+                    start_idx = end_idx
+                    print()
 
                 print("\n🔴 Ending debug tracer session...")
                 debug_file = global_tracer.end_session()
