@@ -124,6 +124,12 @@ class MockTokenToKVPool:
     def get_kv_buffer(self, layer_id):
         """Return both key and value buffers for a specific layer"""
         return self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
+    
+    def set_kv_buffer(self, layer, loc, cache_k, cache_v):
+        """Set KV buffer - mock implementation for testing"""
+        # Mock implementation - just store the data without actual processing
+        # In a real implementation, this would store cache_k and cache_v at the specified locations
+        pass
 
 
 class MockForwardBatch:
