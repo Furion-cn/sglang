@@ -63,7 +63,7 @@ class QWenMLP(nnx.Module):
         a2 = self.w2(hidden_states)
         intermediate_parallel = a1 * self.act_func(a2)
         intermediate_parallel = jax.lax.with_sharding_constraint(
-            intermediate_parallel, PartitionSpec('tensor', None))
+            intermediate_parallel, PartitionSpec(None, 'tensor'))
         output = self.c_proj(intermediate_parallel)
         return output
 
