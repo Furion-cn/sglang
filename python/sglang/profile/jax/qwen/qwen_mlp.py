@@ -36,13 +36,32 @@ def create_sharded_model():
     return model
 
 
-with jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", create_perfetto_link=False):
-    with mesh:
-        sharded_model = create_sharded_model()
-        hidden_states = jnp.ones(
-            (batch_size, hidden_size), dtype=jnp.bfloat16)
-        hidden_states = jax.lax.with_sharding_constraint(
-            hidden_states, PartitionSpec('data', None))
+with jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", create_perfetto_trace=True), mesh:
+    sharded_model = create_sharded_model()
+    hidden_states = jnp.ones(
+        (batch_size, hidden_size), dtype=jnp.bfloat16)
+    hidden_states = jax.lax.with_sharding_constraint(
+        hidden_states, PartitionSpec('data', None))
 
+    for i in range(3000):
+        # print(f"interation: {i}")
         y = sharded_model(hidden_states=hidden_states)
-        y.block_until_ready()
+    # y.block_until_ready()
+
+
+# jax.profiler.start_server(8877)
+# print("profiler server has started")
+
+# with mesh:
+#     sharded_model = create_sharded_model()
+#     hidden_states = jnp.ones(
+#         (batch_size, hidden_size), dtype=jnp.bfloat16)
+#     hidden_states = jax.lax.with_sharding_constraint(
+#         hidden_states, PartitionSpec('data', None))
+
+#     for i in range(10):
+#         y = sharded_model(hidden_states=hidden_states)
+
+#     y.block_until_ready()
+
+# jax.profiler.stop_server()
