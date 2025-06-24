@@ -36,12 +36,10 @@ Examples:
     )
     
     # Model path arguments
-    model_group = parser.add_mutually_exclusive_group(required=True)
-    model_group.add_argument(
+    parser.add_argument(
         "--model", 
         help="Model path to use for both JAX and PyTorch (sets both JAX_MODEL_PATH and PYTORCH_MODEL_PATH)"
     )
-    
     parser.add_argument(
         "--jax-model", 
         help="Path to JAX model (sets JAX_MODEL_PATH)"
