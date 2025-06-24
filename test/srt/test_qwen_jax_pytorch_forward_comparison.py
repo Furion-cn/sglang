@@ -24,40 +24,30 @@ from unittest.mock import patch
 # Add the parent directory to the path to import sglang modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
 
-try:
-    import jax
-    import jax.numpy as jnp
-    from flax import nnx
-    from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
-    from sglang.srt.model_loader.loader import JAXModelLoader
-    from sglang.srt.jax.sampling.sampler import Sampler
-    from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
-    from sglang.srt.jax.utils import create_device_mesh
-    JAX_AVAILABLE = True
-except ImportError as e:
-    print(f"JAX not available: {e}")
-    JAX_AVAILABLE = False
+# Direct imports - fail if not available
+import jax
+import jax.numpy as jnp
+from flax import nnx
+from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
+from sglang.srt.model_loader.loader import JAXModelLoader
+from sglang.srt.jax.sampling.sampler import Sampler
+from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
+from sglang.srt.jax.utils import create_device_mesh
 
-try:
-    import torch
-    from sglang.srt.models.qwen import QWenLMHeadModel as PyTorchQWenLMHeadModel
-    from sglang.srt.model_loader.loader import DefaultModelLoader
-    PYTORCH_AVAILABLE = True
-except ImportError as e:
-    print(f"PyTorch not available: {e}")
-    PYTORCH_AVAILABLE = False
+import torch
+from sglang.srt.models.qwen import QWenLMHeadModel as PyTorchQWenLMHeadModel
+from sglang.srt.model_loader.loader import DefaultModelLoader
 
-try:
-    from transformers import AutoTokenizer, AutoConfig
-    TRANSFORMERS_AVAILABLE = True
-except ImportError as e:
-    print(f"Transformers not available: {e}")
-    TRANSFORMERS_AVAILABLE = False
+from transformers import AutoTokenizer, AutoConfig
 
 from sglang.srt.debug_tracer import global_tracer
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
+from sglang.srt.distributed.parallel_state import (
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 
 
 class MockForwardBatch:
@@ -80,6 +70,20 @@ class TestQWenForwardComparison(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures"""
+        # Initialize distributed environment for PyTorch models
+        try:
+            init_distributed_environment(
+                backend="gloo",  # Use gloo backend for CPU
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                distributed_init_method="tcp://127.0.0.1:2646",
+            )
+            initialize_model_parallel(tensor_model_parallel_size=1)
+        except AssertionError:
+            # ignore this error: tensor model parallel group is already initialized
+            pass
+        
         # Configuration
         # Support both old MODEL_PATH and new separate paths
         self.jax_model_path = os.environ.get('JAX_MODEL_PATH', os.environ.get('MODEL_PATH', '/tmp/test_qwen_model'))
@@ -91,14 +95,13 @@ class TestQWenForwardComparison(unittest.TestCase):
         self.temperature = 0.0  # Use deterministic generation for comparison
         
         # JAX setup
-        if JAX_AVAILABLE:
-            self.mesh = create_device_mesh(
-                ici_parallelism=[-1, 1, 1, 1], 
-                dcn_parallelism=[1, 1, 1, 1]
-            )
-            self.load_config = LoadConfig(load_format=LoadFormat.JAX)
-            self.device_config = DeviceConfig()
-            self.jax_loader = JAXModelLoader(self.load_config)
+        self.mesh = create_device_mesh(
+            ici_parallelism=[-1, 1, 1, 1], 
+            dcn_parallelism=[1, 1, 1, 1]
+        )
+        self.load_config = LoadConfig(load_format=LoadFormat.JAX)
+        self.device_config = DeviceConfig()
+        self.jax_loader = JAXModelLoader(self.load_config)
         
         # Enable debug tracing for PyTorch
         global_tracer.enable()
@@ -214,31 +217,28 @@ class TestQWenForwardComparison(unittest.TestCase):
         print("\n=== Testing Model Loading ===")
         
         # Test JAX model loading
-        if JAX_AVAILABLE:
-            try:
-                jax_model = self._load_jax_model()
-                print("✓ JAX model loaded successfully")
-                print(f"JAX model type: {type(jax_model)}")
-            except Exception as e:
-                print(f"✗ JAX model loading failed: {e}")
-                self.fail(f"JAX model loading failed: {e}")
+        try:
+            jax_model = self._load_jax_model()
+            print("✓ JAX model loaded successfully")
+            print(f"JAX model type: {type(jax_model)}")
+        except Exception as e:
+            print(f"✗ JAX model loading failed: {e}")
+            self.fail(f"JAX model loading failed: {e}")
         
         # Test PyTorch model loading
-        if PYTORCH_AVAILABLE:
-            try:
-                pytorch_model = self._load_pytorch_model()
-                print("✓ PyTorch model loaded successfully")
-                print(f"PyTorch model type: {type(pytorch_model)}")
-            except Exception as e:
-                print(f"✗ PyTorch model loading failed: {e}")
-                self.fail(f"PyTorch model loading failed: {e}")
+        try:
+            pytorch_model = self._load_pytorch_model()
+            print("✓ PyTorch model loaded successfully")
+            print(f"PyTorch model type: {type(pytorch_model)}")
+        except Exception as e:
+            print(f"✗ PyTorch model loading failed: {e}")
+            self.fail(f"PyTorch model loading failed: {e}")
     
     def test_forward_pass_comparison(self):
         """Test forward pass comparison between JAX and PyTorch models"""
         print("\n=== Testing Forward Pass Comparison ===")
         
-        if not (JAX_AVAILABLE and PYTORCH_AVAILABLE and TRANSFORMERS_AVAILABLE):
-            pytest.skip("Required dependencies not available")
+        # All dependencies are required - no skip logic
         
         # Load models
         jax_model = self._load_jax_model()
@@ -325,8 +325,7 @@ class TestQWenForwardComparison(unittest.TestCase):
         """Test generation comparison between JAX and PyTorch models"""
         print("\n=== Testing Generation Comparison ===")
         
-        if not (JAX_AVAILABLE and PYTORCH_AVAILABLE and TRANSFORMERS_AVAILABLE):
-            pytest.skip("Required dependencies not available")
+        # All dependencies are required - no skip logic
         
         # Load models
         jax_model = self._load_jax_model()
