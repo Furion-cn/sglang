@@ -61,9 +61,11 @@ class MockReqToTokenPool:
     def __init__(self):
         self.size = 100
         self.max_context_len = 512
-        self.req_to_token = torch.zeros(
-            (self.size, self.max_context_len), dtype=torch.int32
-        )
+        # Initialize with valid token indices instead of zeros
+        # Create a pattern where each request has sequential token indices
+        self.req_to_token = torch.arange(
+            self.size * self.max_context_len, dtype=torch.int32
+        ).reshape(self.size, self.max_context_len) % 1000  # Ensure indices are within buffer size
         self.free_slots = list(range(self.size))
     
     def write(self, indices, values):
@@ -100,26 +102,33 @@ class MockTokenToKVPool:
         self.num_heads = 32
         self.head_dim = 128
         
-        # Initialize key and value buffers
-        self.key_buffer = torch.zeros(
-            (self.size, self.num_layers, self.page_size, self.num_heads, self.head_dim),
-            dtype=torch.float16
-        )
-        self.value_buffer = torch.zeros(
-            (self.size, self.num_layers, self.page_size, self.num_heads, self.head_dim),
-            dtype=torch.float16
-        )
+        # Initialize key and value buffers with correct shape: [size, head_num, head_dim] for each layer
+        # This matches the real MHATokenToKVPool implementation
+        self.k_buffer = [
+            torch.zeros(
+                (self.size + self.page_size, self.num_heads, self.head_dim),
+                dtype=torch.float16
+            )
+            for _ in range(self.num_layers)
+        ]
+        self.v_buffer = [
+            torch.zeros(
+                (self.size + self.page_size, self.num_heads, self.head_dim),
+                dtype=torch.float16
+            )
+            for _ in range(self.num_layers)
+        ]
         
         # Track free pages
         self.free_pages = list(range(self.size))
     
     def get_key_buffer(self, layer_id):
         """Return the key buffer for a specific layer"""
-        return self.key_buffer[:, layer_id]
+        return self.k_buffer[layer_id]
     
     def get_value_buffer(self, layer_id):
         """Return the value buffer for a specific layer"""
-        return self.value_buffer[:, layer_id]
+        return self.v_buffer[layer_id]
     
     def get_kv_buffer(self, layer_id):
         """Return both key and value buffers for a specific layer"""
