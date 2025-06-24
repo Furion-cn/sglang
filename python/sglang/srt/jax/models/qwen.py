@@ -127,6 +127,8 @@ class QWenAttention(nnx.Module):
         
         q = self.rotary_emb(q, positions)
         k = self.rotary_emb(k, positions)
+        global_tracer.print(q, "attn_q_rope", "ATTENTION")
+        global_tracer.print(k, "attn_k_rope", "ATTENTION")
         
         attn_output = self.attn(q, k, v, is_causal=True)
         global_tracer.print(attn_output, "attn_output", "Attention")
