@@ -102,8 +102,27 @@ Examples:
             if not (model_path / "config.json").exists():
                 print(f"Warning: config.json not found in {model_path}")
     
+    # Check if pytest is available
+    try:
+        import pytest
+    except ImportError:
+        print("Error: pytest is not installed. Please install it with:")
+        print("  pip install pytest")
+        print("  or")
+        print("  conda install pytest")
+        sys.exit(1)
+    
     # Build pytest command
-    test_file = Path(__file__).parent / "test" / "srt" / "test_qwen_jax_pytorch_forward_comparison.py"
+    test_file = Path(__file__).parent / "test_qwen_jax_pytorch_forward_comparison.py"
+    
+    # Verify test file exists
+    if not test_file.exists():
+        print(f"Error: Test file not found: {test_file}")
+        print(f"Current script location: {Path(__file__).parent}")
+        print("Available files:")
+        for f in Path(__file__).parent.glob("*.py"):
+            print(f"  {f.name}")
+        sys.exit(1)
     
     cmd = ["python", "-m", "pytest", str(test_file)]
     

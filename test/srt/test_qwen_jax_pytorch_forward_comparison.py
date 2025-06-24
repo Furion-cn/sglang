@@ -29,7 +29,7 @@ try:
     import jax.numpy as jnp
     from flax import nnx
     from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
-    from sglang.srt.jax.model_loader import JAXModelLoader
+    from sglang.srt.model_loader.loader import JAXModelLoader
     from sglang.srt.jax.sampling.sampler import Sampler
     from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
     from sglang.srt.jax.utils import create_device_mesh
@@ -81,7 +81,11 @@ class TestQWenForwardComparison(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         # Configuration
-        self.test_model_path = os.environ.get('MODEL_PATH', '/tmp/test_qwen_model')
+        # Support both old MODEL_PATH and new separate paths
+        self.jax_model_path = os.environ.get('JAX_MODEL_PATH', os.environ.get('MODEL_PATH', '/tmp/test_qwen_model'))
+        self.pytorch_model_path = os.environ.get('PYTORCH_MODEL_PATH', os.environ.get('MODEL_PATH', '/tmp/test_qwen_model'))
+        # For backward compatibility, use pytorch_model_path as default test_model_path
+        self.test_model_path = self.pytorch_model_path
         self.test_text = "Hello, how are you today?"
         self.max_new_tokens = 5
         self.temperature = 0.0  # Use deterministic generation for comparison
@@ -119,26 +123,28 @@ class TestQWenForwardComparison(unittest.TestCase):
     
     def _get_tokenizer(self):
         """Get tokenizer from local path if available, otherwise from Hugging Face"""
-        model_path = Path(self.test_model_path)
+        # Try PyTorch model path first, then JAX model path
+        for model_path_str in [self.pytorch_model_path, self.jax_model_path]:
+            model_path = Path(model_path_str)
+            
+            # Check if tokenizer files exist in the model path
+            tokenizer_files = [
+                'tokenizer_config.json',
+                'tokenization_qwen.py', 
+                'qwen.tiktoken'
+            ]
+            
+            has_tokenizer = all((model_path / file).exists() for file in tokenizer_files)
+            
+            if has_tokenizer:
+                print(f"📁 Using local tokenizer from: {model_path}")
+                try:
+                    return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+                except Exception as e:
+                    print(f"⚠️  Failed to load local tokenizer from {model_path}: {e}")
+                    continue
         
-        # Check if tokenizer files exist in the model path
-        tokenizer_files = [
-            'tokenizer_config.json',
-            'tokenization_qwen.py', 
-            'qwen.tiktoken'
-        ]
-        
-        has_tokenizer = all((model_path / file).exists() for file in tokenizer_files)
-        
-        if has_tokenizer:
-            print(f"📁 Using local tokenizer from: {model_path}")
-            try:
-                return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
-            except Exception as e:
-                print(f"⚠️  Failed to load local tokenizer: {e}")
-                print("🔄 Falling back to Hugging Face...")
-        else:
-            print(f"📁 No tokenizer found in {model_path}, using Hugging Face")
+        print(f"📁 No tokenizer found in model paths, using Hugging Face")
         
         # Fallback to Hugging Face
         print("🌐 Loading tokenizer from Hugging Face: Qwen/Qwen-7B")
@@ -146,22 +152,22 @@ class TestQWenForwardComparison(unittest.TestCase):
     
     def _load_jax_model(self):
         """Load JAX model from local path"""
-        if not os.path.exists(self.test_model_path):
-            self.skipTest(f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
+        if not os.path.exists(self.jax_model_path):
+            self.skipTest(f"JAX model path {self.jax_model_path} not found. Set JAX_MODEL_PATH environment variable.")
         
         try:
             hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
-                self.test_model_path, None
+                self.jax_model_path, None
             )
             
             if not hf_weights_files:
-                self.skipTest(f"No .msgpack files found in {self.test_model_path}")
+                self.skipTest(f"No .msgpack files found in {self.jax_model_path}")
             
-            print(f"\n=== Loading JAX Model from: {self.test_model_path} ===")
+            print(f"\n=== Loading JAX Model from: {self.jax_model_path} ===")
             print(f"Found {len(hf_weights_files)} msgpack files")
             
             model_config = ModelConfig(
-                model_path=self.test_model_path,
+                model_path=self.jax_model_path,
                 model_override_args="{}"
             )
             
@@ -182,14 +188,14 @@ class TestQWenForwardComparison(unittest.TestCase):
     
     def _load_pytorch_model(self):
         """Load PyTorch model from local path"""
-        if not os.path.exists(self.test_model_path):
-            self.skipTest(f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
+        if not os.path.exists(self.pytorch_model_path):
+            self.skipTest(f"PyTorch model path {self.pytorch_model_path} not found. Set PYTORCH_MODEL_PATH environment variable.")
         
         try:
-            print(f"\n=== Loading PyTorch Model from: {self.test_model_path} ===")
+            print(f"\n=== Loading PyTorch Model from: {self.pytorch_model_path} ===")
             
             # Load config
-            config = AutoConfig.from_pretrained(self.test_model_path, trust_remote_code=True)
+            config = AutoConfig.from_pretrained(self.pytorch_model_path, trust_remote_code=True)
             
             # Create PyTorch model
             pytorch_model = PyTorchQWenLMHeadModel(config)
