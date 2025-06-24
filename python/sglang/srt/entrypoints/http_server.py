@@ -98,6 +98,7 @@ from sglang.srt.utils import (
 from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
 from sglang.version import __version__
+from sglang.debug_tracer import global_tracer
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -244,7 +245,11 @@ async def set_internal_state(obj: SetInternalStateReq, request: Request):
 # fastapi implicitly converts json in the request to obj (dataclass)
 @app.api_route("/generate", methods=["POST", "PUT"])
 async def generate_request(obj: GenerateReqInput, request: Request):
-    """Handle a generate request."""
+    """Handle a generate request with optional debug tracing."""
+    # Add debug flag to the request if debug tracer is enabled
+    if global_tracer.enabled:
+        obj.enable_debug_trace = True
+    
     if obj.stream:
 
         async def stream_results() -> AsyncIterator[bytes]:
@@ -610,12 +615,16 @@ async def separate_reasoning_request(obj: SeparateReasoningReqInput, request: Re
 
 @app.post("/v1/completions")
 async def openai_v1_completions(raw_request: Request):
-    return await v1_completions(_global_state.tokenizer_manager, raw_request)
+    """Handle OpenAI v1 completions with debug tracing support."""
+    response = await v1_completions(_global_state.tokenizer_manager, raw_request)
+    return response
 
 
 @app.post("/v1/chat/completions")
 async def openai_v1_chat_completions(raw_request: Request):
-    return await v1_chat_completions(_global_state.tokenizer_manager, raw_request)
+    """OpenAI compatible chat completions API with automatic debug tracing."""
+    response = await v1_chat_completions(_global_state.tokenizer_manager, raw_request)
+    return response
 
 
 @app.post("/v1/embeddings", response_class=ORJSONResponse)

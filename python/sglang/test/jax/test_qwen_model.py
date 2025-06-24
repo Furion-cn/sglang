@@ -7,8 +7,12 @@ from transformers import AutoTokenizer, PretrainedConfig
 
 from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.layers.sampler import Sampler
+<<<<<<< HEAD
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen import QWenLMHeadModel
+=======
+from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
+>>>>>>> 4f2cc3796 (debug tracer)
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
 
@@ -23,7 +27,7 @@ class TestQwenModel(unittest.TestCase):
     @staticmethod
     @nnx.jit
     def _setup_model():
-        model = QWenLMHeadModel(config=PretrainedConfig(
+        model = QWenLMHeadJaxModel(config=PretrainedConfig(
             vocab_size=10000,
             hidden_size=1024,
             num_hidden_layers=12,

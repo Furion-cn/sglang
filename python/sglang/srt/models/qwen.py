@@ -21,7 +21,9 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from sglang.debug_tracer import global_tracer, trace_function
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
+from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
@@ -75,6 +77,7 @@ class QWenMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
+    @trace_function(stage="MLP", include_args=False, include_output=True)
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
@@ -96,6 +99,7 @@ class QWenAttention(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
+        self.layer_id = layer_id
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
@@ -137,6 +141,7 @@ class QWenAttention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
+    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -160,6 +165,7 @@ class QWenBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        self.layer_id = layer_id
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -184,6 +190,7 @@ class QWenBlock(nn.Module):
             prefix=add_prefix("mlp", prefix),
         )
 
+    @trace_function(stage="BLOCK", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -238,6 +245,7 @@ class QWenModel(nn.Module):
         )
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
+    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -245,6 +253,7 @@ class QWenModel(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
+        
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -252,6 +261,7 @@ class QWenModel(nn.Module):
                 hidden_states,
                 forward_batch,
             )
+        
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
@@ -273,6 +283,19 @@ class QWenLMHeadModel(nn.Module):
             vocab_size, config.hidden_size, prefix=add_prefix("lm_head", prefix)
         )
         self.logits_processor = LogitsProcessor(config)
+        
+        # Initialize tokenizer for debug tracer
+        self._setup_debug_tracer()
+
+    def _setup_debug_tracer(self):
+        try:
+            model_path = getattr(self.config, '_name_or_path', None)
+            if model_path:
+                tokenizer = get_tokenizer(model_path, trust_remote_code=True)
+                global_tracer.set_tokenizer(tokenizer)
+                print(f"Debug tracer initialized with tokenizer from: {model_path}")
+        except Exception as e:
+            print(f"Warning: Could not initialize tokenizer for debug tracer: {str(e)}")
 
     @torch.no_grad()
     def forward(
@@ -282,9 +305,32 @@ class QWenLMHeadModel(nn.Module):
         forward_batch: ForwardBatch,
     ):
         hidden_states = self.transformer(input_ids, positions, forward_batch)
-        return self.logits_processor(
+        result = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
+        
+        if global_tracer.is_session_active():
+            input_data = {
+                "input_ids": input_ids,
+                "input_shape": list(input_ids.shape)
+            }
+            
+            output_data = {
+                "output_type": str(type(result).__name__)
+            }
+            
+            if hasattr(result, 'next_token_logits') and result.next_token_logits is not None:
+                output_data.update({
+                    "logits": result.next_token_logits,
+                    "logits_shape": list(result.next_token_logits.shape)
+                })
+            
+            global_tracer.accumulate_step(input_data, output_data)
+            
+            if global_tracer.should_auto_save():
+                global_tracer.end_session()
+        
+        return result
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

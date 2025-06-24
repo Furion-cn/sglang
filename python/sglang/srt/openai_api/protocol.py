@@ -418,6 +418,9 @@ class ChatCompletionRequest(BaseModel):
 
     # Hidden States
     return_hidden_states: Optional[bool] = False
+    
+    # For debug tracing - internal use only
+    enable_debug_trace: bool = False
 
 
 class ChatMessage(BaseModel):
