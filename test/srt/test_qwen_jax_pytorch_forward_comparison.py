@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
+from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel as JAXQWenLMHeadModel
 from sglang.srt.model_loader.loader import JAXModelLoader, get_model_loader
 from sglang.test.jax.test_utils import create_device_mesh
 

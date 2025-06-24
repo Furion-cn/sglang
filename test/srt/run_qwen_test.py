@@ -63,9 +63,9 @@ def check_sglang_dependencies():
     try:
         from sglang.srt.model_loader.loader import JAXModelLoader
         from sglang.srt.configs.load_config import LoadFormat
-        from sglang.srt.jax.models.qwen import QWenLMHeadModel
+        from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
         print("✓ SGLang JAXModelLoader available")
-        print("✓ QWenLMHeadModel available")
+        print("✓ QWenLMHeadJaxModel available")
         return True
     except ImportError as e:
         print(f"✗ SGLang dependencies not available: {e}")
@@ -134,7 +134,7 @@ def create_sample_qwen_model(output_dir):
         "max_position_embeddings": 512,
         "layer_norm_epsilon": 1e-6,
         "rope_theta": 10000,
-        "architectures": ["QWenLMHeadModel"]
+        "architectures": ["QWenLMHeadJaxModel"]
     }
     
     with open(model_dir / "config.json", "w") as f:

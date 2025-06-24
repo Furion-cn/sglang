@@ -246,7 +246,7 @@ class QWenModel(nnx.Module):
         return hidden_states
 
 
-class QWenLMHeadModel(nnx.Module):
+class QWenLMHeadJaxModel(nnx.Module):
     """QWen language head model"""
 
     def __init__(self,
@@ -301,4 +301,4 @@ class QWenLMHeadModel(nnx.Module):
         
         return logits_output
 
-EntryClass = QWenLMHeadModel
+EntryClass = QWenLMHeadJaxModel

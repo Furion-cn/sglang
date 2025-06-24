@@ -21,7 +21,7 @@ from transformers import AutoTokenizer
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.jax.models.qwen import QWenLMHeadModel
+from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.test_utils import CustomTestCase
 from sglang.test.jax.test_utils import create_device_mesh
@@ -30,7 +30,7 @@ from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 
 
 class TestQWenLoadWeights(CustomTestCase):
-    """Test cases for QWenLMHeadModel using JAXModelLoader"""
+    """Test cases for QWenLMHeadJaxModel using JAXModelLoader"""
     
     def setUp(self):
         """Set up test fixtures"""
@@ -109,7 +109,7 @@ class TestQWenLoadWeights(CustomTestCase):
             )
             
             with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
-                mock_arch.return_value = (QWenLMHeadModel, None)
+                mock_arch.return_value = (QWenLMHeadJaxModel, None)
                 
                 print("\n🔄 Loading model with JAXModelLoader...")
                 model = self.jax_loader.load_model(
@@ -120,7 +120,7 @@ class TestQWenLoadWeights(CustomTestCase):
                 
                 print("✅ Model loaded successfully!")
                 
-                self.assertIsInstance(model, QWenLMHeadModel)
+                self.assertIsInstance(model, QWenLMHeadJaxModel)
                 self.assertIsNotNone(model.config)
 
                 print(f"\n📋 Model config:")

@@ -4,7 +4,7 @@ from flax import nnx
 from transformers import AutoTokenizer, PretrainedConfig
 
 from sglang.srt.jax.layers.sampler import Sampler
-from sglang.srt.jax.models.qwen import QWenLMHeadModel
+from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
 from sglang.test.test_utils import CustomTestCase
@@ -20,7 +20,7 @@ class TestQwenModel(CustomTestCase):
     @staticmethod
     @nnx.jit
     def _setup_model():
-        model = QWenLMHeadModel(config=PretrainedConfig(
+        model = QWenLMHeadJaxModel(config=PretrainedConfig(
             vocab_size=10000,
             hidden_size=1024,
             num_hidden_layers=12,
