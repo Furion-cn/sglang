@@ -71,9 +71,9 @@ class CustomOp(nn.Module):
         return self.forward_native(*args, **kwargs)
 
     def dispatch_forward(self):
-        if _is_cuda:
-            return self.forward_cuda
-        elif _is_hip:
-            return self.forward_hip
-        else:
-            return self.forward_native
+        # if _is_cuda:
+        #     return self.forward_cuda
+        # elif _is_hip:
+        #     return self.forward_hip
+        # else:
+        return self.forward_native

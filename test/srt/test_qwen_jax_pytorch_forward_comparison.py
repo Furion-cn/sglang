@@ -29,7 +29,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from sglang.srt.jax.models.qwen import QWenLMHeadModel as JAXQWenLMHeadModel
-from sglang.srt.model_loader.loader import JAXModelLoader
+from sglang.srt.model_loader.loader import JAXModelLoader, get_model_loader
 from sglang.test.jax.test_utils import create_device_mesh
 
 import torch
@@ -187,67 +187,35 @@ class TestQWenForwardComparison(unittest.TestCase):
             self.fail(f"Failed to load JAX model: {e}")
     
     def _load_pytorch_model(self):
-        """Load PyTorch model from local path with actual weights"""
+        """Load PyTorch model from local path using DefaultModelLoader"""
         if not os.path.exists(self.pytorch_model_path):
             self.skipTest(f"PyTorch model path {self.pytorch_model_path} not found. Set PYTORCH_MODEL_PATH environment variable.")
         
         try:
             print(f"\n=== Loading PyTorch Model from: {self.pytorch_model_path} ===")
             
-            # Load config
-            config = AutoConfig.from_pretrained(self.pytorch_model_path, trust_remote_code=True)
+            # Create load config for PyTorch (default format)
+            pytorch_load_config = LoadConfig(load_format=LoadFormat.AUTO)
             
-            # Create PyTorch model
-            pytorch_model = PyTorchQWenLMHeadModel(config)
+            # Create model config
+            model_config = ModelConfig(
+                model_path=self.pytorch_model_path,
+                model_override_args="{}"
+            )
             
-            # Load actual weights from model files
-            print("📥 Loading PyTorch model weights from checkpoint files...")
+            # Create device config
+            device_config = DeviceConfig()
             
-            # Find weight files in the model directory
-            import glob
-            weight_files = []
-            for pattern in ["*.safetensors", "*.bin", "*.pt"]:
-                weight_files.extend(glob.glob(os.path.join(self.pytorch_model_path, pattern)))
+            # Get PyTorch model loader
+            pytorch_loader = get_model_loader(pytorch_load_config)
             
-            if not weight_files:
-                raise RuntimeError(f"No weight files found in {self.pytorch_model_path}. Expected *.safetensors, *.bin, or *.pt files.")
+            # Load model using standard loader
+            pytorch_model = pytorch_loader.load_model(
+                model_config=model_config,
+                device_config=device_config,
+            )
             
-            # Load weights from files
-            state_dict = {}
-            for weight_file in weight_files:
-                print(f"  Loading weights from: {os.path.basename(weight_file)}")
-                if weight_file.endswith('.safetensors'):
-                    import safetensors.torch
-                    file_state_dict = safetensors.torch.load_file(weight_file, device="cpu")
-                else:
-                    file_state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
-                state_dict.update(file_state_dict)
-            
-            # Load state dict into model
-            missing_keys, unexpected_keys = pytorch_model.load_state_dict(state_dict, strict=False)
-            
-            if missing_keys:
-                print(f"⚠️  Missing keys in state dict: {len(missing_keys)} keys")
-                if len(missing_keys) <= 5:
-                    for key in missing_keys:
-                        print(f"    - {key}")
-                else:
-                    for key in missing_keys[:3]:
-                        print(f"    - {key}")
-                    print(f"    ... and {len(missing_keys) - 3} more")
-            
-            if unexpected_keys:
-                print(f"⚠️  Unexpected keys in state dict: {len(unexpected_keys)} keys")
-                if len(unexpected_keys) <= 5:
-                    for key in unexpected_keys:
-                        print(f"    - {key}")
-                else:
-                    for key in unexpected_keys[:3]:
-                        print(f"    - {key}")
-                    print(f"    ... and {len(unexpected_keys) - 3} more")
-            
-            print(f"✅ PyTorch Model loaded successfully with {len(state_dict)} weight tensors!")
-            
+            print("✅ PyTorch Model loaded successfully using DefaultModelLoader!")
             return pytorch_model
             
         except Exception as e:
