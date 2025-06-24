@@ -63,6 +63,21 @@ class MockTokenToKVPool:
     def set_kv_buffer(self, layer, loc, cache_k, cache_v):
         """Mock implementation of set_kv_buffer"""
         pass
+    
+    def get_key_buffer(self, layer_id: int):
+        # Mock implementation - return empty tensor
+        import torch
+        return torch.empty(0)
+    
+    def get_value_buffer(self, layer_id: int):
+        # Mock implementation - return empty tensor
+        import torch
+        return torch.empty(0)
+    
+    def get_kv_buffer(self, layer_id: int):
+        # Mock implementation - return tuple of empty tensors
+        import torch
+        return torch.empty(0), torch.empty(0)
 
 
 class MockForwardBatch:
