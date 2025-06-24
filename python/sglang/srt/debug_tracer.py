@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""统一的调试跟踪器，支持 JAX 和 PyTorch 模型对比"""
-
 import threading
 from typing import Dict, List, Optional, Union, Any
 
@@ -8,23 +5,13 @@ import torch
 import jax.numpy as jnp
 
 
-class UnifiedDebugTracer:
-    """统一的调试跟踪器，支持 JAX 和 PyTorch 模型对比"""
-    
+class UnifiedDebugTracer:    
     def __init__(self):
         self.enabled = True
-        self.records = {}  # 按 key 分组存储
-        self.lock = threading.Lock()  # 线程安全
+        self.records = {}
+        self.lock = threading.Lock() 
     
     def print(self, tensor: Union[torch.Tensor, jnp.ndarray], name: str, stage: str = "", extra_info: str = ""):
-        """统一的记录接口，兼容 JAX 和 PyTorch
-        
-        Args:
-            tensor: 要记录的张量 (PyTorch 或 JAX)
-            name: 张量名称
-            stage: 阶段标识
-            extra_info: 额外信息
-        """
         if not self.enabled:
             return
         
@@ -32,11 +19,9 @@ class UnifiedDebugTracer:
             print(f"[{stage}] {name}: None")
             return
         
-        # 生成唯一的 key
         key = f"{stage}_{name}" if stage else name
         
-        # 处理不同框架的张量
-        if hasattr(tensor, 'cpu'):  # PyTorch
+        if hasattr(tensor, 'cpu'): 
             stats = self._compute_pytorch_stats(tensor, name, stage)
         else:  # JAX
             stats = self._compute_jax_stats(tensor, name, stage, extra_info)
@@ -50,8 +35,6 @@ class UnifiedDebugTracer:
         self._print_stats(stats, key)
     
     def _compute_pytorch_stats(self, tensor: torch.Tensor, name: str, stage: str) -> Dict[str, Any]:
-        """计算 PyTorch 张量统计信息"""
-        # Convert to CPU for statistics if on GPU
         if hasattr(tensor, 'cpu'):
             tensor_cpu = tensor.cpu()
         else:
@@ -84,7 +67,6 @@ class UnifiedDebugTracer:
         return stats
     
     def _compute_jax_stats(self, tensor: jnp.ndarray, name: str, stage: str, extra_info: str) -> Dict[str, Any]:
-        """计算 JAX 张量统计信息"""
         try:
             stats = {
                 'framework': 'jax',
@@ -114,7 +96,6 @@ class UnifiedDebugTracer:
         return stats
     
     def _print_stats(self, stats: Dict[str, Any], key: str):
-        """打印统计信息"""
         if 'error' in stats:
             print(f"[{stats['stage']}] {stats['name']}: shape={stats['shape']}, dtype={stats['dtype']}, error={stats['error']}")
         else:
@@ -131,40 +112,22 @@ class UnifiedDebugTracer:
                   f"mean={stats['mean']:.6f}, std={stats['std']:.6f}{nan_inf}{extra}")
     
     def get_records(self, key: str = None) -> Union[Dict[str, List], List]:
-        """获取记录的结果
-        
-        Args:
-            key: 指定键值，如果为None则返回所有记录
-        """
         with self.lock:
             if key is None:
                 return dict(self.records)
             return self.records.get(key, [])
     
     def clear_records(self):
-        """清空所有记录"""
         with self.lock:
             self.records.clear()
     
     def enable(self):
-        """启用跟踪"""
         self.enabled = True
     
     def disable(self):
-        """禁用跟踪"""
         self.enabled = False
     
     def compare_frameworks(self, jax_key: str, pytorch_key: str, tolerance: float = 1e-5) -> bool:
-        """比较 JAX 和 PyTorch 的记录
-        
-        Args:
-            jax_key: JAX 记录的键值
-            pytorch_key: PyTorch 记录的键值
-            tolerance: 数值比较容差
-        
-        Returns:
-            bool: 是否匹配
-        """
         jax_records = self.get_records(jax_key)
         pytorch_records = self.get_records(pytorch_key)
         
@@ -188,7 +151,6 @@ class UnifiedDebugTracer:
                 all_match = False
                 continue
             
-            # 比较数值
             for metric in ['min', 'max', 'mean', 'std']:
                 if metric in jax_record and metric in pytorch_record:
                     diff = abs(jax_record[metric] - pytorch_record[metric])
@@ -199,7 +161,6 @@ class UnifiedDebugTracer:
                     if not match:
                         all_match = False
             
-            # 比较 NaN/Inf
             for flag in ['has_nan', 'has_inf']:
                 if flag in jax_record and flag in pytorch_record:
                     match = jax_record[flag] == pytorch_record[flag]
@@ -213,16 +174,6 @@ class UnifiedDebugTracer:
         return all_match
     
     def compare_records(self, other_records: List[Dict], tolerance: float = 1e-5) -> bool:
-        """与外部记录比较（兼容旧接口）
-        
-        Args:
-            other_records: 外部记录列表
-            tolerance: 数值比较容差
-        
-        Returns:
-            bool: 是否匹配
-        """
-        # 将所有记录展平为列表
         all_records = []
         for records_list in self.records.values():
             all_records.extend(records_list)
@@ -238,7 +189,6 @@ class UnifiedDebugTracer:
                 all_match = False
                 continue
             
-            # 比较数值
             for key in ['min', 'max', 'mean', 'std']:
                 if key in record1 and key in record2:
                     diff = abs(record1[key] - record2[key])
@@ -246,7 +196,6 @@ class UnifiedDebugTracer:
                         print(f"Record {i} ({record1['name']}): {key} differs by {diff:.8f}")
                         all_match = False
             
-            # 比较布尔标志
             for key in ['has_nan', 'has_inf']:
                 if key in record1 and key in record2:
                     if record1[key] != record2[key]:
@@ -256,5 +205,4 @@ class UnifiedDebugTracer:
         return all_match
 
 
-# 全局跟踪器实例
 global_tracer = UnifiedDebugTracer()
