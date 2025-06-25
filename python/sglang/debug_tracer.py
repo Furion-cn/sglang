@@ -65,10 +65,38 @@ class UnifiedDebugTracer:
         self._session_timeout = 300
         
         self._tokenizer = None
+        self._model_class_name = None
     
     def set_tokenizer(self, tokenizer):
         self._tokenizer = tokenizer
+    
+    def set_model_class(self, model_class_name: str):
+        self._model_class_name = model_class_name
+        print(f"Model class set to: {model_class_name}")
+    
+    def set_model(self, model_obj, tokenizer=None):
+        if hasattr(model_obj, '__class__'):
+            class_name = model_obj.__class__.__name__
+            self._model_class_name = class_name
+            print(f"Model class automatically set to: {class_name}")
         
+        if tokenizer is not None:
+            self._tokenizer = tokenizer
+            print(f"Tokenizer set from model setup")
+        
+        elif hasattr(model_obj, 'config'):
+            try:
+                from sglang.srt.hf_transformers_utils import get_tokenizer
+                model_path = getattr(model_obj.config, '_name_or_path', None)
+                if model_path:
+                    auto_tokenizer = get_tokenizer(model_path, trust_remote_code=True)
+                    self._tokenizer = auto_tokenizer
+                    print(f"Tokenizer automatically extracted from model config: {model_path}")
+            except Exception as e:
+                print(f"Warning: Could not auto-extract tokenizer from model: {str(e)}")
+        
+        return self._model_class_name
+    
     def set_auto_save_config(self, auto_save_on_destroy=True, max_steps_per_session=200, session_timeout=300):
         self._auto_save_on_destroy = auto_save_on_destroy
         self._max_steps_per_session = max_steps_per_session
@@ -247,25 +275,24 @@ class UnifiedDebugTracer:
                     
                     for step_output in self._accumulated_outputs:
                         predicted_tokens = step_output.get("predicted_tokens", [])
-                        if predicted_tokens and len(predicted_tokens) > 0:
-                            all_tokens.append(predicted_tokens[0]["token_id"])
+                        if isinstance(predicted_tokens, list) and len(predicted_tokens) > 0:
+                            if isinstance(predicted_tokens[0], dict):
+                                all_tokens.extend([t.get("token_id", 0) for t in predicted_tokens])
                     
                     if all_tokens:
-                        complete_conversation = self._tokenizer.decode(all_tokens, skip_special_tokens=False)
-                        complete_conversation_clean = self._tokenizer.decode(all_tokens, skip_special_tokens=True)
-                    
+                        complete_conversation = self._tokenizer.decode(all_tokens, skip_special_tokens=True)
                 except Exception as e:
-                    complete_conversation = f"Decode error: {str(e)}"
-                    complete_conversation_clean = complete_conversation
+                    print(f"Error decoding complete conversation: {str(e)}")
+                    complete_conversation = "Decoding failed"
             
             debug_info = {
                 "session_info": {
                     "total_forward_steps": self._forward_count,
                     "session_duration": time.time() - self._session_start_time if self._session_start_time else 0,
-                    "complete_conversation": complete_conversation,
-                    "complete_conversation_clean": complete_conversation_clean if 'complete_conversation_clean' in locals() else complete_conversation,
-                    "total_tokens": len(all_tokens) if all_tokens else 0
+                    "session_status": "completed",
+                    "model_class": self._model_class_name
                 },
+                "complete_conversation": complete_conversation,
                 "step_by_step_inputs": self._accumulated_inputs,
                 "step_by_step_outputs": self._accumulated_outputs,
                 "all_forward_records": all_records,
@@ -279,7 +306,10 @@ class UnifiedDebugTracer:
             }
             
             timestamp = int(time.time())
-            filename = f"inference_session_{timestamp}.json"
+            if self._model_class_name:
+                filename = f"{self._model_class_name}_inference_session_{timestamp}.json"
+            else:
+                filename = f"inference_session_{timestamp}.json"
             
             debug_dir = "debug_outputs"
             os.makedirs(debug_dir, exist_ok=True)
@@ -304,14 +334,18 @@ class UnifiedDebugTracer:
         
         try:
             timestamp = int(time.time())
-            filename = f"forced_save_{timestamp}.json"
+            if self._model_class_name:
+                filename = f"{self._model_class_name}_forced_save_{timestamp}.json"
+            else:
+                filename = f"forced_save_{timestamp}.json"
             
             all_records = self.get_records()
             debug_info = {
                 "session_info": {
                     "total_forward_steps": self._forward_count,
                     "session_duration": time.time() - self._session_start_time if self._session_start_time else 0,
-                    "session_status": "forced_save_in_progress"
+                    "session_status": "forced_save_in_progress",
+                    "model_class": self._model_class_name
                 },
                 "step_by_step_inputs": self._accumulated_inputs,
                 "step_by_step_outputs": self._accumulated_outputs,
@@ -370,35 +404,81 @@ class UnifiedDebugTracer:
             tensor_cpu = tensor
         
         try:
+            # 处理整数类型，需要转换为浮点类型进行统计计算
+            if tensor_cpu.dtype in [torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8]:
+                tensor_for_stats = tensor_cpu.float()
+            else:
+                tensor_for_stats = tensor_cpu
+            
+            # 安全的标准差计算，避免单元素时的NaN
+            # 统一使用总体标准差(unbiased=False)以与JAX保持一致
+            if tensor_cpu.numel() > 1:
+                std_val = float(tensor_for_stats.std(unbiased=False))
+            else:
+                std_val = 0.0
+            
             stats = {
                 'framework': 'pytorch',
                 'name': name,
                 'stage': stage,
                 'shape': tuple(tensor.shape),
                 'dtype': str(tensor.dtype),
-                'min': float(tensor_cpu.min()),
-                'max': float(tensor_cpu.max()),
+                'min': float(tensor_for_stats.min()),
+                'max': float(tensor_for_stats.max()),
+                'mean': float(tensor_for_stats.mean()),
+                'std': std_val,
+                'has_nan': bool(torch.any(torch.isnan(tensor_for_stats))),
+                'has_inf': bool(torch.any(torch.isinf(tensor_for_stats))),
                 'extra_info': extra_info
             }
             
+            layer_id = 'unknown'
+            module_type = 'unknown'
+            
+            # 改进的模块类型识别
             if '_layer_id_' in stage:
                 parts = stage.split('_layer_id_')
                 if len(parts) >= 2:
-                    stats['layer_id'] = int(parts[1].split('_')[0])
-                    stats['module_type'] = parts[0]
-            
-            if tensor_cpu.dtype in [torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8]:
-                tensor_float = tensor_cpu.float()
-                stats['mean'] = float(tensor_float.mean())
-                stats['std'] = float(tensor_float.std())
-            else:
-                stats['mean'] = float(tensor_cpu.mean())
-                stats['std'] = float(tensor_cpu.std())
+                    try:
+                        layer_id = int(parts[1].split('_')[0])
+                        module_type = parts[0]
+                    except (ValueError, IndexError):
+                        pass
+            elif stage:
+                stage_lower = stage.lower()
+                if 'attention' in stage_lower:
+                    module_type = 'attention'
+                elif 'mlp' in stage_lower:
+                    module_type = 'mlp'
+                elif 'block' in stage_lower:
+                    module_type = 'block'
+                elif 'transformer' in stage_lower:
+                    module_type = 'transformer'
+                    layer_id = 'all'
+                elif 'embed' in stage_lower:
+                    module_type = 'embedding'
+                    layer_id = 'all'
+                elif 'rmsnorm' in stage_lower or 'layernorm' in stage_lower or 'norm' in stage_lower:
+                    module_type = 'layernorm'
+                    # 检查是否是final norm
+                    if 'final' in stage_lower:
+                        layer_id = 'all'
+                elif 'lm_head' in stage_lower or 'logits' in stage_lower:
+                    module_type = 'lm_head'
+                    layer_id = 'all'
                 
-            stats.update({
-                'has_nan': torch.isnan(tensor_cpu.float()).any().item(),
-                'has_inf': torch.isinf(tensor_cpu.float()).any().item(),
-            })
+                # 提取layer_id（如果存在）
+                import re
+                layer_match = re.search(r'layer_id[_-](\d+)', stage, re.IGNORECASE)
+                if layer_match:
+                    try:
+                        layer_id = int(layer_match.group(1))
+                    except ValueError:
+                        pass
+            
+            stats['layer_id'] = layer_id
+            stats['module_type'] = module_type
+            
         except Exception as e:
             stats = {
                 'framework': 'pytorch',
@@ -407,6 +487,8 @@ class UnifiedDebugTracer:
                 'shape': tuple(tensor.shape),
                 'dtype': str(tensor.dtype),
                 'extra_info': extra_info,
+                'layer_id': 'unknown',
+                'module_type': 'unknown',
                 'error': str(e)
             }
         
@@ -414,6 +496,13 @@ class UnifiedDebugTracer:
     
     def _compute_jax_stats(self, tensor: jnp.ndarray, name: str, stage: str, extra_info: str) -> Dict[str, Any]:
         try:
+            # 安全的标准差计算，避免单元素时的NaN
+            # 统一使用总体标准差(ddof=0)以与PyTorch保持一致
+            if tensor.size > 1:
+                std_val = float(jnp.std(tensor, ddof=0).item())
+            else:
+                std_val = 0.0
+            
             stats = {
                 'framework': 'jax',
                 'name': name,
@@ -423,11 +512,59 @@ class UnifiedDebugTracer:
                 'min': float(jnp.min(tensor).item()),
                 'max': float(jnp.max(tensor).item()),
                 'mean': float(jnp.mean(tensor).item()),
-                'std': float(jnp.std(tensor).item()),
+                'std': std_val,
                 'has_nan': bool(jnp.any(jnp.isnan(tensor)).item()),
                 'has_inf': bool(jnp.any(jnp.isinf(tensor)).item()),
                 'extra_info': extra_info
             }
+            
+            # 改进的layer_id提取逻辑
+            layer_id = 'unknown'
+            module_type = 'unknown'
+            
+            if '_layer_id_' in stage:
+                parts = stage.split('_layer_id_')
+                if len(parts) >= 2:
+                    try:
+                        layer_id = int(parts[1].split('_')[0])
+                        module_type = parts[0]
+                    except (ValueError, IndexError):
+                        pass
+            elif stage:
+                stage_lower = stage.lower()
+                if 'attention' in stage_lower:
+                    module_type = 'attention'
+                elif 'mlp' in stage_lower:
+                    module_type = 'mlp'
+                elif 'block' in stage_lower:
+                    module_type = 'block'
+                elif 'transformer' in stage_lower:
+                    module_type = 'transformer'
+                    layer_id = 'all'
+                elif 'embed' in stage_lower:
+                    module_type = 'embedding'
+                    layer_id = 'all'
+                elif 'rmsnorm' in stage_lower or 'layernorm' in stage_lower or 'norm' in stage_lower:
+                    module_type = 'layernorm'
+                    # 检查是否是final norm
+                    if 'final' in stage_lower:
+                        layer_id = 'all'
+                elif 'lm_head' in stage_lower or 'logits' in stage_lower:
+                    module_type = 'lm_head'
+                    layer_id = 'all'
+                
+                # 提取layer_id（如果存在）
+                import re
+                layer_match = re.search(r'layer_id[_-](\d+)', stage, re.IGNORECASE)
+                if layer_match:
+                    try:
+                        layer_id = int(layer_match.group(1))
+                    except ValueError:
+                        pass
+            
+            stats['layer_id'] = layer_id
+            stats['module_type'] = module_type
+            
         except Exception as e:
             stats = {
                 'framework': 'jax',
@@ -436,6 +573,8 @@ class UnifiedDebugTracer:
                 'shape': tuple(tensor.shape),
                 'dtype': str(tensor.dtype),
                 'extra_info': extra_info,
+                'layer_id': 'unknown',
+                'module_type': 'unknown',
                 'error': str(e)
             }
         
@@ -648,9 +787,9 @@ class UnifiedDebugTracer:
             stats['layers'] = safe_sort(list(stats['layers']))
             stats['modules'] = safe_sort(list(stats['modules']))
         
-        valid_layers = [k for k in layer_stats.keys() if k != 'unknown']
-        valid_modules = [k for k in module_type_stats.keys() if k != 'unknown']
-        valid_steps = [k for k in step_stats.keys() if k != 'unknown']
+        valid_layers = [k for k in layer_stats.keys() if k not in ['unknown']]
+        valid_modules = [k for k in module_type_stats.keys() if k not in ['unknown']]
+        valid_steps = [k for k in step_stats.keys() if k not in ['unknown']]
         
         return {
             'by_layer': layer_stats,
