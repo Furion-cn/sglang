@@ -7,6 +7,8 @@ from jax import numpy as jnp
 from jax.sharding import PartitionSpec
 from transformers import PretrainedConfig
 
+from sglang.debug_tracer import global_tracer, trace_function
+from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
 from sglang.srt.jax.layers.layernorm import RMSNorm
@@ -25,9 +27,11 @@ class QWenMLP(nnx.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
+        layer_id: int = 0,
         rngs: nnx.Rngs = None,
         dtype: jnp.dtype = jnp.bfloat16,
     ):
+        self.layer_id = layer_id
 
         self.w1 = nnx.Linear(
             hidden_size,
@@ -61,6 +65,7 @@ class QWenMLP(nnx.Module):
 
         self.act_func = jax.nn.silu
 
+    @trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
         a1 = self.w1(hidden_states)
         a2 = self.w2(hidden_states)
@@ -78,7 +83,9 @@ class QWenAttention(nnx.Module):
                  max_position_embeddings: int,
                  rope_theta: float = 10000,
                  rope_scaling: Optional[Dict[str, Any]] = None,
+                 layer_id: int = 0,
                  rngs: nnx.Rngs = None):
+        self.layer_id = layer_id
         head_size = hidden_size // num_heads
         self.c_attn = LinearBase(
             input_size=hidden_size,
@@ -106,6 +113,7 @@ class QWenAttention(nnx.Module):
             scale=head_size**-0.5,
         )
 
+    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -123,10 +131,15 @@ class QWenAttention(nnx.Module):
 class QWenBlock(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
+                 layer_id: int = 0,
                  rngs: nnx.Rngs = None):
-        self.ln_1 = RMSNorm(config.hidden_size,
-                            epsilon=config.layer_norm_epsilon,
-                            rngs=rngs)
+        self.layer_id = layer_id
+        
+        self.ln_1 = RMSNorm(
+            config.hidden_size,
+            epsilon=config.layer_norm_epsilon,
+            rngs=rngs
+        )
 
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -136,19 +149,24 @@ class QWenBlock(nnx.Module):
             config.max_position_embeddings,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
+            layer_id=layer_id,
             rngs=rngs,
         )
 
-        self.ln_2 = RMSNorm(config.hidden_size,
-                            epsilon=config.layer_norm_epsilon,
-                            rngs=rngs)
+        self.ln_2 = RMSNorm(
+            config.hidden_size,
+            epsilon=config.layer_norm_epsilon,
+            rngs=rngs
+        )
 
         self.mlp = QWenMLP(
             config.hidden_size,
             config.intermediate_size // 2,
+            layer_id=layer_id,
             rngs=rngs,
         )
 
+    @trace_function(stage="BLOCK", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -156,7 +174,11 @@ class QWenBlock(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         residual = hidden_states
+        
+        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
+        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
+        
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -164,9 +186,12 @@ class QWenBlock(nnx.Module):
         )
         hidden_states = residual + hidden_states
 
-        # Fully Connected
         residual = hidden_states
+        
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
+        
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -179,36 +204,45 @@ class QWenModel(nnx.Module):
                  config: PretrainedConfig,
                  rngs: nnx.Rngs = None):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
+        
         self.embed_tokens = Embed(
             num_embeddings=vocab_size,
             features=config.hidden_size,
             rngs=rngs,
         )
+        
         self.h = [
             QWenBlock(
                 config,
+                layer_id=i,
                 rngs=rngs,
             )
-            for _ in range(config.num_hidden_layers)
+            for i in range(config.num_hidden_layers)
         ]
-        self.ln_f = RMSNorm(config.hidden_size,
-                            epsilon=config.layer_norm_epsilon,
-                            rngs=rngs)
+        
+        self.ln_f = RMSNorm(
+            config.hidden_size,
+            epsilon=config.layer_norm_epsilon,
+            rngs=rngs
+        )
 
+    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
                  ):
+        global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.embed_tokens(input_ids)
-        for i in range(len(self.h)):
-            layer = self.h[i]
-            hidden_states = layer(
-                positions,
-                hidden_states,
-                forward_batch,
-            )
+        global_tracer.print(hidden_states, "embedding_output", "embedding_all")
+        
+        for layer in self.h:
+            hidden_states = layer(positions, hidden_states, forward_batch)
+        
+        global_tracer.print(hidden_states, "RMSNorm_final_input", "rmsnorm_final")
         hidden_states = self.ln_f(hidden_states)
+        global_tracer.print(hidden_states, "RMSNorm_final_output", "rmsnorm_final")
+        
         return hidden_states
 
 
@@ -223,7 +257,14 @@ class QWenLMHeadJaxModel(nnx.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(
             vocab_size, config.hidden_size, rngs=rngs)
-        self.logits_processor = LogitsProcessor(vocab_size)
+        self.logits_processor = LogitsProcessor(vocab_size)        
+        self._setup_debug_tracer()
+
+    def _setup_debug_tracer(self):
+        try:
+            global_tracer.set_model(self)
+        except Exception as e:
+            print(f"Warning: Could not setup debug tracer: {str(e)}")
 
     def load_pytree_weights(self, pytree):
         flat_weights = flatten_pytree_with_paths(pytree)
@@ -246,9 +287,32 @@ class QWenLMHeadJaxModel(nnx.Module):
                  forward_batch: ForwardBatch,
                  ):
         hidden_states = self.transformer(input_ids, positions, forward_batch)
-        return self.logits_processor(
+        result = self.logits_processor(
             hidden_states, self.lm_head, forward_batch
         )
+        
+        if global_tracer.is_session_active():
+            input_data = {
+                "input_ids": input_ids,
+                "input_shape": list(input_ids.shape)
+            }
+            
+            output_data = {
+                "output_type": str(type(result).__name__)
+            }
+            
+            if hasattr(result, 'next_token_logits') and result.next_token_logits is not None:
+                output_data.update({
+                    "logits": result.next_token_logits,
+                    "logits_shape": list(result.next_token_logits.shape)
+                })
+            
+            global_tracer.accumulate_step(input_data, output_data)
+            
+            if global_tracer.should_auto_save():
+                global_tracer.end_session()
+        
+        return result
 
 
 EntryClass = QWenLMHeadJaxModel

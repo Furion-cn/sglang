@@ -27,7 +27,7 @@ from sglang.test.test_utils import CustomTestCase
 from sglang.test.jax.test_utils import create_device_mesh
 from sglang.srt.jax.layers.sampler import Sampler
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.jax.models.qwen import QWenLMHeadModel
+from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh
@@ -130,6 +130,8 @@ class TestQWenLoadWeights(CustomTestCase):
             self.skipTest(
                 f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
 
+        from sglang.debug_tracer import global_tracer
+
         try:
             hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
                 self.test_model_path, None
@@ -173,6 +175,10 @@ class TestQWenLoadWeights(CustomTestCase):
                 print("\n🎉 JAXModelLoader integration test completed successfully!")
 
                 print("\n🔄 Test model input and output with JAXModelLoader...")
+                
+                print("\n🟢 Starting debug tracer session...")
+                global_tracer.start_session()
+                
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
 
@@ -182,7 +188,7 @@ class TestQWenLoadWeights(CustomTestCase):
                 print(f"输入 tokens: {x}")
 
                 with self.mesh:
-                    for i in range(10):
+                    for i in range(1):
                         # Create ForwardBatch for each iteration
                         forward_batch = self._create_batch(x)
                         y = model(forward_batch.input_ids,
@@ -195,7 +201,7 @@ class TestQWenLoadWeights(CustomTestCase):
                         next_token_ids = sampler(
                             y,  # Pass the LogitsProcessorOutput directly
                             sampling_info=SamplingBatchInfo(
-                                temperatures=jnp.full((1, 1), 0.3),
+                                temperatures=jnp.full((1, 1), 0.1),
                                 top_ps=jnp.full((1, 1), 0.8),
                                 top_ks=jnp.full((1, 1), 50),
                                 min_ps=jnp.full((1, 1), 0.01),
@@ -216,7 +222,20 @@ class TestQWenLoadWeights(CustomTestCase):
                 print(f"\n完整生成序列: {full_sequence}")
                 print(f"完整解码文本: '{decoded_full}'")
 
+                print("\n🔴 Ending debug tracer session...")
+                debug_file = global_tracer.end_session()
+                if debug_file:
+                    print(f"✅ Debug trace saved to: {debug_file}")
+                else:
+                    print("⚠️  Debug trace not saved")
+
         except Exception as e:
+            if 'global_tracer' in locals():
+                try:
+                    global_tracer.end_session()
+                    print("🔴 Debug tracer session ended due to exception")
+                except:
+                    pass
             self.fail(f"JAXModelLoader integration test failed: {e}")
 
     def test_prepare_jax_weights_no_msgpack_files(self):

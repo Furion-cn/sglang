@@ -50,10 +50,12 @@ class QWenMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str = "silu",
+        layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
+        self.layer_id = layer_id
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             2 * [intermediate_size],
@@ -186,6 +188,7 @@ class QWenBlock(nn.Module):
         self.mlp = QWenMLP(
             config.hidden_size,
             config.intermediate_size // 2,
+            layer_id=layer_id,
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
         )
@@ -199,7 +202,11 @@ class QWenBlock(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
+        
+        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
+        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
+        
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -209,7 +216,11 @@ class QWenBlock(nn.Module):
 
         # Fully Connected
         residual = hidden_states
+        
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
+        
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -252,17 +263,21 @@ class QWenModel(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.wte(input_ids)
+        global_tracer.print(hidden_states, "embedding_output", "embedding_all")
         
-        for i in range(len(self.h)):
-            layer = self.h[i]
+        for layer in self.h:
             hidden_states = layer(
-                positions,
-                hidden_states,
-                forward_batch,
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
             )
         
+        global_tracer.print(hidden_states, "RMSNorm_final_input", "rmsnorm_final")
         hidden_states = self.ln_f(hidden_states)
+        global_tracer.print(hidden_states, "RMSNorm_final_output", "rmsnorm_final")
+        
         return hidden_states
 
 
@@ -289,13 +304,9 @@ class QWenLMHeadModel(nn.Module):
 
     def _setup_debug_tracer(self):
         try:
-            model_path = getattr(self.config, '_name_or_path', None)
-            if model_path:
-                tokenizer = get_tokenizer(model_path, trust_remote_code=True)
-                global_tracer.set_tokenizer(tokenizer)
-                print(f"Debug tracer initialized with tokenizer from: {model_path}")
+            global_tracer.set_model(self)
         except Exception as e:
-            print(f"Warning: Could not initialize tokenizer for debug tracer: {str(e)}")
+            print(f"Warning: Could not setup debug tracer: {str(e)}")
 
     @torch.no_grad()
     def forward(

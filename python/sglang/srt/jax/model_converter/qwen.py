@@ -4,6 +4,7 @@ import pathlib
 import os
 import gc
 import logging
+import shutil
 
 from safetensors import safe_open
 
@@ -413,19 +414,64 @@ def verify_conversion(base_model_path: str, model_size: str, maxtext_model_path:
   
   return compare_weights(original_weights, converted_weights, tolerance)
 
+def copy_model_config_files(base_model_path: str, maxtext_model_path: str):
+  from pathlib import Path
+  
+  # List of files to copy
+  files_to_copy = [
+      'config.json',
+      'configuration_qwen.py', 
+      'qwen.tiktoken',
+      'tokenization_qwen.py',
+      'tokenizer_config.json'
+  ]
+  
+  source_dir = Path(base_model_path)
+  dest_dir = Path(maxtext_model_path)
+  
+  dest_dir.mkdir(parents=True, exist_ok=True)
+  
+  copied_files = []
+  missing_files = []
+  
+  for filename in files_to_copy:
+      source_file = source_dir / filename
+      dest_file = dest_dir / filename
+      
+      if source_file.exists():
+          try:
+              shutil.copy2(source_file, dest_file)
+              copied_files.append(filename)
+              converter_logging.log(f"✅ Copied {filename}")
+          except Exception as e:
+              converter_logging.log(f"❌ Failed to copy {filename}: {str(e)}")
+      else:
+          missing_files.append(filename)
+          converter_logging.log(f"⚠️  Source file not found: {filename}")
+  
+  converter_logging.log(f"📁 File copy summary:")
+  converter_logging.log(f"   Copied {len(copied_files)} files: {copied_files}")
+  if missing_files:
+      converter_logging.log(f"   Missing {len(missing_files)} files: {missing_files}")
+
 def save_weights_to_checkpoint(
-    maxtext_model_path: str, jax_weights: dict, device_count: int, use_ocdbt: bool, use_zarr3: bool
+    base_model_path: str, maxtext_model_path: str, jax_weights: dict, device_count: int, use_ocdbt: bool, use_zarr3: bool, save_checkpoint: bool
 ):
   """
   Function to save jax_weights ready for MaxText to a parameters checkpoint.
 
   Args:
+      base_model_path: Path to the source model directory (for copying config files).
       maxtext_model_path: Path to save the MaxText checkpoint.
       jax_weights: The JAX model weights to be saved.
       device_count: The number of simulated devices.
       use_ocdbt: Whether to use Optimized Checkpoint Database with Transactions.
       use_zarr3: Whether to use Zarr3 or not.
+      save_checkpoint: Whether to save checkpoint or not.
   """
+  converter_logging.log("📂 Copying model configuration files...")
+  copy_model_config_files(base_model_path, maxtext_model_path)
+  
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   gc.collect()
@@ -463,27 +509,30 @@ def save_weights_to_checkpoint(
   async_checkpointing = False
   save_interval_steps = 1
 
-  checkpoint_manager = check_pointing.create_orbax_checkpoint_manager(
-      maxtext_model_path,
-      enable_checkpointing,
-      async_checkpointing,
-      save_interval_steps,
-      use_ocdbt=use_ocdbt,
-      use_zarr3=use_zarr3,
-  )
-
   state_new = train_state.TrainState(
       step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
   )
-  # save maxtext checkpoint
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  if checkpoint_manager is not None:
-    if save_checkpoint.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
-      converter_logging.log(f"saved a maxtext checkpoint at step {step_number_to_save_new_ckpt}")
-    # Upon preemption, exit when and only when all ongoing saves are complete.
-    checkpoint_manager.wait_until_finished()
+
   # save flax msgpack
   save_flax_msgpack(maxtext_model_path, jax_weights)
+
+  if save_checkpoint:
+    checkpoint_manager = check_pointing.create_orbax_checkpoint_manager(
+        maxtext_model_path,
+        enable_checkpointing,
+        async_checkpointing,
+        save_interval_steps,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
+    )
+    # save maxtext checkpoint
+    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+    if checkpoint_manager is not None:
+      if save_checkpoint.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+        converter_logging.log(f"saved a maxtext checkpoint at step {step_number_to_save_new_ckpt}")
+      # Upon preemption, exit when and only when all ongoing saves are complete.
+      checkpoint_manager.wait_until_finished()
+
 
 def list_folders_pathlib(directory: str):
   """Lists folders in a directory using pathlib module.
@@ -514,6 +563,7 @@ if __name__ == "__main__":
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True)
   parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=False)
+  parser.add_argument("--save-checkpoint", type=str2bool, required=False, default=False)
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   parser.add_argument("--check", action="store_true", help="Verify conversion by comparing original and converted weights")
@@ -541,10 +591,12 @@ if __name__ == "__main__":
       exit(1)
   else:
     save_weights_to_checkpoint(
+        args.base_model_path,
         args.maxtext_model_path,
         convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
         SIMULATED_CPU_DEVICES_COUNT,
         args.use_ocdbt,
         args.use_zarr3,
+        args.save_checkpoint,
     )
     converter_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
