@@ -14,7 +14,7 @@
 
 """Embedding Layers."""
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -145,6 +145,39 @@ class ParallelLMHead(Embed):
         raise RuntimeError("LMHead's weights should be used in the sampler.")
 
 
+def _apply_rotary_emb(
+    x: jax.Array,
+    cos: jax.Array,
+    sin: jax.Array,
+    is_neox_style: bool,
+) -> jax.Array:
+    """
+    Args:
+        x: [num_tokens, num_heads, head_size]
+        cos: [num_tokens, head_size // 2]
+        sin: [num_tokens, head_size // 2]
+        is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
+            positional embeddings.
+    """
+    cos = jnp.expand_dims(cos, axis=-2).astype(x.dtype)
+    sin = jnp.expand_dims(sin, axis=-2).astype(x.dtype)
+    if is_neox_style:
+        cos = cos.reshape(*cos.shape[:-1], -1, 1)
+        sin = sin.reshape(*sin.shape[:-1], -1, 1)
+        x = x.reshape(*x.shape[:-1], -1, 2)
+        x1, x2 = jnp.split(x, 2, axis=-1)
+    else:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    if is_neox_style:
+        concatenated = jnp.concatenate((o1, o2), axis=-1)
+        return concatenated.reshape(*concatenated.shape[:-2], -1)
+    else:
+        stacked = jnp.stack((o1, o2), axis=-1)
+        return stacked.reshape(*stacked.shape[:-2], -1)
+
 class RotaryEmbedding(nnx.Module):
     """Rotary Position Embedding.
 
@@ -158,68 +191,79 @@ class RotaryEmbedding(nnx.Module):
 
     def __init__(
         self,
-        min_timescale: int,
-        max_timescale: int,
-        num_heads: int,
-        embedding_dims: int = 0,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        dtype: jnp.dtype,
     ):
         super().__init__()
-        self.min_timescale = min_timescale
-        self.max_timescale = max_timescale
-        self.num_heads = num_heads
-        self.embedding_dims = embedding_dims
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        self.is_neox_style = is_neox_style
+        self.dtype = dtype
 
-        """init with timescale"""
-        if self.embedding_dims % 2:
-            raise ValueError(
-                "Embedding dim for rotary position embedding must be a multiple of 2.")
-
-        half_embedding_dim = self.embedding_dims // 2
-        fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-        self.timescale = self.min_timescale * \
-            (self.max_timescale / self.min_timescale) ** fraction
-
-        half_embedding_dim = self.embedding_dims // 2
-        fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-        self.timescale = self.min_timescale * \
-            (self.max_timescale / self.min_timescale) ** fraction
+        self.cos_sin_cache = self._compute_cos_sin_cache().astype(dtype=dtype)
 
     def __call__(
-        self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
-        inputs: jax.Array,
-        position: Optional[jax.Array] = None,
-    ) -> jax.Array:
+        self,
+        positions: jax.Array,
+        query: jax.Array,
+        key: jax.Array,
+    ) -> Tuple[jax.Array, jax.Array]:
         """Generates a jax.Array of sinusoids with different frequencies.
 
         Args:
-          inputs: The input sequence on which to apply the Rotary position
+          query, key: The input sequence on which to apply the Rotary position
             embedding. Since rotary position embeddings are applied to query and
-            keys after projection, it is assumed of shape [B, S, N, H].
+            keys after projection, it is assumed of shape [B*S, H].
           position: Optional position jax.Array which denotes the position of each
             token in the sequence. This only needs to be supplied when the sequence
             is packed. It is of shape [B, S].
 
         Returns:
-          a jax.Array of shape [B, S, H] which includes the inputs together with
+          a Tuple of jax.Array of shape [B*S, H] which includes the inputs together with
           the rotary position embedding incorporated in it.
         """
-        assert position is not None
-        total_tokens = inputs.shape[0]
-        hidden_size = inputs.shape[1]
-        head_dim = hidden_size // self.num_heads
-        x = jnp.reshape(inputs, (total_tokens, self.num_heads, head_dim))
-        if self.embedding_dims != head_dim:
-            raise ValueError(
-                "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
-            )
+        positions = positions.flatten()
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.take(positions, axis=0)
+        cos, sin = jnp.split(cos_sin, 2, axis=-1)
 
-        position = position[:, jnp.newaxis, jnp.newaxis]
-        sinusoid_inp = position / self.timescale
-        sin = jnp.sin(sinusoid_inp).astype(x.dtype)
-        cos = jnp.cos(sinusoid_inp).astype(x.dtype)
-        first_half, second_half = jnp.split(x, 2, axis=-1)
-        first_part = first_half * cos - second_half * sin
-        second_part = second_half * cos + first_half * sin
-        x_out = jnp.concatenate((first_part, second_part), axis=-1)
-        x_out = jnp.reshape(x_out, (total_tokens, hidden_size))
-        return x_out
+        query_shape = query.shape
+        query = query.reshape(num_tokens, -1, self.head_size)
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
+        query = jnp.concatenate((query_rot, query_pass), axis=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.reshape(num_tokens, -1, self.head_size)
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
+        key = jnp.concatenate((key_rot, key_pass), axis=-1).reshape(key_shape)
+        return query, key
+        
+    def _compute_inv_freq(self, base: Union[int, float]) -> jax.Array:
+        """Compute the inverse frequency."""
+        inv_freq = 1.0 / (
+            base
+            ** (
+                jnp.arange(0, self.rotary_dim, 2,
+                             dtype=jnp.float32) / self.rotary_dim
+            )
+        )
+        return inv_freq
+
+    def _compute_cos_sin_cache(self) -> jax.Array:
+        """Compute the cos and sin cache."""
+        inv_freq = self._compute_inv_freq(self.base)
+        t = jnp.arange(self.max_position_embeddings, dtype=jnp.float32)
+        freqs = jnp.outer(t, inv_freq)
+        sin, cos = jnp.sin(freqs), jnp.cos(freqs)
+        cache = jnp.concatenate((cos, sin), axis=-1)
+        return cache

@@ -16,119 +16,116 @@ limitations under the License.
 
 """ Tests for Llama. """
 
-import unittest
 from typing import Tuple
+import unittest
 import numpy as np
 import jax
 from sglang.srt.jax.layers import embeddings
 import jax.numpy as jnp
+import torch
+from sglang.srt.layers.rotary_embedding import RotaryEmbedding
 
-
-"""  
-An example reference jax_llama RoPE implementation from https://github.com/Sea-Snell/ 
-Users should feel free to change and optimize the RoPE implementation in MaxText defined in layers.py 
-as long as it passes our tests. But they shouldn't change the "reference" implementation in 
-llama_test.py which is only to be used for comparison purpose. 
 """
-
-
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, dtype: jnp.dtype = jnp.float32) -> jnp.ndarray:
-  """Calculate the frequencies."""
-  freqs = 1.0 / (theta ** (np.arange(0, dim, 2)
-                 [: (dim // 2)].astype(dtype) / dim))
-  t = np.arange(end)  # type: ignore
-  freqs = np.outer(t, freqs).astype(dtype)  # type: ignore
-  sin, cos = np.sin(freqs), np.cos(freqs)
-  freqs_cis = np.complex64(cos + 1j * sin)
-  return jnp.asarray(freqs_cis)
-
-
-def apply_rotary_emb(
-    xq: jnp.ndarray,
-    xk: jnp.ndarray,
-    freqs_cis: jnp.ndarray,
-    dtype: jnp.dtype = jnp.bfloat16,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-  """Apply the computed Rotary Positional Embedding."""
-  reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
-  reshape_xk = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 2)
-
-  xq_ = jax.lax.complex(reshape_xq[..., 0], reshape_xq[..., 1])
-  xk_ = jax.lax.complex(reshape_xk[..., 0], reshape_xk[..., 1])
-
-  # add head dim
-  freqs_cis = jnp.reshape(
-      freqs_cis, (*freqs_cis.shape[:2], 1, *freqs_cis.shape[2:]))
-
-  xq_out = xq_ * freqs_cis
-  xq_out = jnp.stack((jnp.real(xq_out), jnp.imag(xq_out)),
-                     axis=-1).reshape(*xq_out.shape[:-1], -1)
-
-  xk_out = xk_ * freqs_cis
-  xk_out = jnp.stack((jnp.real(xk_out), jnp.imag(xk_out)),
-                     axis=-1).reshape(*xk_out.shape[:-1], -1)
-
-  return xq_out.astype(dtype), xk_out.astype(dtype)
-
-
-def permute_to_match_maxtext_rope(arr):
-  evens = arr[..., ::2]
-  odds = arr[..., 1::2]
-  return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+An example reference jax_llama RoPE implementation from https://github.com/Sea-Snell/
+Users should feel free to change and optimize the RoPE implementation in MaxText defined in layers.py
+as long as it passes our tests. But they shouldn't change the "reference" implementation in
+llama_test.py which is only to be used for comparison purpose.
+"""
 
 
 class RoPETest(unittest.TestCase):
   """Test for the RoPE implementation."""
 
   def test_rope(self):
+    batch_size = 3
+    head_num = 3
     dim_per_head = 128
-    seq_len = 8
+    seq_len = 10
 
     # Run the two implementations on some random query and key
-    x_q = np.random.normal(1, 0.5, (1, seq_len, 4, dim_per_head))
-    x_k = np.random.normal(1, 0.5, (1, seq_len, 4, dim_per_head))
+    x_q = np.random.normal(
+        1, 0.5, (batch_size*seq_len, head_num*dim_per_head))
+    x_k = np.random.normal(
+        1, 0.5, (batch_size*seq_len, head_num*dim_per_head))
+    
+    x_q_torch = torch.tensor(x_q, dtype=torch.bfloat16)
+    x_q_jax = jnp.array(x_q, dtype=jnp.bfloat16)
 
-    # Calculate RoPE embeddings from Sea-Snell implementation
-    freqs_cis = precompute_freqs_cis(dim_per_head, seq_len * 2)
-    freqs_cis = jnp.take(freqs_cis, jnp.arange(
-        seq_len, dtype=np.int32)[None, :], axis=0)
+    x_k_torch = torch.tensor(x_k, dtype=torch.bfloat16)
+    x_k_jax = jnp.array(x_k, dtype=jnp.bfloat16)
 
-    llama_output = apply_rotary_emb(
-        jnp.asarray(x_q), jnp.asarray(x_k), freqs_cis)
+    positions_jax = jnp.arange(seq_len, dtype=jnp.int32)[
+        jnp.newaxis, :].repeat(batch_size, axis=0)
+    positions_torch = torch.arange(seq_len, dtype=torch.int32)[
+        None, :].repeat(batch_size, 1)
 
-    position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
-    rope = embeddings.RotaryEmbedding(
-        min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head)
-    query_proj = rope(permute_to_match_maxtext_rope(x_q), position)
-    key_proj = rope(permute_to_match_maxtext_rope(x_k), position)
+    # compare jax and torch
+    for is_neox_style in [False, ]:
+        # jax implementation
+        rope_jax = embeddings.RotaryEmbedding(
+            head_size=dim_per_head,
+            rotary_dim=dim_per_head,
+            max_position_embeddings=seq_len,
+            base=10000,
+            is_neox_style=is_neox_style,
+            dtype=jnp.bfloat16,
+        )
+        
+        output_jax = rope_jax(positions_jax, x_q_jax, x_k_jax)
+        q_jax_output_float32 = output_jax[0].astype(jnp.float32)
+        k_jax_output_float32 = output_jax[1].astype(jnp.float32)
 
-    # Compare results
-    self.assertTrue(jnp.allclose(permute_to_match_maxtext_rope(
-        llama_output[0]), query_proj, rtol=1e-01, atol=1e-04))
-    self.assertTrue(jnp.allclose(permute_to_match_maxtext_rope(
-        llama_output[1]), key_proj, rtol=1e-01, atol=1e-04))
+        # torch implementation
+        rope_torch = RotaryEmbedding(
+            head_size=dim_per_head,
+            rotary_dim=dim_per_head,
+            max_position_embeddings=seq_len,
+            base=10000,
+            is_neox_style=is_neox_style,
+            dtype=torch.bfloat16,
+        )
 
-  def test_scaling_rope(self):
-    dim_per_head = 128
-    seq_len = 8
-
-    # Run the two implementations on some random query and key
-    x_q = np.random.normal(1, 0.5, (1, seq_len, 4, dim_per_head))
-    position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
-
-    # Calculate RoPE embeddings and then scale
-    rope = embeddings.RotaryEmbedding(
-        min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head)
-    query_proj_1 = rope(x_q, position=position)
-
-    query_proj_1 = query_proj_1 * (dim_per_head**-0.5)
-
-    # scale first and then apply RoPE
-    query_proj_2 = x_q * (dim_per_head**-0.5)
-    query_proj_2 = rope(query_proj_2, position=position)
-
-    self.assertTrue(jax.numpy.allclose(
-        query_proj_2, query_proj_1, rtol=1e-01, atol=1e-04, equal_nan=False))
+        torch_output = rope_torch.forward_native(positions_torch, x_q_torch, x_k_torch)
+        q_torch_output_float32 = torch_output[0].to(torch.float32)
+        k_torch_output_float32 = torch_output[1].to(torch.float32)
+        
+        # compare results
+        self.assertTrue(jnp.allclose(
+            np.array(q_torch_output_float32), np.array(q_jax_output_float32), rtol=1e-04, atol=1e-05))
+        self.assertTrue(jnp.allclose(
+            np.array(k_torch_output_float32), np.array(k_jax_output_float32), rtol=1e-04, atol=1e-05))
+        
+    # TODO: compare is_neox_style=True and False
+    rope_is_neox_style = embeddings.RotaryEmbedding(
+        head_size=dim_per_head,
+        rotary_dim=dim_per_head,
+        max_position_embeddings=seq_len,
+        base=10000,
+        is_neox_style=True,
+        dtype=jnp.bfloat16,
+    )
+    output_is_neox_style = rope_is_neox_style(positions_jax, x_q_jax, x_k_jax)
+    q_is_neox_style_output_float32 = output_is_neox_style[0].astype(jnp.float32)
+    k_is_neox_style_output_float32 = output_is_neox_style[1].astype(jnp.float32)
+    
+    rope_is_not_neox_style = embeddings.RotaryEmbedding(
+        head_size=dim_per_head,
+        rotary_dim=dim_per_head,
+        max_position_embeddings=seq_len,
+        base=10000,
+        is_neox_style=False,
+        dtype=jnp.bfloat16,
+    )
+    output_is_not_neox_style = rope_is_not_neox_style(positions_jax, x_q_jax, x_k_jax)
+    q_is_not_neox_style_output_float32 = output_is_not_neox_style[0].astype(jnp.float32)
+    k_is_not_neox_style_output_float32 = output_is_not_neox_style[1].astype(jnp.float32)
+    
+    # compare results
+    self.assertTrue(jnp.allclose(
+        np.array(q_is_neox_style_output_float32), np.array(q_is_not_neox_style_output_float32), rtol=1e-04, atol=1e-05))
+    self.assertTrue(jnp.allclose(
+        np.array(k_is_neox_style_output_float32), np.array(k_is_not_neox_style_output_float32), rtol=1e-04, atol=1e-05))
+    
 
 if __name__ == "__main__":
-  unittest.main()
+    unittest.main()
