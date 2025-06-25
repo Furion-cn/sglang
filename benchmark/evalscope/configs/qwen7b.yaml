@@ -1,0 +1,14 @@
+test_suites:
+- model_name: "qwen-7b-chat-bf16"
+  base_url: "http://127.0.0.1:30000/v1"
+  tasks:
+    - name: "gsm8k"
+      dataset: "gsm8k"
+      metrics:
+      - target: 0.51
+        tolerance: 0.02
+      framework: evalscope
+      use_fewshot: true
+      num_fewshot: 5
+      use_sample: false
+      max_concurrency: 512
