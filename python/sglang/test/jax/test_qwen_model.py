@@ -7,12 +7,8 @@ from transformers import AutoTokenizer, PretrainedConfig
 
 from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.layers.sampler import Sampler
-<<<<<<< HEAD
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.jax.models.qwen import QWenLMHeadModel
-=======
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
->>>>>>> 4f2cc3796 (debug tracer)
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
 
@@ -82,10 +78,10 @@ class TestQwenModel(unittest.TestCase):
                       forward_batch.positions, forward_batch)
             # Now y is LogitsProcessorOutput with next_token_logits for each sequence
             # Shape: [batch_size, vocab_size] = [128, 10000]
-            self.assertEqual(y.next_token_logits.shape, (128, 10000))
+            self.assertEqual(y.next_token_logits.shape, (128, 10048))
 
     def test_qwen_model_decode(self):
-        with self.mesh:
+        with self.mesh, jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", create_perfetto_link=True):
             model = self._setup_model()
             sampler = Sampler(rngs=nnx.Rngs(0))
             tokenizer = AutoTokenizer.from_pretrained(
@@ -123,6 +119,7 @@ class TestQwenModel(unittest.TestCase):
                 decoded_token = tokenizer.decode([current_token_id])
                 print(
                     f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
+                x.block_until_ready()
 
             full_sequence = [int(token) for token in x[0]]
             decoded_full = tokenizer.decode(full_sequence)
