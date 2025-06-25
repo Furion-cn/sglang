@@ -119,7 +119,7 @@ class TestQwenModel(unittest.TestCase):
                 decoded_token = tokenizer.decode([current_token_id])
                 print(
                     f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
-                x.block_until_ready()
+            x.block_until_ready()
 
             full_sequence = [int(token) for token in x[0]]
             decoded_full = tokenizer.decode(full_sequence)
