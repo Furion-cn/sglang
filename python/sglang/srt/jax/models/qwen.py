@@ -175,7 +175,6 @@ class QWenBlock(nnx.Module):
     ) -> jax.Array:
         residual = hidden_states
         
-        # 记录每一步的RMSNorm，用于完整的调试分析
         global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
         global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
@@ -187,10 +186,8 @@ class QWenBlock(nnx.Module):
         )
         hidden_states = residual + hidden_states
 
-        # Fully Connected
         residual = hidden_states
         
-        # 记录每一步的RMSNorm，用于完整的调试分析
         global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
         global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
@@ -235,7 +232,6 @@ class QWenModel(nnx.Module):
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
                  ):
-        # 记录每一步的embedding，用于完整的调试分析
         global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.embed_tokens(input_ids)
         global_tracer.print(hidden_states, "embedding_output", "embedding_all")
@@ -243,7 +239,6 @@ class QWenModel(nnx.Module):
         for layer in self.h:
             hidden_states = layer(positions, hidden_states, forward_batch)
         
-        # 记录每一步的final RMSNorm，用于完整的调试分析
         global_tracer.print(hidden_states, "RMSNorm_final_input", "rmsnorm_final")
         hidden_states = self.ln_f(hidden_states)
         global_tracer.print(hidden_states, "RMSNorm_final_output", "rmsnorm_final")

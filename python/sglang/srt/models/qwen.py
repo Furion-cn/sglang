@@ -203,7 +203,6 @@ class QWenBlock(nn.Module):
         # Self Attention
         residual = hidden_states
         
-        # Trace pre-attention RMSNorm - 记录每一步的RMSNorm，用于完整的调试分析
         global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
         global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
@@ -218,7 +217,6 @@ class QWenBlock(nn.Module):
         # Fully Connected
         residual = hidden_states
         
-        # Trace pre-mlp RMSNorm - 记录每一步的RMSNorm，用于完整的调试分析
         global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
         global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
