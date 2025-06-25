@@ -76,8 +76,8 @@ class QWenAttention(nnx.Module):
                  hidden_size: int,
                  num_heads: int,
                  max_position_embeddings: int,
-                 rope_theta: float,
-                 rope_scaling: Optional[Dict[str, Any]],
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
                  rngs: nnx.Rngs = None):
         head_size = hidden_size // num_heads
         self.c_attn = LinearBase(
@@ -95,10 +95,12 @@ class QWenAttention(nnx.Module):
             rngs=rngs,
         )
         self.rotary_emb = RotaryEmbedding(
-            min_timescale=1,
-            max_timescale=10000,
-            num_heads=num_heads,
-            embedding_dims=head_size,
+            head_size=head_size,
+            rotary_dim=head_size,
+            max_position_embeddings=max_position_embeddings,
+            base=rope_theta,
+            is_neox_style=False,
+            dtype=jnp.bfloat16,
         )
         self.attn = Attention(
             scale=head_size**-0.5,
@@ -112,8 +114,7 @@ class QWenAttention(nnx.Module):
     ) -> jax.Array:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
-        q = self.rotary_emb(q, positions)
-        k = self.rotary_emb(k, positions)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
