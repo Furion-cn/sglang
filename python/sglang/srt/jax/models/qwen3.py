@@ -44,6 +44,7 @@ class QWen3Attention(nnx.Module):
         
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps, rngs=rngs)
+
         self.qkv_proj = LinearBase(
             input_size=hidden_size,
             output_size=(num_heads + 2 * num_kv_heads) * self.head_dim,
@@ -66,6 +67,7 @@ class QWen3Attention(nnx.Module):
             is_neox_style=False,
             dtype=jnp.bfloat16,
         )
+
         self.attn = Attention(
             scale=self.scaling,
         )
@@ -78,6 +80,7 @@ class QWen3Attention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         qkv, _ = self.qkv_proj(hidden_states)
+
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size, self.q_size + 2 * self.kv_size], axis=-1)
 
         q_by_head = q.reshape(-1, self.head_dim)
@@ -90,6 +93,7 @@ class QWen3Attention(nnx.Module):
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, is_causal=True)
+
         output, _ = self.o_proj(attn_output)
         return output
     
@@ -103,6 +107,7 @@ class Qwen3MLP(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
     ) -> None:
         self.layer_id = layer_id
+
 
         self.gate_proj = nnx.Linear(
             hidden_size,
@@ -144,6 +149,7 @@ class Qwen3MLP(nnx.Module):
         intermediate_parallel = jax.lax.with_sharding_constraint(
             intermediate_parallel, PartitionSpec(None, 'tensor'))
         output = self.down_proj(intermediate_parallel)
+
         return output
 
 
