@@ -286,5 +286,114 @@ class TestAttention(CustomTestCase):
         assert are_close, f"JAX and PyTorch outputs differ significantly! Max abs error: {max_abs_error}, Max rel error: {max_rel_error}"
 
 
+class TestGroupedQueryAttention(CustomTestCase):
+    """Test cases for the GroupedQueryAttention layer."""
+
+    def setUp(self):
+        if not jax.devices():
+            self.skipTest("JAX not available")
+
+    def _create_test_inputs(self, batch_size=2, num_q_heads=8, num_kv_heads=2, seq_len=32, head_dim=64, dtype=jnp.float32, seed=0):
+        """Create test inputs for GQA computation."""
+        key = jax.random.PRNGKey(seed)
+        keys = jax.random.split(key, 4)
+
+        assert num_q_heads % num_kv_heads == 0
+
+        q = jax.random.normal(
+            keys[0], (batch_size, seq_len, num_q_heads, head_dim), dtype=dtype)
+        k = jax.random.normal(
+            keys[1], (batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype)
+        v = jax.random.normal(
+            keys[2], (batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype)
+
+        attention_mask = jax.random.bernoulli(
+            keys[3], 0.8, (batch_size, 1, seq_len, seq_len)).astype(dtype) * -1e9
+
+        return q, k, v, attention_mask
+
+    def _get_reference_output(self, q, k, v, attention_mask=None, is_causal=True):
+        """Get JAX reference result."""
+        try:
+            return jax.nn.dot_product_attention(
+                query=q, key=k, value=v,
+                bias=attention_mask,
+                is_causal=is_causal
+            )
+        except Exception as e:
+            self.skipTest(f"JAX dot_product_attention not available: {e}")
+
+    def _assert_attention_correctness(self, attention_layer, q, k, v, attention_mask=None, is_causal=True):
+        """Assert attention layer output matches JAX reference."""
+        output = attention_layer(q, k, v, attention_mask=attention_mask, is_causal=is_causal)
+        output_ref = self._get_reference_output(q, k, v, attention_mask=attention_mask, is_causal=is_causal)
+
+        self.assertEqual(output.shape, output_ref.shape)
+        # Using a slightly looser tolerance for mixed precision
+        atol = 1e-2 if output.dtype == jnp.float16 else 1e-5
+        rtol = 1e-2 if output.dtype == jnp.float16 else 1e-5
+        self.assertTrue(jnp.allclose(output, output_ref, atol=atol, rtol=rtol))
+
+    def test_gqa_basic_causal(self):
+        """Test basic GQA functionality with various configurations (causal)."""
+        attention_layer = Attention()
+
+        configs = [
+            (1, 8, 2, 16, 32),
+            (2, 16, 4, 32, 64),
+            (1, 32, 8, 64, 128),
+            (2, 8, 8, 16, 32),  # MHA case
+        ]
+
+        for batch_size, num_q_heads, num_kv_heads, seq_len, head_dim in configs:
+            with self.subTest(b=batch_size, n_q=num_q_heads, n_kv=num_kv_heads, s=seq_len, h=head_dim):
+                q, k, v, _ = self._create_test_inputs(
+                    batch_size, num_q_heads, num_kv_heads, seq_len, head_dim)
+                self._assert_attention_correctness(attention_layer, q, k, v, is_causal=True)
+
+    def test_gqa_with_mask(self):
+        """Test GQA with a custom mask (non-causal)."""
+        attention_layer = Attention()
+        q, k, v, attention_mask = self._create_test_inputs()
+
+        # Test with mask and non-causal
+        self._assert_attention_correctness(attention_layer, q, k, v, attention_mask=attention_mask, is_causal=False)
+
+    def test_gqa_with_mask_and_causal(self):
+        """Test GQA with both a custom mask and causal masking."""
+        attention_layer = Attention()
+        q, k, v, attention_mask = self._create_test_inputs()
+
+        # Test with both mask and causal
+        self._assert_attention_correctness(attention_layer, q, k, v, attention_mask=attention_mask, is_causal=True)
+
+    def test_gqa_dtypes(self):
+        """Test GQA with different data types."""
+        for dtype in [jnp.float32, jnp.float16]:
+            with self.subTest(dtype=dtype):
+                attention_layer = Attention()
+                q, k, v, _ = self._create_test_inputs(dtype=dtype)
+                output = attention_layer(q, k, v)
+                self.assertEqual(output.dtype, dtype)
+                self.assertTrue(jnp.all(jnp.isfinite(output)))
+                self._assert_attention_correctness(attention_layer, q, k, v)
+
+    def test_gqa_gradients(self):
+        """Test gradient flow through GQA."""
+        attention_layer = Attention()
+        q, k, v, _ = self._create_test_inputs(batch_size=1, num_q_heads=4, num_kv_heads=2, seq_len=8, head_dim=16)
+
+        def loss_fn(q_in, k_in, v_in):
+            # A simple loss function
+            return jnp.sum(attention_layer(q_in, k_in, v_in) ** 2)
+
+        grads = jax.grad(loss_fn, argnums=(0, 1, 2))(q, k, v)
+
+        for i, grad in enumerate(grads):
+            self.assertEqual(grad.shape, [q, k, v][i].shape)
+            self.assertTrue(jnp.all(jnp.isfinite(grad)))
+            # Ensure gradients are not all zero, which would indicate a problem
+            self.assertFalse(jnp.allclose(grad, jnp.zeros_like(grad)))
+
 if __name__ == '__main__':
     unittest.main()
