@@ -17,6 +17,7 @@ from unittest.mock import patch
 from flax import nnx
 from jax import numpy as jnp
 from transformers import AutoTokenizer
+from typing import List
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
@@ -33,6 +34,21 @@ from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh
 from sglang.test.test_utils import CustomTestCase
 
+class Sequence:
+    def __init__(self, tokenizer, input_text: str):
+        self.input_text = input_text
+
+        self.input_ids = tokenizer.encode(input_text)
+        self.seq_len = len(self.input_ids)
+
+    def extend(self, next_token_ids: int):
+        self.input_ids.append(next_token_ids)
+        self.seq_len += 1
+
+def sequence_extend(sequences: List[Sequence], next_token_ids: List[int]):
+    for i, seq in enumerate(sequences):
+        seq.extend(next_token_ids[i][0])
+    return sequences
 
 class TestQWenLoadWeights(CustomTestCase):
     """Test cases for QWenLMHeadJaxModel using JAXModelLoader"""
@@ -48,21 +64,28 @@ class TestQWenLoadWeights(CustomTestCase):
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig()
         self.jax_loader = JAXModelLoader(self.load_config)
+        self.tokenizer = self._get_tokenizer()
 
     def _get_positions(self, x):
         return jnp.concatenate([
             jnp.arange(x.shape[1]) for _ in range(x.shape[0])
         ]).reshape(x.shape[0], x.shape[1])
 
-    def _create_batch(self, input_ids):
+    def _create_batch(self, sequences: List[Sequence]):
         """Convert input_ids [batch_size, seq_len] to ForwardBatch format"""
-        batch_size, max_seq_len = input_ids.shape
+        batch_size = len(sequences)
+        seq_len = []
+        input_ids_array = []
+        
+        for seq in sequences:
+            input_ids_array += seq.input_ids
+            seq_len.append(seq.seq_len)
 
         # For this example, assume all sequences have the same length
-        seq_lens = jnp.full((batch_size,), max_seq_len, dtype=jnp.int32)
+        seq_lens = jnp.array(seq_len, dtype=jnp.int32)
 
         # Flatten input_ids
-        input_ids_flat = input_ids.reshape(-1)
+        input_ids_flat = jnp.array(input_ids_array, dtype=jnp.int32)
 
         # Create positions for each token
         positions_flat = jnp.concatenate([
@@ -177,20 +200,18 @@ class TestQWenLoadWeights(CustomTestCase):
                 print("\n🔄 Test model input and output with JAXModelLoader...")
                 
                 print("\n🟢 Starting debug tracer session...")
-                global_tracer.start_session()
+                #global_tracer.start_session()
                 
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
 
-                input_text = "1+1=?"
-                x = jnp.array(tokenizer.encode(input_text)).reshape(1, -1)
-                print(f"输入文本: {input_text}")
-                print(f"输入 tokens: {x}")
+                input_text = ["the capital of France is", "China is a"]
+                sequences = self._batch_tokenize(input_text)
 
                 with self.mesh:
                     for i in range(1):
                         # Create ForwardBatch for each iteration
-                        forward_batch = self._create_batch(x)
+                        forward_batch = self._create_batch(sequences)
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
 
@@ -209,16 +230,18 @@ class TestQWenLoadWeights(CustomTestCase):
                             ))
 
                         # Update sequence with new token for next iteration
-                        x = jnp.concatenate([x, next_token_ids], axis=-1)
+                        sequence_extend(sequences, next_token_ids)
 
                         # 解码当前生成的 token
-                        current_token_id = int(next_token_ids[0, 0])
-                        decoded_token = tokenizer.decode([current_token_id])
-                        print(
-                            f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
+                        for next_token_id in next_token_ids:
+                            current_token_id = int(next_token_id[0])
+                            decoded_token = tokenizer.decode([current_token_id])
+                            print(
+                                f"Step {i+1}: token_id={current_token_id}, decoded='{decoded_token}'")
 
-                full_sequence = [int(token) for token in x[0]]
-                decoded_full = tokenizer.decode(full_sequence)
+                full_sequence = [seq.input_ids for seq in sequences]
+                decoded_full = [tokenizer.decode(
+                    seq.input_ids) for seq in sequences]
                 print(f"\n完整生成序列: {full_sequence}")
                 print(f"完整解码文本: '{decoded_full}'")
 
@@ -251,7 +274,9 @@ class TestQWenLoadWeights(CustomTestCase):
 
             self.assertIn("Cannot find any JAX model weights",
                           str(context.exception))
-
+            
+    def _batch_tokenize(self, input_text: List[str]) -> List[Sequence]:
+        return [Sequence(self.tokenizer, text) for text in input_text]
 
 if __name__ == '__main__':
     unittest.main()

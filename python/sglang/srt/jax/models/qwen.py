@@ -110,6 +110,7 @@ class QWenAttention(nnx.Module):
             dtype=jnp.bfloat16,
         )
         self.attn = Attention(
+            num_heads=num_heads,
             scale=head_size**-0.5,
         )
 
@@ -123,7 +124,10 @@ class QWenAttention(nnx.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, is_causal=True)
+        attn_output = self.attn(q, k, v, is_causal=True, q_seq_lengths=forward_batch.seq_lens, kv_seq_lengths=forward_batch.seq_lens)
+        # Apply attention using the new method
+        # attn_output = self._forward_torch_attention(q, k, v)
+
         output, _ = self.c_proj(attn_output)
         return output
 
