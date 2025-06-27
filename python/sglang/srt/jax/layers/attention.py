@@ -2,189 +2,257 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 
-def unpack_tokens_to_batch_vectorized(inputs: jax.Array, seq_lengths: jax.Array, pad_value: float = 0.0) -> jax.Array:
-    """
-    unpack tokens to batch vectorized
-    
-    Args:
-        inputs: input tokens, the shape is (total_tokens, hidden_dim)
-        seq_lengths: the shape is (batch_size,), the length of each sequence
-        pad_value: padding value, default is 0.0
-
-    Returns:
-        the shape is (batch_size, max_seq_len, hidden_dim)
-    """
-    batch_size = seq_lengths.shape[0]
-    max_seq_len = jnp.max(seq_lengths)
-    hidden_dim = inputs.shape[-1]
-    total_tokens = inputs.shape[0]
-
-    # create output array, initialized with pad_value
-    output = jnp.full((batch_size, max_seq_len, hidden_dim),
-                      pad_value, dtype=inputs.dtype)
-
-    # create cumulative indices to determine the start position of each sequence in the original tokens
-    start_loc = jnp.concatenate(
-        [jnp.array([0]), jnp.cumsum(seq_lengths[:-1])])
-
-    # create index matrix
-    pos_indices = jnp.arange(max_seq_len)[None, :]   # (1, max_seq_len)
-
-    # calculate the global index in the original tokens
-    global_indices = start_loc[:, None] + \
-        pos_indices  # (batch_size, max_seq_len)
-
-    # create mask to determine which positions are valid (not exceeding sequence length)
-    # (batch_size, max_seq_len)
-    valid_mask = pos_indices < seq_lengths[:, None]
-
-    # ensure the index does not exceed the bounds
-    global_indices = jnp.clip(global_indices, 0, total_tokens - 1)
-
-    # extract tokens
-    # (batch_size, max_seq_len, hidden_dim)
-    extracted_tokens = inputs[global_indices]
-
-    # apply mask, invalid positions are set to pad_value
-    output = jnp.where(valid_mask[..., None], extracted_tokens, pad_value)
-
-    return output
-
-
-def pack_batch_to_tokens_vectorized(batch_inputs: jax.Array, seq_lengths: jax.Array, pad_value: float = 0.0) -> jax.Array:
-    """
-    向量化版本：将带padding的batch格式重新打包为连续的tokens
-    这是unpack_tokens_to_batch_vectorized的逆操作
-    
-    Args:
-        batch_inputs: 形状为 (batch_size, max_seq_len, hidden_dim) 的数组
-        seq_lengths: 形状为 (batch_size,) 的数组，表示每个序列的长度
-        pad_value: padding的值，用于识别和过滤padding位置
-    
-    Returns:
-        tuple containing:
-        - packed_tokens: 形状为 (total_tokens, hidden_dim) 的数组
-        - start_loc: 形状为 (batch_size,) 的数组，表示每个序列在packed_tokens中的起始位置
-    """
-    batch_size, max_seq_len, hidden_dim = batch_inputs.shape
-
-    # 计算每个序列在packed输出中的起始位置
-    start_loc = jnp.concatenate([jnp.array([0]), jnp.cumsum(seq_lengths[:-1])])
-    total_tokens = jnp.sum(seq_lengths)
-
-    # 创建位置索引矩阵
-    pos_indices = jnp.arange(max_seq_len)[None, :]   # (1, max_seq_len)
-
-    # 创建mask来确定哪些位置是有效的（不是padding）
-    # (batch_size, max_seq_len)
-    valid_mask = pos_indices < seq_lengths[:, None]
-
-    # 方法1: 使用where和reshape来提取有效tokens
-    # 为每个有效位置分配在输出数组中的索引
-    batch_indices = jnp.arange(batch_size)[:, None]  # (batch_size, 1)
-    seq_indices = jnp.arange(max_seq_len)[None, :]    # (1, max_seq_len)
-
-    # 计算每个位置在packed数组中的目标索引
-    target_indices = start_loc[:, None] + \
-        seq_indices  # (batch_size, max_seq_len)
-
-    # 初始化输出数组
-    packed_tokens = jnp.zeros(
-        (total_tokens, hidden_dim), dtype=batch_inputs.dtype)
-
-    # 使用scatter来填充有效的tokens
-    # 需要将三维索引展平
-    valid_positions = jnp.where(valid_mask)  # 返回有效位置的索引
-    valid_batch_idx, valid_seq_idx = valid_positions
-
-    # 计算对应的目标索引
-    target_idx = start_loc[valid_batch_idx] + valid_seq_idx
-
-    # 提取有效的tokens
-    # (num_valid_tokens, hidden_dim)
-    valid_tokens = batch_inputs[valid_batch_idx, valid_seq_idx]
-
-    # 使用at[].set()来填充packed_tokens
-    packed_tokens = packed_tokens.at[target_idx].set(valid_tokens)
-
-    return packed_tokens
 
 class Attention(nnx.Module):
-    """attention layer."""
+    """Attention layer for variable-length sequences using ForwardBatch."""
 
     def __init__(self,
                  num_heads: int,
                  scale: float = None,
+                 use_dot_product_attention: bool = False,
                  rngs: nnx.Rngs = None):
         self.scale = scale
         self.num_heads = num_heads
+        self.use_dot_product_attention = use_dot_product_attention
 
     def __call__(self,
                  q: jax.Array,
                  k: jax.Array,
                  v: jax.Array,
+                 forward_batch: ForwardBatch,
                  attention_mask: jax.Array = None,
-                 is_causal: bool = True,
-                 q_seq_lengths: jax.Array = None,
-                 kv_seq_lengths: jax.Array = None):
+                 is_causal: bool = True):
+        """
+        Args:
+            q, k, v: Input tensors of shape [total_tokens, hidden_size]
+            forward_batch: ForwardBatch object containing seq_lens and batch_size
+            attention_mask: Optional attention mask
+            is_causal: Whether to apply causal masking
+        Returns:
+            Output tensor of shape [total_tokens, hidden_size]
+        """
+        return self._attn(q, k, v, forward_batch, attention_mask, is_causal)
 
-        # Reshape to [seq_len, num_heads, head_dim] for attention
-        q_ = unpack_tokens_to_batch_vectorized(q, q_seq_lengths)
-        k_ = unpack_tokens_to_batch_vectorized(k, kv_seq_lengths)
-        v_ = unpack_tokens_to_batch_vectorized(v, kv_seq_lengths)
+    def _attn(self, q, k, v, forward_batch: ForwardBatch, attention_mask=None, is_causal=True):
+        """
+        Enhanced attention implementation with simple backend switching.
 
-        q_attn = q_.reshape(*q_.shape[:2], self.num_heads, -1)
-        k_attn = k_.reshape(*k_.shape[:2], self.num_heads, -1)
-        v_attn = v_.reshape(*v_.shape[:2], self.num_heads, -1)
-        
-        attn_output = jax.nn.dot_product_attention(
-            q_attn,
-            k_attn,
-            v_attn,
-            mask= attention_mask,
-            is_causal=is_causal,
-            scale=self.scale,
-            query_seq_lengths=q_seq_lengths,
-            key_value_seq_lengths=kv_seq_lengths,
-        )
-        attn_output_reshaped = attn_output.reshape(*attn_output.shape[:2], -1)
-        attn_output = pack_batch_to_tokens_vectorized(
-            attn_output_reshaped, q_seq_lengths)
-        return attn_output
+        Args:
+            q, k, v: Input tensors of shape [total_tokens, hidden_size]
+            forward_batch: ForwardBatch object containing seq_lens and batch_size
+            attention_mask: Optional attention mask
+            is_causal: Whether to apply causal masking
 
-    def _attn(self, q, k, v, attention_mask, is_causal):
+        Returns:
+            Output tensor of shape [total_tokens, hidden_size]
+        """
+        if self.use_dot_product_attention:
+            return self._forward_dot_product_attention(q, k, v, forward_batch, attention_mask, is_causal)
+        else:
+            return self._forward_native(q, k, v, forward_batch, attention_mask, is_causal)
+
+    def _prepare_tensors(self, q, k, v, forward_batch: ForwardBatch):
+        """
+        Prepare tensors by padding from [total_tokens, hidden_size] to [batch_size, max_seq_len, hidden_size]
+        and reshaping for multi-head attention.
+
+        Returns:
+            tuple: (q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size, head_dim)
+        """
+        seq_lengths = forward_batch.seq_lens
+        batch_size = len(seq_lengths)
+        max_seq_len = int(jnp.max(seq_lengths))
+        hidden_size = q.shape[-1]
+        head_dim = hidden_size // self.num_heads
+
+        def pad_tensor(tensor):
+            """Pad tensor from [total_tokens, hidden_size] to [batch_size, max_seq_len, hidden_size]"""
+            padded = jnp.zeros(
+                (batch_size, max_seq_len, hidden_size), dtype=tensor.dtype)
+
+            start_idx = 0
+            for i in range(batch_size):
+                seq_len = seq_lengths[i]
+                end_idx = start_idx + seq_len
+                padded = padded.at[i, :seq_len].set(tensor[start_idx:end_idx])
+                start_idx = end_idx
+
+            return padded
+
+        # Pad all tensors
+        q_padded = pad_tensor(q)
+        k_padded = pad_tensor(k)
+        v_padded = pad_tensor(v)
+
+        # Reshape for multi-head attention: [batch_size, max_seq_len, num_heads, head_dim]
+        q_reshaped = q_padded.reshape(
+            batch_size, max_seq_len, self.num_heads, head_dim)
+        k_reshaped = k_padded.reshape(
+            batch_size, max_seq_len, self.num_heads, head_dim)
+        v_reshaped = v_padded.reshape(
+            batch_size, max_seq_len, self.num_heads, head_dim)
+
+        return q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size
+
+    def _unpad_output(self, attn_output, forward_batch: ForwardBatch, batch_size, max_seq_len, hidden_size):
+        """
+        Unpad output from [batch_size, max_seq_len, hidden_size] back to [total_tokens, hidden_size]
+        """
+        seq_lengths = forward_batch.seq_lens
+
+        # Reshape to [batch_size, max_seq_len, hidden_size]
+        attn_flat = attn_output.reshape(batch_size, max_seq_len, hidden_size)
+
+        # Unpad back to [total_tokens, hidden_size]
+        result_tokens = []
+        for i in range(batch_size):
+            seq_len = seq_lengths[i]
+            result_tokens.append(attn_flat[i, :seq_len])
+
+        return jnp.concatenate(result_tokens, axis=0)
+
+    def _forward_dot_product_attention(self, q, k, v, forward_batch: ForwardBatch, attention_mask=None, is_causal=True):
+        """
+        Forward pass using JAX's dot_product_attention.
+
+        Args:
+            q, k, v: Input tensors of shape [total_tokens, hidden_size]
+            forward_batch: ForwardBatch object containing seq_lens and batch_size
+            attention_mask: Optional attention mask
+            is_causal: Whether to apply causal masking
+
+        Returns:
+            Output tensor of shape [total_tokens, hidden_size]
+        """
+        seq_lengths = forward_batch.seq_lens
+
+        # Set scale
         if self.scale is None:
-            scale = 1.0 / jnp.sqrt(q.shape[-1])
+            scale = 1.0 / jnp.sqrt(q.shape[-1] // self.num_heads)
         else:
             scale = self.scale
 
-        q = jnp.transpose(q, (0, 2, 1, 3))
-        k = jnp.transpose(k, (0, 2, 1, 3))
-        v = jnp.transpose(v, (0, 2, 1, 3))
+        # Prepare tensors
+        q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size = self._prepare_tensors(
+            q, k, v, forward_batch)
 
-        # query-key product
-        attn_weights = jnp.einsum("bnqh,bnkh->bnqk", q, k)
+        # Apply JAX's dot_product_attention
+        attn_output = jax.nn.dot_product_attention(
+            q_reshaped, k_reshaped, v_reshaped,
+            mask=attention_mask,
+            is_causal=is_causal,
+            scale=scale,
+            query_seq_lengths=seq_lengths,
+            key_value_seq_lengths=seq_lengths
+        )
 
-        # scale
-        attn_weights = attn_weights * scale
+        return self._unpad_output(attn_output, forward_batch, batch_size, max_seq_len, hidden_size)
 
-        # apply causal mask
+    def _forward_native(self, q, k, v, forward_batch: ForwardBatch, attention_mask=None, is_causal=True):
+        """
+        Forward pass using native JAX implementation with block-diagonal attention.
+        This avoids padding while maintaining efficient matrix operations.
+
+        Args:
+            q, k, v: Input tensors of shape [total_tokens, hidden_size]
+            forward_batch: ForwardBatch object containing seq_lens and batch_size
+            attention_mask: Optional attention mask
+            is_causal: Whether to apply causal masking
+
+        Returns:
+            Output tensor of shape [total_tokens, hidden_size]
+        """
+        seq_lengths = forward_batch.seq_lens
+        total_tokens, hidden_size = q.shape
+        head_dim = hidden_size // self.num_heads
+
+        # Set scale
+        if self.scale is None:
+            scale = 1.0 / jnp.sqrt(head_dim)
+        else:
+            scale = self.scale
+
+        # Reshape to multi-head format: [total_tokens, num_heads, head_dim]
+        q_heads = q.reshape(total_tokens, self.num_heads, head_dim)
+        k_heads = k.reshape(total_tokens, self.num_heads, head_dim)
+        v_heads = v.reshape(total_tokens, self.num_heads, head_dim)
+
+        # Transpose for efficient matrix operations: [num_heads, total_tokens, head_dim]
+        q_t = jnp.transpose(q_heads, (1, 0, 2))
+        k_t = jnp.transpose(k_heads, (1, 0, 2))
+        v_t = jnp.transpose(v_heads, (1, 0, 2))
+
+        # Compute full attention weights in one operation: [num_heads, total_tokens, total_tokens]
+        attn_weights = jnp.einsum("hqd,hkd->hqk", q_t, k_t) * scale
+
+        # Create block-diagonal mask for sequences
+        # This ensures tokens only attend to tokens within their own sequence
+        seq_mask = self._create_sequence_mask(seq_lengths)
+        seq_mask = seq_mask[None, :, :]  # [1, total_tokens, total_tokens]
+
+        # Apply sequence mask (set inter-sequence attention to -inf)
+        mask_value = jnp.finfo(attn_weights.dtype).min
+        attn_weights = jnp.where(seq_mask, attn_weights, mask_value)
+
+        # Apply causal mask if needed
         if is_causal:
-            causal_mask = jnp.tril(
-                jnp.ones((q.shape[2], q.shape[2]), dtype=bool))
-            causal_mask = causal_mask[None, None, :, :]
-            mask_value = jnp.finfo(attn_weights.dtype).min
+            causal_mask = self._create_causal_mask(seq_lengths)
+            # [1, total_tokens, total_tokens]
+            causal_mask = causal_mask[None, :, :]
             attn_weights = jnp.where(causal_mask, attn_weights, mask_value)
 
+        # Apply custom attention mask if provided
         if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+            attn_weights = attn_weights + attention_mask[None, :, :]
 
-        # softmax
+        # Softmax
         attn_weights = jax.nn.softmax(attn_weights, axis=-1)
 
-        # Compute attention output: attn_weights @ V
-        attn_output = jnp.matmul(attn_weights, v)
-        attn_output = jnp.swapaxes(attn_output, 1, 2)
+        # Compute output in one operation: [num_heads, total_tokens, head_dim]
+        attn_output = jnp.matmul(attn_weights, v_t)
 
-        return attn_output
+        # Transpose back: [total_tokens, num_heads, head_dim]
+        attn_output = jnp.transpose(attn_output, (1, 0, 2))
+
+        # Reshape to original format: [total_tokens, hidden_size]
+        return attn_output.reshape(total_tokens, hidden_size)
+
+    def _create_sequence_mask(self, seq_lengths):
+        """
+        Create a block-diagonal mask that ensures tokens only attend within their sequence.
+
+        Returns:
+            mask: [total_tokens, total_tokens] boolean mask (True for valid positions)
+        """
+        # Create position indices for each token
+        token_seq_ids = []
+        for seq_idx, seq_len in enumerate(seq_lengths):
+            token_seq_ids.extend([seq_idx] * int(seq_len))
+
+        token_seq_ids = jnp.array(token_seq_ids)
+
+        # Create mask: tokens can only attend to tokens in the same sequence
+        seq_mask = token_seq_ids[:, None] == token_seq_ids[None, :]
+
+        return seq_mask
+
+    def _create_causal_mask(self, seq_lengths):
+        """
+        Create a causal mask that respects sequence boundaries.
+
+        Returns:
+            mask: [total_tokens, total_tokens] boolean mask (True for valid positions)
+        """
+        # Create position indices within each sequence
+        token_positions = []
+        for seq_len in seq_lengths:
+            token_positions.extend(list(range(int(seq_len))))
+
+        token_positions = jnp.array(token_positions)
+
+        # Create causal mask: tokens can only attend to previous tokens within the same sequence
+        causal_mask = token_positions[:, None] >= token_positions[None, :]
+
+        return causal_mask

@@ -2,8 +2,10 @@ from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import torch
+import torch.nn.functional as F
 from flax import nnx
-from jax import numpy as jnp
 from jax.sharding import PartitionSpec
 from transformers import PretrainedConfig
 
@@ -85,11 +87,14 @@ class QWenAttention(nnx.Module):
                  rope_scaling: Optional[Dict[str, Any]] = None,
                  layer_id: int = 0,
                  rngs: nnx.Rngs = None):
-        self.layer_id = layer_id
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
         head_size = hidden_size // num_heads
+        self.scaling = head_size**-0.5
+
         self.c_attn = LinearBase(
             input_size=hidden_size,
-            output_size=(num_heads + 2 * num_heads) * head_size,
+            output_size=3 * hidden_size,
             use_bias=True,
             kernel_axes=(None, "tensor"),
             rngs=rngs,
@@ -101,6 +106,8 @@ class QWenAttention(nnx.Module):
             kernel_axes=("tensor", None),
             rngs=rngs,
         )
+
+        # Use torch version of RotaryEmbedding directly
         self.rotary_emb = RotaryEmbedding(
             head_size=head_size,
             rotary_dim=head_size,
@@ -109,9 +116,12 @@ class QWenAttention(nnx.Module):
             is_neox_style=False,
             dtype=jnp.bfloat16,
         )
+
         self.attn = Attention(
             num_heads=num_heads,
             scale=head_size**-0.5,
+            rngs=rngs,
+            use_dot_product_attention=False,
         )
 
     @trace_function(stage="ATTENTION", include_args=False, include_output=True)
@@ -124,10 +134,8 @@ class QWenAttention(nnx.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, is_causal=True, q_seq_lengths=forward_batch.seq_lens, kv_seq_lengths=forward_batch.seq_lens)
-        # Apply attention using the new method
-        # attn_output = self._forward_torch_attention(q, k, v)
-
+        attn_output = self.attn(
+            q, k, v, forward_batch=forward_batch, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -138,7 +146,7 @@ class QWenBlock(nnx.Module):
                  layer_id: int = 0,
                  rngs: nnx.Rngs = None):
         self.layer_id = layer_id
-        
+
         self.ln_1 = RMSNorm(
             config.hidden_size,
             epsilon=config.layer_norm_epsilon,
@@ -178,11 +186,13 @@ class QWenBlock(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         residual = hidden_states
-        
-        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
+
+        global_tracer.print(
+            hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
-        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
-        
+        global_tracer.print(
+            hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
+
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -191,11 +201,13 @@ class QWenBlock(nnx.Module):
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        
-        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
+
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input",
+                            f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
-        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
-        
+        global_tracer.print(
+            hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
+
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -208,13 +220,13 @@ class QWenModel(nnx.Module):
                  config: PretrainedConfig,
                  rngs: nnx.Rngs = None):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        
+
         self.embed_tokens = Embed(
             num_embeddings=vocab_size,
             features=config.hidden_size,
             rngs=rngs,
         )
-        
+
         self.h = [
             QWenBlock(
                 config,
@@ -223,7 +235,7 @@ class QWenModel(nnx.Module):
             )
             for i in range(config.num_hidden_layers)
         ]
-        
+
         self.ln_f = RMSNorm(
             config.hidden_size,
             epsilon=config.layer_norm_epsilon,
@@ -239,14 +251,16 @@ class QWenModel(nnx.Module):
         global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.embed_tokens(input_ids)
         global_tracer.print(hidden_states, "embedding_output", "embedding_all")
-        
+
         for layer in self.h:
             hidden_states = layer(positions, hidden_states, forward_batch)
-        
-        global_tracer.print(hidden_states, "RMSNorm_final_input", "rmsnorm_final")
+
+        global_tracer.print(
+            hidden_states, "RMSNorm_final_input", "rmsnorm_final")
         hidden_states = self.ln_f(hidden_states)
-        global_tracer.print(hidden_states, "RMSNorm_final_output", "rmsnorm_final")
-        
+        global_tracer.print(
+            hidden_states, "RMSNorm_final_output", "rmsnorm_final")
+
         return hidden_states
 
 
@@ -261,7 +275,7 @@ class QWenLMHeadJaxModel(nnx.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(
             vocab_size, config.hidden_size, rngs=rngs)
-        self.logits_processor = LogitsProcessor(vocab_size)        
+        self.logits_processor = LogitsProcessor(vocab_size)
         self._setup_debug_tracer()
 
     def _setup_debug_tracer(self):
@@ -294,28 +308,28 @@ class QWenLMHeadJaxModel(nnx.Module):
         result = self.logits_processor(
             hidden_states, self.lm_head, forward_batch
         )
-        
+
         if global_tracer.is_session_active():
             input_data = {
                 "input_ids": input_ids,
                 "input_shape": list(input_ids.shape)
             }
-            
+
             output_data = {
                 "output_type": str(type(result).__name__)
             }
-            
+
             if hasattr(result, 'next_token_logits') and result.next_token_logits is not None:
                 output_data.update({
                     "logits": result.next_token_logits,
                     "logits_shape": list(result.next_token_logits.shape)
                 })
-            
+
             global_tracer.accumulate_step(input_data, output_data)
-            
+
             if global_tracer.should_auto_save():
                 global_tracer.end_session()
-        
+
         return result
 
 

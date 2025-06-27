@@ -5,13 +5,11 @@ import jax.numpy as jnp
 from flax import nnx
 from transformers import AutoTokenizer, PretrainedConfig
 
-from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.layers.sampler import Sampler
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
 
 class TestQwenModel(unittest.TestCase):
