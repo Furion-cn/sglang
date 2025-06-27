@@ -10,7 +10,6 @@ from jax.sharding import PartitionSpec
 from transformers import PretrainedConfig
 
 from sglang.debug_tracer import global_tracer, trace_function
-from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
 from sglang.srt.jax.layers.layernorm import RMSNorm
@@ -34,47 +33,44 @@ class QWenMLP(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
     ):
         self.layer_id = layer_id
-
-        self.w1 = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), (None, "tensor")),
+        
+        self.w1 = LinearBase(
+            input_size=hidden_size,
+            output_size=intermediate_size,
             use_bias=False,
-            dtype=dtype,
+            kernel_axes=(None, "tensor"),
+            params_dtype=dtype,
             rngs=rngs,
         )
 
-        self.w2 = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), (None, "tensor")),
+        self.w2 = LinearBase(
+            input_size=hidden_size,
+            output_size=intermediate_size,
             use_bias=False,
-            dtype=dtype,
+            kernel_axes=(None, "tensor"),
+            params_dtype=dtype,
             rngs=rngs,
         )
 
-        self.c_proj = nnx.Linear(
-            intermediate_size,
-            hidden_size,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), ("tensor", None)),
+        self.c_proj = LinearBase(
+            input_size=intermediate_size,
+            output_size=hidden_size,
             use_bias=False,
-            dtype=dtype,
-            rngs=rngs
+            kernel_axes=("tensor",None),
+            params_dtype=dtype,
+            rngs=rngs,
         )
 
         self.act_func = jax.nn.silu
 
     @trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
-        a1 = self.w1(hidden_states)
-        a2 = self.w2(hidden_states)
+        a1,_ = self.w1(hidden_states)
+        a2,_ = self.w2(hidden_states)
         intermediate_parallel = a1 * self.act_func(a2)
         intermediate_parallel = jax.lax.with_sharding_constraint(
             intermediate_parallel, PartitionSpec(None, 'tensor'))
-        output = self.c_proj(intermediate_parallel)
+        output,_ = self.c_proj(intermediate_parallel)
         return output
 
 
