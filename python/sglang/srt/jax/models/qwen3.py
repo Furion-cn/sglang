@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 
 from sglang.debug_tracer import global_tracer, trace_function
 from sglang.srt.hf_transformers_utils import get_tokenizer
-from sglang.srt.jax.layers.attention import GroupedQueryAttention
+from sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
 from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase
@@ -66,7 +66,7 @@ class QWen3Attention(nnx.Module):
             is_neox_style=False,
             dtype=jnp.bfloat16,
         )
-        self.attn = GroupedQueryAttention(
+        self.attn = Attention(
             scale=self.scaling,
         )
 
