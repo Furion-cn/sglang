@@ -242,7 +242,7 @@ class QWen3MoeModel(nnx.Module):
         return hidden_states
 
 
-class Qwen3MoeForCausalLM(nnx.Module):
+class Qwen3MoeForCausalLMJaxModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  rngs: nnx.Rngs = None):
@@ -283,4 +283,4 @@ class Qwen3MoeForCausalLM(nnx.Module):
         result = self.logits_processor(hidden_states, self.lm_head, forward_batch)
         return result
 
-EntryClass = Qwen3MoeForCausalLM
+EntryClass = Qwen3MoeForCausalLMJaxModel
