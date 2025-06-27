@@ -1606,7 +1606,7 @@ class Scheduler(
 
         # Check if any request has debug trace enabled and start session if needed
         debug_enabled = any(getattr(req, 'enable_debug_trace', False) for req in batch.reqs)
-        if debug_enabled and not global_tracer.is_session_active():
+        if debug_enabled and not global_tracer.is_session_active() and self.server_args.enable_debug_tracer:
             global_tracer.start_session()
             if hasattr(self, 'tokenizer') and self.tokenizer:
                 global_tracer.set_tokenizer(self.tokenizer)
