@@ -199,6 +199,7 @@ class ServerArgs:
     torchao_config: str = ""
     enable_nan_detection: bool = False
     enable_p2p_check: bool = False
+    enable_debug_tracer: bool = False
     triton_attention_reduce_in_fp32: bool = False
     triton_attention_num_kv_splits: int = 8
     num_continuous_decode_steps: int = 1
@@ -1394,6 +1395,11 @@ class ServerArgs:
             "--enable-p2p-check",
             action="store_true",
             help="Enable P2P check for GPU access, otherwise the p2p access is allowed by default.",
+        )
+        parser.add_argument(
+            "--enable-debug-tracer",
+            action="store_true",
+            help="Enable debug tracer for debugging purposes.",
         )
         parser.add_argument(
             "--triton-attention-reduce-in-fp32",

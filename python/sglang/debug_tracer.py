@@ -372,7 +372,7 @@ class UnifiedDebugTracer:
             return None
 
     def print(self, tensor: Union[torch.Tensor, jnp.ndarray], name: str, stage: str = "", extra_info: str = ""):
-        if not self.enabled:
+        if not self.enabled or not self._inference_session_active:
             return
         
         if tensor is None:

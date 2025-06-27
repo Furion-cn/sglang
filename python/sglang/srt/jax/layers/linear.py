@@ -1,9 +1,31 @@
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Iterable, Union, Callable, Any
 
 import jax
 from flax import nnx
 from jax import numpy as jnp
 
+def _canonicalize_tuple(x):
+  if isinstance(x, Iterable):
+    return tuple(x)
+  else:
+    return (x,)
+
+def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
+  return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
+
+def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
+  """Convert a string to an activation function."""
+  if fn_or_string == "linear":
+    return lambda x: x
+  elif isinstance(fn_or_string, str):
+    return getattr(nn, fn_or_string)
+  elif callable(fn_or_string):
+    return fn_or_string
+  else:
+    raise ValueError(
+        f"""Don't know how to convert {fn_or_string}
+                         to an activation function"""
+    )
 
 class LinearBase(nnx.Module):
     """Base linear layer.
