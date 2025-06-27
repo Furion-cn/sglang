@@ -28,7 +28,7 @@ from flax import serialization
 
 from sglang.srt.jax.model_converter import check_pointing
 from sglang.srt.jax.model_converter import converter_logging
-from sglang.srt.jax.model_converter.utils import str2bool
+from sglang.srt.jax.model_converter.utils import str2bool, sed_model_config
 from sglang.srt.jax.model_converter import save_checkpoint
 
 MODEL_PARAMS_DICT = {
@@ -442,6 +442,9 @@ def copy_model_config_files(base_model_path: str, maxtext_model_path: str):
           try:
               shutil.copy2(source_file, dest_file)
               copied_files.append(filename)
+              if filename == "config.json":
+                sed_model_config(dest_file)
+                continue
               converter_logging.log(f"✅ Copied {filename}")
           except Exception as e:
               converter_logging.log(f"❌ Failed to copy {filename}: {str(e)}")
