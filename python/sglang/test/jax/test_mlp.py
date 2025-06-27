@@ -44,10 +44,10 @@ class TestPartitionedMLP(unittest.TestCase):
             return model
 
         def _ref_mlp(hidden_states, w1, w2, c_proj):
-            a1 = w1(hidden_states)
-            a2 = w2(hidden_states)
+            a1,_ = w1(hidden_states)
+            a2,_ = w2(hidden_states)
             intermediate_parallel = a1 * jax.nn.silu(a2)
-            output = c_proj(intermediate_parallel)
+            output,_ = c_proj(intermediate_parallel)
             return output
 
         with mesh:
@@ -125,9 +125,9 @@ class TestMLP(unittest.TestCase):
         torch_model = TorchMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            w1=jax_model.w1.kernel.value,
-            w2=jax_model.w2.kernel.value,
-            c_proj=jax_model.c_proj.kernel.value,
+            w1=jax_model.w1.weight.value,
+            w2=jax_model.w2.weight.value,
+            c_proj=jax_model.c_proj.weight.value,
             dtype=torch.float16,
         )
 
