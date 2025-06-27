@@ -241,7 +241,7 @@ class QWen3Model(nnx.Module):
             hidden_states = layer(positions, hidden_states, forward_batch)
         return self.norm(hidden_states)
 
-class Qwen3ForCausalLM(nnx.Module):
+class Qwen3ForCausalLMJaxModel(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  rngs: nnx.Rngs = None):
@@ -282,4 +282,4 @@ class Qwen3ForCausalLM(nnx.Module):
         result = self.logits_processor(hidden_states, self.lm_head, forward_batch)
         return result
 
-EntryClass = Qwen3ForCausalLM
+EntryClass = Qwen3ForCausalLMJaxModel
