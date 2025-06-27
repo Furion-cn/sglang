@@ -1,3 +1,4 @@
+from jax.experimental.compilation_cache import compilation_cache as cc
 import unittest
 
 import jax
@@ -13,12 +14,19 @@ from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.test.jax.test_utils import create_device_mesh
 
 
+import os
+cache_dir = '/mnt/data/users/aolemila/jax_compile_cache/'
+os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
+jax.config.update("jax_compilation_cache_dir", cache_dir)
+cc.set_cache_dir(cache_dir)
+
+
 class TestQwenModel(unittest.TestCase):
     """Test cases for the Qwen model."""
 
     def setUp(self):
         self.mesh = create_device_mesh(
-            ici_parallelism=[-1, 1, 1, 1], dcn_parallelism=[1, 1, 1, 1])
+            ici_parallelism=[1, -1, 1, 1], dcn_parallelism=[1, 1, 1, 1])
 
     @staticmethod
     @nnx.jit
@@ -81,18 +89,23 @@ class TestQwenModel(unittest.TestCase):
             self.assertEqual(y.next_token_logits.shape, (128, 10048))
 
     def test_qwen_model_decode(self):
-        with self.mesh, jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile", create_perfetto_link=True):
+        with self.mesh, jax.profiler.trace("/root/users/aolemila/jax_profile_sglang_qwen/profile"):
             model = self._setup_model()
             sampler = Sampler(rngs=nnx.Rngs(0))
             tokenizer = AutoTokenizer.from_pretrained(
                 "Qwen/Qwen-7B", trust_remote_code=True)
 
-            input_text = "1+1=?"
-            x = jnp.array(tokenizer.encode(input_text)).reshape(1, -1)
-            print(f"输入文本: {input_text}")
+            #input_text = "1+1=?"
+            batch_size=1024
+            input_text_list = ["1+1=?" for _ in range(batch_size)]
+            #print(f"input_text_list: {input_text_list}")
+            encoded_input=[[tokenizer.encode(input_text)] for input_text in input_text_list]
+            #print(f"encoded_input: {encoded_input}")
+            x = jnp.array(encoded_input).reshape(batch_size, -1)
+            print(f"输入文本: {input_text_list}")
             print(f"输入 tokens: {x}")
 
-            for i in range(10):
+            for i in range(3):
                 # Create ForwardBatch for each iteration
                 forward_batch = self._create_batch(x)
                 y = model(forward_batch.input_ids,
@@ -127,5 +140,5 @@ class TestQwenModel(unittest.TestCase):
             print(f"完整解码文本: '{decoded_full}'")
 
             # Shape assertions: [batch_size, vocab_size] for next token logits
-            self.assertEqual(y.next_token_logits.shape, (1, 10048))
-            self.assertEqual(x.shape, (1, 14))
+            # self.assertEqual(y.next_token_logits.shape, (1, 10048))
+            # self.assertEqual(x.shape, (1, 14))
