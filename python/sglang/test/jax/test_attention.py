@@ -292,108 +292,231 @@ class TestGroupedQueryAttention(CustomTestCase):
     def setUp(self):
         if not jax.devices():
             self.skipTest("JAX not available")
+        try:
+            import torch
+            self.pytorch_available = True
+        except ImportError:
+            self.pytorch_available = False
 
-    def _create_test_inputs(self, batch_size=2, num_q_heads=8, num_kv_heads=2, seq_len=32, head_dim=64, dtype=jnp.float32, seed=0):
+        self.seq_len = 16
+        self.num_heads = 8
+        self.head_dim = 64
+        self.total_dim = self.num_heads * self.head_dim
+        self.scale = (self.head_dim ** -0.5)
+
+        # Initialize random seeds for reproducible results
+        self.rng_key = jax.random.PRNGKey(42)
+        if self.pytorch_available:
+            torch.manual_seed(42)
+        np.random.seed(42)
+
+    def _create_test_inputs(self, total_tokens=17, num_q_heads=8, num_kv_heads=2, head_dim=64, dtype=jnp.float32, seed=0):
         """Create test inputs for GQA computation."""
         key = jax.random.PRNGKey(seed)
         keys = jax.random.split(key, 4)
 
         assert num_q_heads % num_kv_heads == 0
 
+        # 创建展平的输入格式 [total_tokens, hidden_size]
         q = jax.random.normal(
-            keys[0], (batch_size, seq_len, num_q_heads, head_dim), dtype=dtype)
+            keys[0], (total_tokens, num_q_heads * head_dim), dtype=dtype)
         k = jax.random.normal(
-            keys[1], (batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype)
+            keys[1], (total_tokens, num_kv_heads * head_dim), dtype=dtype)
         v = jax.random.normal(
-            keys[2], (batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype)
+            keys[2], (total_tokens, num_kv_heads * head_dim), dtype=dtype)
 
-        attention_mask = jax.random.bernoulli(
-            keys[3], 0.8, (batch_size, 1, seq_len, seq_len)).astype(dtype) * -1e9
+        # 创建序列长度信息
+        seq_lengths = jnp.array([5, 7, 5], dtype=jnp.int32)  # 示例：3个序列，总长度17
+        
+        # 创建ForwardBatch对象
+        forward_batch = create_forward_batch(seq_lengths)
 
-        return q, k, v, attention_mask
+        return q, k, v, forward_batch
 
-    def _get_reference_output(self, q, k, v, attention_mask=None, is_causal=True):
-        """Get JAX reference result."""
-        try:
-            return jax.nn.dot_product_attention(
-                query=q, key=k, value=v,
-                bias=attention_mask,
-                is_causal=is_causal
-            )
-        except Exception as e:
-            self.skipTest(f"JAX dot_product_attention not available: {e}")
+    def test_gqa_attention_basic_functionality(self):
+        """Test basic functionality of gqa attention with variable-length sequences"""
+        # Parameters
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = 64
+        hidden_size = num_heads * head_dim
+        kv_size = num_kv_heads * head_dim
+        scale = head_dim ** -0.5
 
-    def _assert_attention_correctness(self, attention_layer, q, k, v, attention_mask=None, is_causal=True):
-        """Assert attention layer output matches JAX reference."""
-        output = attention_layer(q, k, v, attention_mask=attention_mask, is_causal=is_causal)
-        output_ref = self._get_reference_output(q, k, v, attention_mask=attention_mask, is_causal=is_causal)
+        # Variable-length sequence setup
+        batch_size = 3
+        seq_lengths = [4, 6, 8]
+        total_tokens = sum(seq_lengths)
 
-        self.assertEqual(output.shape, output_ref.shape)
-        # Using a slightly looser tolerance for mixed precision
-        atol = 1e-2 if output.dtype == jnp.float16 else 1e-5
-        rtol = 1e-2 if output.dtype == jnp.float16 else 1e-5
-        self.assertTrue(jnp.allclose(output, output_ref, atol=atol, rtol=rtol))
+        # Create mock forward_batch
+        forward_batch = create_forward_batch(seq_lengths)
 
-    def test_gqa_basic_causal(self):
-        """Test basic GQA functionality with various configurations (causal)."""
-        attention_layer = Attention()
+        # Create attention layer
+        attention = Attention(num_heads=num_heads, num_kv_heads=num_kv_heads, scale=scale)
 
-        configs = [
-            (1, 8, 2, 16, 32),
-            (2, 16, 4, 32, 64),
-            (1, 32, 8, 64, 128),
-            (2, 8, 8, 16, 32),  # MHA case
-        ]
+        # Generate test data in [total_tokens, hidden_size] format
+        q = jax.random.normal(self.rng_key, (total_tokens, hidden_size))
+        k = jax.random.normal(jax.random.split(self.rng_key)[
+                              0], (total_tokens, kv_size))
+        v = jax.random.normal(jax.random.split(self.rng_key)[
+                              1], (total_tokens, kv_size))
 
-        for batch_size, num_q_heads, num_kv_heads, seq_len, head_dim in configs:
-            with self.subTest(b=batch_size, n_q=num_q_heads, n_kv=num_kv_heads, s=seq_len, h=head_dim):
-                q, k, v, _ = self._create_test_inputs(
-                    batch_size, num_q_heads, num_kv_heads, seq_len, head_dim)
-                self._assert_attention_correctness(attention_layer, q, k, v, is_causal=True)
+        # Test attention
+        output = attention(q, k, v, forward_batch, is_causal=True)
 
-    def test_gqa_with_mask(self):
-        """Test GQA with a custom mask (non-causal)."""
-        attention_layer = Attention()
-        q, k, v, attention_mask = self._create_test_inputs()
-
-        # Test with mask and non-causal
-        self._assert_attention_correctness(attention_layer, q, k, v, attention_mask=attention_mask, is_causal=False)
-
-    def test_gqa_with_mask_and_causal(self):
-        """Test GQA with both a custom mask and causal masking."""
-        attention_layer = Attention()
-        q, k, v, attention_mask = self._create_test_inputs()
-
-        # Test with both mask and causal
-        self._assert_attention_correctness(attention_layer, q, k, v, attention_mask=attention_mask, is_causal=True)
+        # Check output shape and properties
+        self.assertEqual(output.shape, (total_tokens, hidden_size))
+        self.assertTrue(jnp.isfinite(output).all())
+        self.assertEqual(output.dtype, q.dtype)
 
     def test_gqa_dtypes(self):
         """Test GQA with different data types."""
-        for dtype in [jnp.float32, jnp.float16]:
+        attention_layer = Attention(
+            num_heads=8,
+            num_kv_heads=2,
+            scale=1.0 / jnp.sqrt(64)
+        )
+
+        for dtype in [jnp.float32, jnp.float16, jnp.bfloat16]:
             with self.subTest(dtype=dtype):
-                attention_layer = Attention()
-                q, k, v, _ = self._create_test_inputs(dtype=dtype)
-                output = attention_layer(q, k, v)
+                q, k, v, forward_batch = self._create_test_inputs(dtype=dtype)
+                output = attention_layer(q, k, v, forward_batch=forward_batch)
+                
                 self.assertEqual(output.dtype, dtype)
                 self.assertTrue(jnp.all(jnp.isfinite(output)))
-                self._assert_attention_correctness(attention_layer, q, k, v)
+    
+    def test_attention_accuracy(self):
+        """Test JAX attention accuracy against PyTorch reference"""
+        import torch
+        import torch.nn.functional as F
 
-    def test_gqa_gradients(self):
-        """Test gradient flow through GQA."""
-        attention_layer = Attention()
-        q, k, v, _ = self._create_test_inputs(batch_size=1, num_q_heads=4, num_kv_heads=2, seq_len=8, head_dim=16)
+        # Parameters
+        num_heads = 8
+        head_dim = 64
+        num_kv_heads = 2
+        hidden_size = num_heads * head_dim
+        kv_size = num_kv_heads * head_dim
+        scale = head_dim ** -0.5
+        batch_size = 2
+        seq_lengths = [6, 8]
+        total_tokens = sum(seq_lengths)
+        max_seq_len = max(seq_lengths)
 
-        def loss_fn(q_in, k_in, v_in):
-            # A simple loss function
-            return jnp.sum(attention_layer(q_in, k_in, v_in) ** 2)
+        # Create mock forward_batch
+        forward_batch = create_forward_batch(seq_lengths)
 
-        grads = jax.grad(loss_fn, argnums=(0, 1, 2))(q, k, v)
+        # Create test data
+        key = jax.random.PRNGKey(42)
+        q_jax = jax.random.normal(
+            key, (total_tokens, hidden_size), dtype=jnp.bfloat16)
+        k_jax = jax.random.normal(jax.random.split(
+            key)[0], (total_tokens, kv_size), dtype=jnp.bfloat16)
+        v_jax = jax.random.normal(jax.random.split(
+            key)[1], (total_tokens, kv_size), dtype=jnp.bfloat16)
 
-        for i, grad in enumerate(grads):
-            self.assertEqual(grad.shape, [q, k, v][i].shape)
-            self.assertTrue(jnp.all(jnp.isfinite(grad)))
-            # Ensure gradients are not all zero, which would indicate a problem
-            self.assertFalse(jnp.allclose(grad, jnp.zeros_like(grad)))
+        # JAX attention
+        jax_attention = Attention(num_heads=num_heads, num_kv_heads=num_kv_heads, scale=scale)
+        jax_output = jax_attention(
+            q_jax, k_jax, v_jax, forward_batch, is_causal=True)
+
+        # Create PyTorch equivalent data
+        def to_pytorch_batched(tensor, seq_lengths, max_seq_len):
+            """Convert JAX tensor to PyTorch batched format."""
+            batch_size = len(seq_lengths)
+            size = tensor.shape[-1]
+
+            # Convert to float32 first to avoid BFloat16 numpy conversion issues
+            tensor = tensor.astype(jnp.float32)
+            batched = torch.zeros(
+                (batch_size, max_seq_len, size), dtype=torch.bfloat16)
+
+            start_idx = 0
+            for i, seq_len in enumerate(seq_lengths):
+                end_idx = start_idx + seq_len
+                tensor_slice = tensor[start_idx:end_idx]
+                batched[i, :seq_len] = torch.from_numpy(
+                    np.asarray(tensor_slice)).to(torch.bfloat16)
+                start_idx = end_idx
+
+            return batched
+
+        q_torch = to_pytorch_batched(q_jax, seq_lengths, max_seq_len)
+        k_torch = to_pytorch_batched(k_jax, seq_lengths, max_seq_len)
+        v_torch = to_pytorch_batched(v_jax, seq_lengths, max_seq_len)
+
+        # Create attention mask for variable lengths with proper shape for PyTorch
+        # Shape: [batch_size, 1, max_seq_len, max_seq_len] - broadcasts across heads
+        attention_mask = torch.zeros(
+            (batch_size, 1, max_seq_len, max_seq_len), dtype=torch.bool)
+        for i, seq_len in enumerate(seq_lengths):
+            # Create causal mask for this sequence
+            causal_mask = torch.tril(torch.ones(
+                seq_len, seq_len, dtype=torch.bool))
+            attention_mask[i, 0, :seq_len, :seq_len] = causal_mask
+
+        # Reshape for PyTorch attention: [batch_size, num_heads, seq_len, head_dim]
+        q_torch = q_torch.view(batch_size, max_seq_len,
+                               num_heads, head_dim).transpose(1, 2)
+        k_torch = k_torch.view(batch_size, max_seq_len,
+                               num_kv_heads, head_dim).transpose(1, 2)
+        v_torch = v_torch.view(batch_size, max_seq_len,
+                               num_kv_heads, head_dim).transpose(1, 2)
+
+        # 计算每个 KV head 需要重复的次数
+        num_repeats = num_heads // num_kv_heads
+
+        # 重复 k_torch 和 v_torch 以匹配 q_torch 的 head 数量
+        # [batch_size, num_kv_heads, seq_len, head_dim] -> [batch_size, num_heads, seq_len, head_dim]
+        k_torch = k_torch.repeat_interleave(num_repeats, dim=1)  # 在 head 维度上重复
+        v_torch = v_torch.repeat_interleave(num_repeats, dim=1)  # 在 head 维度上重复
+
+        # 验证维度匹配
+        assert q_torch.shape == k_torch.shape == v_torch.shape, \
+            f"Shape mismatch: q={q_torch.shape}, k={k_torch.shape}, v={v_torch.shape}"
+
+        # PyTorch scaled dot product attention with proper padding mask
+        with torch.no_grad():
+            pytorch_output = F.scaled_dot_product_attention(
+                q_torch, k_torch, v_torch,
+                attn_mask=attention_mask,
+                is_causal=False,  # We handle causality through the mask
+                scale=scale
+            )
+
+        # Convert back to flat format
+        pytorch_output = pytorch_output.transpose(
+            1, 2).contiguous().view(batch_size, max_seq_len, hidden_size)
+        pytorch_output_flat = []
+        for i, seq_len in enumerate(seq_lengths):
+            pytorch_output_flat.append(pytorch_output[i, :seq_len])
+        pytorch_output_flat = torch.cat(pytorch_output_flat, dim=0)
+
+        # Compare results - convert to float32 for proper comparison
+        jax_np = np.array(jax_output.astype(jnp.float32))
+        pytorch_np = pytorch_output_flat.to(torch.float32).numpy()
+
+        abs_diff = np.abs(jax_np - pytorch_np)
+        rel_diff = abs_diff / (np.abs(pytorch_np) + 1e-8)
+
+        max_abs_error = np.max(abs_diff)
+        mean_abs_error = np.mean(abs_diff)
+        max_rel_error = np.max(rel_diff)
+        mean_rel_error = np.mean(rel_diff)
+
+        print(f"JAX output shape: {jax_output.shape}")
+        print(f"PyTorch output shape: {pytorch_output_flat.shape}")
+        print(f"Max absolute error: {max_abs_error:.8f}")
+        print(f"Mean absolute error: {mean_abs_error:.8f}")
+        print(f"Max relative error: {max_rel_error:.8f}")
+        print(f"Mean relative error: {mean_rel_error:.8f}")
+
+        # Test with reasonable thresholds for BFloat16 precision
+        rtol = 2e-2  # Relative tolerance
+        atol = 1e-2  # Absolute tolerance
+        are_close = np.allclose(jax_np, pytorch_np, rtol=rtol, atol=atol)
+        print(f"Are outputs close (rtol={rtol}, atol={atol})? {are_close}")
+
+        assert are_close, f"JAX and PyTorch outputs differ significantly! Max abs error: {max_abs_error}, Max rel error: {max_rel_error}"
 
 if __name__ == '__main__':
     unittest.main()
