@@ -39,8 +39,8 @@ class QWen3MoeAttention(nnx.Module):
         self.kv_size = num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps, rngs=rngs)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps, rngs=rngs)
+        self.q_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
+        self.k_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
         self.c_attn = LinearBase(
             input_size=hidden_size,
             output_size=(num_heads + 2 * num_kv_heads) * self.head_dim,
@@ -64,6 +64,7 @@ class QWen3MoeAttention(nnx.Module):
             dtype=jnp.bfloat16,
         )
         self.attn = Attention(
+            num_heads=num_heads,
             scale=self.scaling,
         )
 
@@ -165,8 +166,8 @@ class QWen3MoeDecoderLayer(nnx.Module):
             )
             self.is_moe_layer = True
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, rngs=rngs)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, rngs=rngs)
+        self.input_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
     @trace_function(stage="QWen3MoeDecoderLayer", include_args=False, include_output=True)
     def __call__(
@@ -221,7 +222,7 @@ class QWen3MoeModel(nnx.Module):
             for i in range(config.num_hidden_layers)
         ]
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, rngs=rngs)
+        self.norm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
     @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
     def __call__(self,
