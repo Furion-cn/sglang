@@ -54,11 +54,11 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
         self.test_model_path = os.environ.get(
             'MODEL_PATH', '/tmp/test_qwen_jax_model')
         self.mesh = create_device_mesh(
-            ici_parallelism=[-1, 1, 1, 1],
-            dcn_parallelism=[1, 1, 1, 1]
+            ici_parallelism=[1],
+            dcn_parallelism=[1]
         )
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
-        self.device_config = DeviceConfig()
+        self.device_config = DeviceConfig("cpu")
         self.jax_loader = JAXModelLoader(self.load_config)
         self.tokenizer = self._get_tokenizer()
 
@@ -158,7 +158,7 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                       str(context.exception))
 
     def test_load_model_with_jax_loader(self):
-        """Test loading QWen model using JAXModelLoader (integration test)"""
+        """Test loading Qwen3 model using JAXModelLoader (integration test)"""
         if not os.path.exists(self.test_model_path):
             self.skipTest(
                 f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
