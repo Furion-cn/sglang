@@ -211,9 +211,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         chkpt_vars[f"layers.{layer_idx}.feed_forward.c_proj.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     )
     
-    jax_weights["transformer"]["h"][layer_idx]["mlp"]["w1"]["kernel"] = w1
-    jax_weights["transformer"]["h"][layer_idx]["mlp"]["w2"]["kernel"] = w2
-    jax_weights["transformer"]["h"][layer_idx]["mlp"]["c_proj"]["kernel"] = c_proj
+    jax_weights["transformer"]["h"][layer_idx]["mlp"]["w1"]["weight"] = w1
+    jax_weights["transformer"]["h"][layer_idx]["mlp"]["w2"]["weight"] = w2
+    jax_weights["transformer"]["h"][layer_idx]["mlp"]["c_proj"]["weight"] = c_proj
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   del chkpt_vars
