@@ -179,13 +179,13 @@ def create_sample_qwen_model(output_dir):
                 },
                 'mlp': {
                     'w1': {
-                        'kernel': np.random.randn(config['hidden_size'], config['intermediate_size'] // 2).astype(np.float32)
+                        'weight': np.random.randn(config['hidden_size'], config['intermediate_size'] // 2).astype(np.float32)
                     },
                     'w2': {
-                        'kernel': np.random.randn(config['hidden_size'], config['intermediate_size'] // 2).astype(np.float32)
+                        'weight': np.random.randn(config['hidden_size'], config['intermediate_size'] // 2).astype(np.float32)
                     },
                     'c_proj': {
-                        'kernel': np.random.randn(config['intermediate_size'] // 2, config['hidden_size']).astype(np.float32)
+                        'weight': np.random.randn(config['intermediate_size'] // 2, config['hidden_size']).astype(np.float32)
                     }
                 }
             }
