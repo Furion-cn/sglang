@@ -53,6 +53,8 @@ class TestQWenLoadWeights(CustomTestCase):
         """Set up test fixtures"""
         self.test_model_path = os.environ.get(
             'MODEL_PATH', '/tmp/test_qwen_jax_model')
+        self.enable_debug_tracer = os.environ.get(
+            'ENABLE_DEBUG_TRACER', False)
         self.mesh = create_device_mesh(
             ici_parallelism=[-1, 1, 1, 1],
             dcn_parallelism=[1, 1, 1, 1]
@@ -209,7 +211,8 @@ class TestQWenLoadWeights(CustomTestCase):
                 print("\n🔄 Test model input and output with JAXModelLoader...")
                 
                 print("\n🟢 Starting debug tracer session...")
-                #global_tracer.start_session()
+                if self.enable_debug_tracer:
+                    global_tracer.start_session()
                 
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
@@ -313,12 +316,13 @@ class TestQWenLoadWeights(CustomTestCase):
                     start_idx = end_idx
                     print()
 
-                print("\n🔴 Ending debug tracer session...")
-                debug_file = global_tracer.end_session()
-                if debug_file:
-                    print(f"✅ Debug trace saved to: {debug_file}")
-                else:
-                    print("⚠️  Debug trace not saved")
+                if self.enable_debug_tracer:
+                    print("\n🔴 Ending debug tracer session...")
+                    debug_file = global_tracer.end_session()
+                    if debug_file:
+                        print(f"✅ Debug trace saved to: {debug_file}")
+                    else:
+                        print("⚠️  Debug trace not saved")
 
         except Exception as e:
             if 'global_tracer' in locals():
