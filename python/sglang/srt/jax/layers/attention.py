@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from typing import Optional
 
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
