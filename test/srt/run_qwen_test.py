@@ -93,6 +93,7 @@ def run_tests(test_name=None, model_path=None, verbose=False, enable_debug_trace
         env['MODEL_PATH'] = model_path
         print(f"Using model path: {model_path}")
     if enable_debug_tracer:
+        print("✓ Enable debug tracer", enable_debug_tracer)
         env['ENABLE_DEBUG_TRACER'] = "true"
     if test_name:
         test_target = f"test_qwen_load_weights.TestQWenLoadWeights.{test_name}"
@@ -272,7 +273,7 @@ def main():
     )
     parser.add_argument(
         "--enable-debug-tracer",
-        action="store_false",
+        action="store_true",
         help="Enable debug tracer for debugging purposes.",
     )
     
