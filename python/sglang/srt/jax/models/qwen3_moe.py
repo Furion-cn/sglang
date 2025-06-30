@@ -65,6 +65,7 @@ class QWen3MoeAttention(nnx.Module):
         )
         self.attn = Attention(
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             scale=self.scaling,
         )
 

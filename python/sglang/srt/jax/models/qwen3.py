@@ -70,6 +70,7 @@ class QWen3Attention(nnx.Module):
 
         self.attn = Attention(
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             scale=self.scaling,
         )
 
@@ -81,8 +82,8 @@ class QWen3Attention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         qkv, _ = self.qkv_proj(hidden_states)
-
-        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size, self.q_size + 2 * self.kv_size], axis=-1)
+        
+        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
@@ -93,7 +94,7 @@ class QWen3Attention(nnx.Module):
         k = k_by_head.reshape(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, is_causal=True)
+        attn_output = self.attn(q, k, v, forward_batch=forward_batch, is_causal=True)
 
         output, _ = self.o_proj(attn_output)
         return output
