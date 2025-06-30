@@ -24,17 +24,28 @@ class TestQwen3Model(unittest.TestCase):
     @nnx.jit
     def _setup_model():
         model = Qwen3ForCausalLMJaxModel(config=PretrainedConfig(
-            vocab_size=10000,
-            hidden_size=1024,
-            num_hidden_layers=12,
-            num_attention_heads=16,
-            num_key_value_heads=16,  # Qwen3 specific
-            intermediate_size=4096,
-            max_position_embeddings=1024,
-            rope_theta=1000000,  # Qwen3 default
-            rms_norm_eps=1e-6,   # Qwen3 specific
-            attention_bias=False, # Qwen3 specific
-            head_dim=64,         # Qwen3 specific
+            attention_bias=False,
+            attention_dropout=0.0,
+            bos_token_id=151643,
+            eos_token_id=151645,
+            head_dim=128,
+            hidden_act="silu",
+            hidden_size=4096,
+            initializer_range=0.02,
+            intermediate_size=12288,
+            max_position_embeddings=40960,
+            max_window_layers=36,
+            model_type="qwen3",
+            num_attention_heads=32,
+            num_hidden_layers=36,
+            num_key_value_heads=8,
+            rms_norm_eps=1e-06,
+            rope_scaling=None,
+            rope_theta=1000000,
+            sliding_window=None,
+            tie_word_embeddings=False,
+            torch_dtype="bfloat16",
+            vocab_size=151936
         ), rngs=nnx.Rngs(0))
         state = nnx.state(model)
         pspecs = nnx.get_partition_spec(state)
@@ -91,7 +102,7 @@ class TestQwen3Model(unittest.TestCase):
             # 使用Qwen3的tokenizer
             try:
                 tokenizer = AutoTokenizer.from_pretrained(
-                    "Qwen/Qwen2.5-7B-Instruct", trust_remote_code=True)
+                    "Qwen/Qwen3-8B", trust_remote_code=True)
             except:
                 # 如果无法加载真实的tokenizer，使用虚拟的token ids
                 print("警告: 无法加载Qwen3 tokenizer，使用虚拟token ids")
