@@ -55,6 +55,7 @@ class TestQWenLoadWeights(CustomTestCase):
             'MODEL_PATH', '/tmp/test_qwen_jax_model')
         self.enable_debug_tracer = os.environ.get(
             'ENABLE_DEBUG_TRACER', False)
+        print(f"debug tracer enabled: {self.enable_debug_tracer}")
         self.mesh = create_device_mesh(
             ici_parallelism=[-1, 1, 1, 1],
             dcn_parallelism=[1, 1, 1, 1]
