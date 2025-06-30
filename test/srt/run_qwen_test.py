@@ -86,13 +86,14 @@ def check_transformers_dependencies():
         return False
 
 
-def run_tests(test_name=None, model_path=None, verbose=False):
+def run_tests(test_name=None, model_path=None, verbose=False, enable_debug_tracer=False):
     """Run the QWen JAXModelLoader tests"""
     env = os.environ.copy()
     if model_path:
         env['MODEL_PATH'] = model_path
         print(f"Using model path: {model_path}")
-    
+    if enable_debug_tracer:
+        env['ENABLE_DEBUG_TRACER'] = "true"
     if test_name:
         test_target = f"test_qwen_load_weights.TestQWenLoadWeights.{test_name}"
     else:
@@ -269,6 +270,11 @@ def main():
         action="store_true",
         help="List all available test methods"
     )
+    parser.add_argument(
+        "--enable-debug-tracer",
+        action="store_false",
+        help="Enable debug tracer for debugging purposes.",
+    )
     
     args = parser.parse_args()
     
@@ -328,7 +334,8 @@ def main():
     success = run_tests(
         test_name=args.test,
         model_path=args.model_path,
-        verbose=args.verbose
+        verbose=args.verbose,
+        enable_debug_tracer=args.enable_debug_tracer
     )
     
     if success:
