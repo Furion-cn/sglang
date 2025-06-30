@@ -12,12 +12,12 @@ Usage:
 import os
 import unittest
 from pathlib import Path
+from typing import List
 from unittest.mock import patch
 
 from flax import nnx
 from jax import numpy as jnp
 from transformers import AutoTokenizer
-from typing import List
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
@@ -27,9 +27,10 @@ from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, Forwa
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
-from sglang.test.jax.test_utils import create_device_mesh
+from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
 from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
+
 
 class Sequence:
     def __init__(self, tokenizer, input_text: str):
@@ -42,10 +43,12 @@ class Sequence:
         self.input_ids.append(next_token_ids)
         self.seq_len += 1
 
+
 def sequence_extend(sequences: List[Sequence], next_token_ids: List[int]):
     for i, seq in enumerate(sequences):
         seq.extend(next_token_ids[i][0])
     return sequences
+
 
 class TestQWenLoadWeights(CustomTestCase):
     """Test cases for QWenLMHeadJaxModel using JAXModelLoader"""
@@ -221,11 +224,11 @@ class TestQWenLoadWeights(CustomTestCase):
                 print("\n🎉 JAXModelLoader integration test completed successfully!")
 
                 print("\n🔄 Test model input and output with JAXModelLoader...")
-                
+
                 print("\n🟢 Starting debug tracer session...")
                 if self.enable_debug_tracer:
                     global_tracer.start_session()
-                
+
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
 
@@ -246,8 +249,10 @@ class TestQWenLoadWeights(CustomTestCase):
                 print(f"Input tokens shape: {input_ids_array.shape}")
                 print(f"Input tokens: {input_ids_array}")
 
-                with self.mesh:
-                    for i in range(20):
+                jax_profiling_dir = os.environ.get(
+                    "JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
+                with self.mesh, jax_trace_context(jax_profiling_dir):
+                    for _ in range(20):
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
@@ -314,7 +319,7 @@ class TestQWenLoadWeights(CustomTestCase):
 
             self.assertIn("Cannot find any JAX model weights",
                           str(context.exception))
-            
+
     def _batch_tokenize(self, input_text: List[str]) -> List[Sequence]:
         return [Sequence(self.tokenizer, text) for text in input_text]
     
@@ -359,6 +364,7 @@ class TestQWenLoadWeights(CustomTestCase):
         # update forward mode
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE
+
 
 if __name__ == '__main__':
     unittest.main()
