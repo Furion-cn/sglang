@@ -109,31 +109,28 @@ class Qwen3MLP(nnx.Module):
         self.layer_id = layer_id
 
 
-        self.gate_proj = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), (None, "tensor")),
+        self.gate_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=intermediate_size,
+            kernel_axes=(None, "tensor"),
             use_bias=False,
             dtype=dtype,
             rngs=rngs,
         )
 
-        self.up_proj = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), (None, "tensor")),
+        self.up_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=intermediate_size,
+            kernel_axes=(None, "tensor"),
             use_bias=False,
             dtype=dtype,
             rngs=rngs,
         )
 
-        self.down_proj = nnx.Linear(
-            intermediate_size,
-            hidden_size,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), ("tensor", None)),
+        self.down_proj = LinearBase(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            kernel_axes=("tensor", None),
             use_bias=False,
             dtype=dtype,
             rngs=rngs
