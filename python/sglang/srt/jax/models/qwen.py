@@ -126,12 +126,13 @@ class QWenAttention(nnx.Module):
         positions: jax.Array,
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
+        layer_id: int,
     ) -> jax.Array:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(
-            q, k, v, forward_batch=forward_batch, is_causal=True)
+            q, k, v, forward_batch=forward_batch, layer_id=layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -193,6 +194,7 @@ class QWenBlock(nnx.Module):
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
+            layer_id=self.layer_id,
         )
         hidden_states = residual + hidden_states
 

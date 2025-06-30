@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 from enum import IntEnum, auto
+from typing import List
 
 import jax
+
+from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
 
 
 class ForwardMode(IntEnum):
@@ -30,3 +33,11 @@ class ForwardBatch:
     extend_start_loc: jax.Array = None
     # Total number of tokens across all sequences
     total_tokens: int = 0
+    # sequences
+    sequences: List[str] = None
+    # prefix string
+    prefix_str: List[str] = None
+    # token to kv cache pool
+    token_to_kv_pool: HashKVCache = None
+    # current kv_cache
+    current_kv_cache: List[ReqToHashKVCachePool] = None
