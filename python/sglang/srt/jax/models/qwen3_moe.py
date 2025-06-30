@@ -99,7 +99,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 40960)
         head_dim = getattr(config, "head_dim", None)
         
         self.self_attn = QWen3MoeAttention(
@@ -242,7 +242,7 @@ class QWen3MoeModel(nnx.Module):
         return hidden_states
 
 
-class Qwen3MoeForCausalLM(nnx.Module):
+class JaxQwen3MoeForCausalLM(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  rngs: nnx.Rngs = None):
@@ -283,4 +283,4 @@ class Qwen3MoeForCausalLM(nnx.Module):
         result = self.logits_processor(hidden_states, self.lm_head, forward_batch)
         return result
 
-EntryClass = Qwen3MoeForCausalLM
+EntryClass = JaxQwen3MoeForCausalLM
