@@ -180,9 +180,9 @@ def _qwen3_hf_to_jax_mapping(layer_idx: int = -1, has_attention_bias: bool = Fal
         f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"layers.{layer_idx}.self_attn.k_norm.weight",
         
         # MLP weights - Qwen3 uses gate_proj, up_proj, down_proj
-        f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.mlp.gate_proj.kernel",
-        f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.mlp.up_proj.kernel", 
-        f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.mlp.down_proj.kernel",
+        f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.mlp.gate_proj.weight",
+        f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.mlp.up_proj.weight", 
+        f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.mlp.down_proj.weight",
     }
     
     # 只有当模型有 bias 时才添加 bias 映射
@@ -314,9 +314,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             "input_layernorm": {"weight": None},
             "post_attention_layernorm": {"weight": None},
             "mlp": {
-                "gate_proj": {"kernel": None},
-                "up_proj": {"kernel": None},
-                "down_proj": {"kernel": None},
+                "gate_proj": {"weight": None},
+                "up_proj": {"weight": None},
+                "down_proj": {"weight": None},
             },
         }
 
@@ -421,25 +421,25 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     # MLP weights
     converter_logging.log("Processing MLP layer weights")
     for layer_idx in tqdm(range(base_num_decoder_layers), desc="MLP layers", leave=False):
-        gate_proj_key = f"layers.{layer_idx}.mlp.gate_proj.kernel"
-        up_proj_key = f"layers.{layer_idx}.mlp.up_proj.kernel"
-        down_proj_key = f"layers.{layer_idx}.mlp.down_proj.kernel"
+        gate_proj_key = f"layers.{layer_idx}.mlp.gate_proj.weight"
+        up_proj_key = f"layers.{layer_idx}.mlp.up_proj.weight"
+        down_proj_key = f"layers.{layer_idx}.mlp.down_proj.weight"
         
         if gate_proj_key in chkpt_vars:
             gate_proj = chkpt_vars[gate_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-            jax_weights["model"]["layers"][layer_idx]["mlp"]["gate_proj"]["kernel"] = gate_proj
+            jax_weights["model"]["layers"][layer_idx]["mlp"]["gate_proj"]["weight"] = gate_proj
         else:
             converter_logging.log(f"❌ Gate proj weight not found for layer {layer_idx}")
             
         if up_proj_key in chkpt_vars:
             up_proj = chkpt_vars[up_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-            jax_weights["model"]["layers"][layer_idx]["mlp"]["up_proj"]["kernel"] = up_proj
+            jax_weights["model"]["layers"][layer_idx]["mlp"]["up_proj"]["weight"] = up_proj
         else:
             converter_logging.log(f"❌ Up proj weight not found for layer {layer_idx}")
             
         if down_proj_key in chkpt_vars:
             down_proj = chkpt_vars[down_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-            jax_weights["model"]["layers"][layer_idx]["mlp"]["down_proj"]["kernel"] = down_proj
+            jax_weights["model"]["layers"][layer_idx]["mlp"]["down_proj"]["weight"] = down_proj
         else:
             converter_logging.log(f"❌ Down proj weight not found for layer {layer_idx}")
 
@@ -610,20 +610,20 @@ def compare_weights(original_weights: dict, converted_weights: dict, model_param
                     return layer_weights.get("self_attn", {}).get("q_norm", {}).get("weight")
                 elif "self_attn.k_norm.weight" in jax_key:
                     return layer_weights.get("self_attn", {}).get("k_norm", {}).get("weight")
-                elif "mlp.gate_proj.kernel" in jax_key:
-                    jax_weight = layer_weights.get("mlp", {}).get("gate_proj", {}).get("kernel")
+                elif "mlp.gate_proj.weight" in jax_key:
+                    jax_weight = layer_weights.get("mlp", {}).get("gate_proj", {}).get("weight")
                     if jax_weight is not None:
                         converter_logging.log(f"Applying transpose for layer {layer} gate_proj weight comparison")
                         return jax_weight.transpose()
                     return jax_weight
-                elif "mlp.up_proj.kernel" in jax_key:
-                    jax_weight = layer_weights.get("mlp", {}).get("up_proj", {}).get("kernel")
+                elif "mlp.up_proj.weight" in jax_key:
+                    jax_weight = layer_weights.get("mlp", {}).get("up_proj", {}).get("weight")
                     if jax_weight is not None:
                         converter_logging.log(f"Applying transpose for layer {layer} up_proj weight comparison")
                         return jax_weight.transpose()
                     return jax_weight
-                elif "mlp.down_proj.kernel" in jax_key:
-                    jax_weight = layer_weights.get("mlp", {}).get("down_proj", {}).get("kernel")
+                elif "mlp.down_proj.weight" in jax_key:
+                    jax_weight = layer_weights.get("mlp", {}).get("down_proj", {}).get("weight")
                     if jax_weight is not None:
                         converter_logging.log(f"Applying transpose for layer {layer} down_proj weight comparison")
                         return jax_weight.transpose()
