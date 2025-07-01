@@ -90,7 +90,7 @@ class QWen3MoeAttention(nnx.Module):
         k = k_by_head.reshape(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, is_causal=True)
+        attn_output = self.attn(q, k, v, layer_id=self.layer_id, forward_batch=forward_batch, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
 

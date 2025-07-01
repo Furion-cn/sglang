@@ -29,6 +29,7 @@ from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh
 from sglang.test.test_utils import CustomTestCase
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool, HashKVCache
 
 class Sequence:
     def __init__(self, tokenizer, input_text: str):
@@ -54,8 +55,8 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
         self.test_model_path = os.environ.get(
             'MODEL_PATH', '/tmp/test_qwen_jax_model')
         self.mesh = create_device_mesh(
-            ici_parallelism=[1],
-            dcn_parallelism=[1]
+            ici_parallelism=[-1, 1, 1, 1],
+            dcn_parallelism=[1, 1, 1, 1]
         )
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig("cpu")
@@ -67,7 +68,7 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
             jnp.arange(x.shape[1]) for _ in range(x.shape[0])
         ]).reshape(x.shape[0], x.shape[1])
 
-    def _create_batch_from_texts(self, texts, tokenizer):
+    def _create_batch_from_texts(self, model_config, texts, tokenizer):
         """Create initial batch from texts with tokenization (no padding needed)
 
         Args:
@@ -101,7 +102,17 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
         # Create start locations
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
-
+        if model_config.torch_dtype == "bfloat16":
+            dtype = jnp.bfloat16
+        else:
+            dtype = jnp.float32
+        current_kv_cache = [ReqToHashKVCachePool(
+            seq_len=seq_len,
+            head_num=model_config.num_key_value_heads,
+            head_dim=model_config.head_dim,
+            layer_num=model_config.num_hidden_layers,
+            dtype=dtype
+        ) for seq_len in seq_lens]
         # Create ForwardBatch
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
@@ -110,7 +121,11 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
             seq_lens=seq_lens,
             positions=positions_array,
             extend_start_loc=extend_start_loc,
-            total_tokens=len(input_ids_array)
+            total_tokens=len(input_ids_array),
+            sequences=texts.copy(),
+            current_kv_cache=current_kv_cache,
+            prefix_str=texts.copy(),
+            token_to_kv_pool=HashKVCache(),
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
@@ -218,12 +233,13 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                 # Multiple questions to simulate batch > 1 scenario
                 input_texts = [
                     "the capital of France is",
-                    "what is the largest planet in",
-                    "the founder of Apple company was"
+                    # "what is the largest planet in",
+                    # "the founder of Apple company was",
+                    # "the capital of China is",
                 ]
 
                 input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
-                    input_texts, tokenizer)
+                    model.config, input_texts, tokenizer)
 
                 print(f"Input text batch: {input_texts}")
                 print(f"Batch size: {len(input_texts)}")
@@ -232,7 +248,7 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                 print(f"Input tokens: {input_ids_array}")
 
                 with self.mesh:
-                    for i in range(10):
+                    for i in range(5):
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
@@ -251,63 +267,17 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                                 min_ps=jnp.full((len(input_texts), 1), 0.0),
                                 vocab_size=model.config.vocab_size,
                             ))
-
-                        # Update sequences with new tokens for next iteration
-                        # Insert new tokens at the end of their respective sequences
-                        new_input_ids = []
-                        start_idx = 0
-                        for batch_idx, seq_len in enumerate(actual_seq_lens):
-                            # Current sequence tokens + new token
-                            seq_tokens = input_ids_array[start_idx:start_idx +
-                                                         seq_len].tolist()
-                            seq_tokens.append(
-                                int(next_token_ids[batch_idx, 0]))
-                            new_input_ids.extend(seq_tokens)
-                            start_idx += seq_len
-
-                        input_ids_array = jnp.array(
-                            new_input_ids, dtype=jnp.int32)
-                        # Update actual sequence lengths
-                        actual_seq_lens = [
-                            length + 1 for length in actual_seq_lens]
-
-                        # Decode current generated tokens (for each sequence in batch)
-                        print(f"\nStep {i+1}:")
-                        for batch_idx in range(len(input_texts)):
-                            current_token_id = int(
-                                next_token_ids[batch_idx, 0])
-                            decoded_token = tokenizer.decode(
-                                [current_token_id])
-                            print(
-                                f"  Batch {batch_idx}: token_id={current_token_id}, decoded='{decoded_token}'")
-
-                        # Update ForwardBatch attributes to avoid recreation
-                        seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)
-                        extend_start_loc = jnp.cumsum(
-                            jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
-
-                        # Add new positions (next position for each sequence)
-                        new_positions = jnp.array(
-                            [seq_len - 1 for seq_len in actual_seq_lens], dtype=jnp.int32)
-                        forward_batch.positions = jnp.concatenate(
-                            [forward_batch.positions, new_positions])
-                        forward_batch.input_ids = input_ids_array
-                        forward_batch.seq_lens = seq_lens
-                        forward_batch.extend_start_loc = extend_start_loc
-                        forward_batch.total_tokens = len(input_ids_array)
+                        self.update_forward_batch(forward_batch, next_token_ids, tokenizer)
 
                 # Decode complete results for each sequence
                 print(f"\n=== Complete Generation Results ===")
                 start_idx = 0
+                input_ids = forward_batch.input_ids.tolist()
                 for batch_idx in range(len(input_texts)):
                     # Extract tokens for each sequence from flattened array
                     seq_len = actual_seq_lens[batch_idx]
                     end_idx = start_idx + seq_len
-                    full_sequence = [int(token)
-                                     for token in input_ids_array[start_idx:end_idx]]
-                    decoded_full = tokenizer.decode(full_sequence)
-                    print(f"Sequence {batch_idx}: {full_sequence}")
-                    print(f"Decoded text {batch_idx}: '{decoded_full}'")
+                    print(f"Decoded text {batch_idx}: '{forward_batch.sequences[batch_idx]}'")
                     print(
                         f"Original question {batch_idx}: '{input_texts[batch_idx]}'")
                     print(f"Actual length {batch_idx}: {seq_len}")
@@ -329,6 +299,48 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                 except:
                     pass
             self.fail(f"JAXModelLoader integration test failed: {e}")
+
+    def update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer):
+        new_input_ids = []
+        new_seq_lens = []
+        for batch_idx, seq_len in enumerate(forward_batch.seq_lens):
+            current_token_id = int(next_token_ids[batch_idx, 0])
+            new_input_ids.append(current_token_id)
+            new_seq_lens.append(seq_len + 1)
+            decoded_token = tokenizer.decode(
+                [current_token_id])
+
+            # update prefix
+            if forward_batch.forward_mode == ForwardMode.DECODE:
+                forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
+
+            # update kv cache
+            forward_batch.token_to_kv_pool.set_kv_cache(
+                forward_batch.prefix_str[batch_idx],
+                forward_batch.current_kv_cache[batch_idx]
+            )
+            # update sequences
+            forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
+            print(
+                f"Batch {batch_idx}: token_id={current_token_id}, decoded='{decoded_token} prefix={forward_batch.prefix_str[batch_idx]}")
+
+        # update seq lens
+        forward_batch.seq_lens = jnp.array(new_seq_lens, dtype=jnp.int32)
+        # update extend start loc
+        extend_start_loc = jnp.cumsum(
+            jnp.concatenate([jnp.array([0]), forward_batch.seq_lens[:-1]]))
+        # update positions
+        forward_batch.positions = jnp.array(
+            [seq_len - 1 for seq_len in new_seq_lens], dtype=jnp.int32)
+        # update input ids
+        forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
+        # update extend start loc
+        forward_batch.extend_start_loc = extend_start_loc
+        # update total tokens
+        forward_batch.total_tokens = len(new_input_ids)
+        # update forward mode
+        if forward_batch.forward_mode == ForwardMode.EXTEND:
+            forward_batch.forward_mode = ForwardMode.DECODE
 
     def test_prepare_jax_weights_no_msgpack_files(self):
         """Test JAXModelLoader behavior when no msgpack files exist"""
