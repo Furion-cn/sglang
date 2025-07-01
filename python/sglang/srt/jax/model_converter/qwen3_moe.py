@@ -61,7 +61,6 @@ CAST_DTYPE = ml_dtypes.bfloat16
 
 
 def list_safetensor_keys(model_path: str):
-    """列出 safetensors 文件中的所有键名以分析 Qwen3 MoE 结构"""
     ckpt_paths = sorted(pathlib.Path(model_path).glob("*.safetensors"))
     
     all_keys = []
@@ -83,7 +82,6 @@ def list_safetensor_keys(model_path: str):
 
 
 def _infer_model_params_from_config(config_path: str) -> dict:
-    """从 config.json 文件推断模型参数"""
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -108,43 +106,26 @@ def _infer_model_params_from_config(config_path: str) -> dict:
 
 
 def _get_hf_to_jax_key_mapping(layer_idx: int = -1, has_attention_bias: bool = False, is_moe_layer: bool = True, num_experts: int = 128) -> dict:
-    """
-    Maps from Qwen3 MoE checkpoint weights to JAX model weights.
-    
-    Args:
-        layer_idx: The layer index of the model.
-        has_attention_bias: Whether the model has attention bias.
-        is_moe_layer: Whether this layer is a MoE layer or regular MLP layer.
-        num_experts: Number of experts for MoE layers.
-        
-    Returns:
-        A dictionary mapping from Qwen3 MoE checkpoint to JAX model weights.
-    """
     mapping = {
-        # Embeddings and output
         "model.embed_tokens.weight": "model.embed_tokens.embedding",
         "model.norm.weight": "model.norm.weight", 
         "lm_head.weight": "lm_head.embedding",
     }
     
     if layer_idx >= 0:
-        # Layer-specific mappings for Qwen3 MoE
         layer_mapping = {
             f"model.layers.{layer_idx}.input_layernorm.weight": f"model.layers.{layer_idx}.input_layernorm.weight",
             f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"model.layers.{layer_idx}.post_attention_layernorm.weight",
             
-            # Attention weights - Qwen3 使用分离的 Q、K、V 投影，需要特殊处理合并
             f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"model.layers.{layer_idx}.self_attn.q_proj.weight",
             f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"model.layers.{layer_idx}.self_attn.k_proj.weight", 
             f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"model.layers.{layer_idx}.self_attn.v_proj.weight",
             f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"model.layers.{layer_idx}.self_attn.o_proj.weight",
             
-            # Q/K normalization (Qwen3 specific)
             f"model.layers.{layer_idx}.self_attn.q_norm.weight": f"model.layers.{layer_idx}.self_attn.q_norm.weight",
             f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"model.layers.{layer_idx}.self_attn.k_norm.weight",
         }
         
-        # 只有当模型有 bias 时才添加 bias 映射
         if has_attention_bias:
             layer_mapping.update({
                 f"model.layers.{layer_idx}.self_attn.q_proj.bias": f"model.layers.{layer_idx}.self_attn.q_proj.bias",
@@ -152,15 +133,11 @@ def _get_hf_to_jax_key_mapping(layer_idx: int = -1, has_attention_bias: bool = F
                 f"model.layers.{layer_idx}.self_attn.v_proj.bias": f"model.layers.{layer_idx}.self_attn.v_proj.bias",
             })
         
-        # MoE 层和普通 MLP 层的权重映射
         if is_moe_layer:
-            # MoE 层包含路由器和专家权重
             layer_mapping.update({
-                # 路由器权重 - 实际键名是 mlp.gate.weight
                 f"model.layers.{layer_idx}.mlp.gate.weight": f"model.layers.{layer_idx}.moe_gate.kernel",
             })
             
-            # 专家权重 - 动态添加所有专家的权重映射，实际路径是 mlp.experts.X
             for expert_idx in range(num_experts):
                 layer_mapping.update({
                     f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight",
@@ -168,7 +145,6 @@ def _get_hf_to_jax_key_mapping(layer_idx: int = -1, has_attention_bias: bool = F
                     f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight",
                 })
         else:
-            # 普通 MLP 层
             layer_mapping.update({
                 f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"model.layers.{layer_idx}.mlp.gate_proj.weight",
                 f"model.layers.{layer_idx}.mlp.up_proj.weight": f"model.layers.{layer_idx}.mlp.up_proj.weight", 
@@ -200,7 +176,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     converter_logging.log(f"Loading the Qwen3 MoE model from {base_model_path}")
     converter_logging.log(f"Model has {num_experts} experts, MLP-only layers: {mlp_only_layers}")
     
-    # 首先列出所有权重键名以便调试
     converter_logging.log("Analyzing Qwen3 MoE model structure...")
     all_keys = list_safetensor_keys(base_model_path)
     
@@ -212,7 +187,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
         with safe_open(ckpt_path, framework="pt", device="cpu") as f:
             for key in f.keys():
-                # 跳过以 .bias 结尾的权重，如果模型没有 attention bias
                 if key.endswith(".bias") and not has_attention_bias:
                     converter_logging.log(f"Skipping bias weight: {key}")
                     continue
@@ -267,7 +241,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     for layer_idx in range(base_num_decoder_layers):
         is_moe_layer = layer_idx not in mlp_only_layers
         
-        # 动态构建 attention 权重结构
         attn_structure = {
             "c_attn": {"weight": None},
             "c_proj": {"weight": None},
@@ -275,7 +248,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             "k_norm": {"weight": None},
         }
         
-        # 只有当模型有 attention bias 时才添加 bias 字段
         if has_attention_bias:
             attn_structure["c_attn"]["bias"] = None
             attn_structure["c_proj"]["bias"] = None
@@ -287,7 +259,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         }
         
         if is_moe_layer:
-            # MoE 层结构
             layer_structure.update({
                 "moe_gate": {"kernel": None},
                 "mlp": {
@@ -297,7 +268,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 },
             })
         else:
-            # 普通 MLP 层结构
             layer_structure.update({
                 "mlp": {
                     "gate_proj": {"weight": None},
@@ -308,12 +278,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             
         jax_weights["model"]["layers"][layer_idx] = layer_structure
 
-    # Self attention - 处理分离的 Q、K、V 权重
     converter_logging.log("Processing self attention")
     for layer_idx in tqdm(range(base_num_decoder_layers), desc="attention layers", leave=False):
         is_moe_layer = layer_idx not in mlp_only_layers
         
-        # 获取当前层的键名映射
         layer_mapping = _get_hf_to_jax_key_mapping(
             layer_idx=layer_idx, 
             has_attention_bias=has_attention_bias, 
@@ -321,7 +289,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             num_experts=num_experts
         )
         
-        # 查找 Q、K、V 权重键
         q_proj_key = None
         k_proj_key = None
         v_proj_key = None
@@ -343,19 +310,15 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             elif hf_key.endswith(f"layers.{layer_idx}.self_attn.k_norm.weight"):
                 k_norm_key = hf_key
         
-        # 检查并合并 Q、K、V 权重
         if q_proj_key in chkpt_vars and k_proj_key in chkpt_vars and v_proj_key in chkpt_vars:
-            # 获取原始权重 [output_dim, input_dim]
             q_weight = chkpt_vars[q_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE)
             k_weight = chkpt_vars[k_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE)
             v_weight = chkpt_vars[v_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE)
             
             converter_logging.log(f"Layer {layer_idx}: Q shape {q_weight.shape}, K shape {k_weight.shape}, V shape {v_weight.shape}")
             
-            # 按照 [Q, K, V] 的顺序合并权重
             qkv_weight = np.concatenate([q_weight, k_weight, v_weight], axis=0)
             
-            # 转置以匹配 JAX 模型的期望格式 [hidden_size, total_proj_dim]
             qkv_weight = qkv_weight.transpose()
             
             jax_weights["model"]["layers"][layer_idx]["self_attn"]["c_attn"]["weight"] = qkv_weight
@@ -370,7 +333,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 missing_keys.append("v_proj")
             converter_logging.log(f"❌ Missing weights for layer {layer_idx}: {missing_keys}")
 
-        # 处理 bias (如果存在)
         if has_attention_bias:
             q_bias_key = None
             k_bias_key = None
@@ -389,7 +351,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 k_bias = chkpt_vars[k_bias_key].to(torch.float32).numpy().astype(CAST_DTYPE)
                 v_bias = chkpt_vars[v_bias_key].to(torch.float32).numpy().astype(CAST_DTYPE)
                 
-                # 合并 bias
                 qkv_bias = np.concatenate([q_bias, k_bias, v_bias], axis=0)
                 jax_weights["model"]["layers"][layer_idx]["self_attn"]["c_attn"]["bias"] = qkv_bias
                 converter_logging.log(f"✅ Layer {layer_idx}: Combined QKV bias shape {qkv_bias.shape}")
@@ -417,12 +378,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
     logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-    # Layer norms
     converter_logging.log("Processing layer norms")
     for layer_idx in tqdm(range(base_num_decoder_layers), desc="layer norms", leave=False):
         is_moe_layer = layer_idx not in mlp_only_layers
         
-        # 获取当前层的键名映射
         layer_mapping = _get_hf_to_jax_key_mapping(
             layer_idx=layer_idx, 
             has_attention_bias=has_attention_bias, 
@@ -430,7 +389,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             num_experts=num_experts
         )
         
-        # 查找 layer norm 键
         input_ln_key = None
         post_ln_key = None
         
@@ -454,12 +412,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
     logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-    # MLP/MoE 层权重处理
     converter_logging.log("Processing MLP and MoE layer weights")
     for layer_idx in tqdm(range(base_num_decoder_layers), desc="MLP/MoE layers", leave=False):
         is_moe_layer = layer_idx not in mlp_only_layers
         
-        # 获取当前层的键名映射
         layer_mapping = _get_hf_to_jax_key_mapping(
             layer_idx=layer_idx, 
             has_attention_bias=has_attention_bias, 
@@ -470,7 +426,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         if is_moe_layer:
             converter_logging.log(f"Processing MoE layer {layer_idx}")
             
-            # 处理路由器权重
             moe_gate_key = None
             for hf_key, jax_key in layer_mapping.items():
                 if hf_key.endswith(f"layers.{layer_idx}.mlp.gate.weight"):
@@ -484,13 +439,11 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             else:
                 converter_logging.log(f"❌ MoE gate weight not found for layer {layer_idx}")
             
-            # 处理专家权重 - 收集所有专家的权重
             expert_gate_weights = []
             expert_up_weights = []
             expert_down_weights = []
             
             for expert_idx in range(num_experts):
-                # 从映射中查找专家权重键
                 gate_key = None
                 up_key = None
                 down_key = None
@@ -515,7 +468,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                     converter_logging.log(f"❌ Expert {expert_idx} weights not found for layer {layer_idx}")
             
             if expert_gate_weights and expert_up_weights and expert_down_weights:
-                # 堆叠所有专家权重：(num_experts, input_dim, output_dim)
                 all_gate_weights = np.stack(expert_gate_weights, axis=0)
                 all_up_weights = np.stack(expert_up_weights, axis=0)
                 all_down_weights = np.stack(expert_down_weights, axis=0)
@@ -529,10 +481,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 converter_logging.log(f"❌ Failed to collect expert weights for layer {layer_idx}")
                 
         else:
-            # 普通 MLP 层
             converter_logging.log(f"Processing regular MLP layer {layer_idx}")
             
-            # 从映射中查找 MLP 权重键
             gate_proj_key = None
             up_proj_key = None
             down_proj_key = None
@@ -572,12 +522,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
 
 def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ckpt: bool):
-    # 首先尝试从预定义字典获取参数
     if model_size in MODEL_PARAMS_DICT:
         model_params = MODEL_PARAMS_DICT[model_size]
         converter_logging.log(f"Using predefined parameters for {model_size}")
     else:
-        # 尝试从配置文件推断参数
         config_path = os.path.join(base_model_path, "config.json")
         if os.path.exists(config_path):
             converter_logging.log(f"Model size {model_size} not found in predefined dict, inferring from config.json")
@@ -735,7 +683,6 @@ def save_weights_to_checkpoint(
 
 
 def analyze_model_structure(model_path: str):
-    """检查 Qwen3 MoE 模型结构的辅助函数"""
     converter_logging.log("Analyzing Qwen3 MoE model structure...")
     list_safetensor_keys(model_path)
 
@@ -760,7 +707,6 @@ if __name__ == "__main__":
         converter_logging.log("Running in analysis mode...")
         analyze_model_structure(args.base_model_path)
     else:
-        # 检查转换模式下的必需参数
         if not args.maxtext_model_path:
             parser.error("--maxtext-model-path is required when not using --analyze mode")
         if not args.model_size:
