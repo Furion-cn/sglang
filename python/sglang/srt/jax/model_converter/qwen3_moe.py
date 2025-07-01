@@ -156,16 +156,16 @@ def _get_hf_to_jax_key_mapping(layer_idx: int = -1, has_attention_bias: bool = F
         if is_moe_layer:
             # MoE 层包含路由器和专家权重
             layer_mapping.update({
-                # 路由器权重
-                f"model.layers.{layer_idx}.moe_gate.weight": f"model.layers.{layer_idx}.moe_gate.kernel",
+                # 路由器权重 - 实际键名是 mlp.gate.weight
+                f"model.layers.{layer_idx}.mlp.gate.weight": f"model.layers.{layer_idx}.moe_gate.kernel",
             })
             
-            # 专家权重 - 动态添加所有专家的权重映射
+            # 专家权重 - 动态添加所有专家的权重映射，实际路径是 mlp.experts.X
             for expert_idx in range(num_experts):
                 layer_mapping.update({
-                    f"model.layers.{layer_idx}.moe.experts.{expert_idx}.gate_proj.weight": f"model.layers.{layer_idx}.moe.experts.{expert_idx}.gate_proj.weight",
-                    f"model.layers.{layer_idx}.moe.experts.{expert_idx}.up_proj.weight": f"model.layers.{layer_idx}.moe.experts.{expert_idx}.up_proj.weight",
-                    f"model.layers.{layer_idx}.moe.experts.{expert_idx}.down_proj.weight": f"model.layers.{layer_idx}.moe.experts.{expert_idx}.down_proj.weight",
+                    f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight",
+                    f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight",
+                    f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight",
                 })
         else:
             # 普通 MLP 层
@@ -473,7 +473,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             # 处理路由器权重
             moe_gate_key = None
             for hf_key, jax_key in layer_mapping.items():
-                if hf_key.endswith(f"layers.{layer_idx}.moe_gate.weight"):
+                if hf_key.endswith(f"layers.{layer_idx}.mlp.gate.weight"):
                     moe_gate_key = hf_key
                     break
             
@@ -496,11 +496,11 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 down_key = None
                 
                 for hf_key, jax_key in layer_mapping.items():
-                    if hf_key.endswith(f"layers.{layer_idx}.moe.experts.{expert_idx}.gate_proj.weight"):
+                    if hf_key.endswith(f"layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight"):
                         gate_key = hf_key
-                    elif hf_key.endswith(f"layers.{layer_idx}.moe.experts.{expert_idx}.up_proj.weight"):
+                    elif hf_key.endswith(f"layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight"):
                         up_key = hf_key
-                    elif hf_key.endswith(f"layers.{layer_idx}.moe.experts.{expert_idx}.down_proj.weight"):
+                    elif hf_key.endswith(f"layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight"):
                         down_key = hf_key
                 
                 if gate_key in chkpt_vars and up_key in chkpt_vars and down_key in chkpt_vars:
