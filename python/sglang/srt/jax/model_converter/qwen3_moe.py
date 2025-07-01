@@ -743,9 +743,10 @@ def analyze_model_structure(model_path: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-model-path", type=str, required=True)
-    parser.add_argument("--maxtext-model-path", type=str, required=True)
-    parser.add_argument("--model-size", type=str, required=True, 
-                       help="Model size (e.g., qwen3-moe-a2.7b) or any identifier if config.json is available")
+    parser.add_argument("--maxtext-model-path", type=str, required=False, 
+                       help="Path to save the JAX checkpoint (not required for --analyze mode)")
+    parser.add_argument("--model-size", type=str, required=False, 
+                       help="Model size (e.g., qwen3-30b-a3b) or any identifier if config.json is available (not required for --analyze mode)")
     parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=True)
     parser.add_argument("--save-checkpoint", type=str2bool, required=False, default=False)
     parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
@@ -759,6 +760,12 @@ if __name__ == "__main__":
         converter_logging.log("Running in analysis mode...")
         analyze_model_structure(args.base_model_path)
     else:
+        # 检查转换模式下的必需参数
+        if not args.maxtext_model_path:
+            parser.error("--maxtext-model-path is required when not using --analyze mode")
+        if not args.model_size:
+            parser.error("--model-size is required when not using --analyze mode")
+            
         try:
             save_weights_to_checkpoint(
                 args.base_model_path,
