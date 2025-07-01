@@ -1,10 +1,11 @@
-
+import os
+from contextlib import nullcontext
 from typing import Sequence, Tuple
 
 import jax
 import numpy as np
-from jax._src import mesh_utils
 import torch
+from jax._src import mesh_utils
 
 mesh_axes = [
     "data",  # data parallelism
@@ -60,3 +61,28 @@ def fill_unspecified_parallelism(parallelism: Sequence[int], num_devices: int) -
 def convert_jax_array_to_torch_tensor(jax_array: jax.Array) -> torch.Tensor:
     numpy_array = np.array(jax_array)
     return torch.from_numpy(numpy_array)
+
+
+def jax_trace_context(log_dir: str):
+    """Return a JAX trace context manager with options configured via env vars.
+
+    The following environment variables are honored (all optional):
+
+    1. ``JAX_TRACE_CREATE_PERFETTO_LINK`` – Boolean-like string (``1``, ``0``). Controls ``create_perfetto_link``.
+
+    Example::
+
+        os.environ["JAX_TRACE_HOST_TRACER_LEVEL"] = "2"
+        with jax_trace_context("/tmp/trace"):
+            ...  # code to profile
+    """
+
+    jax_trace_enabled = os.getenv("ENABLE_JAX_TRACE", "1")
+    if jax_trace_enabled == "0":
+        return nullcontext()
+
+    create_perfetto_link = os.getenv(
+        "JAX_TRACE_CREATE_PERFETTO_LINK", "1") == "1"
+
+    return jax.profiler.trace(log_dir,
+                              create_perfetto_link=create_perfetto_link)
