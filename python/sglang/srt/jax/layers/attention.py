@@ -1,7 +1,9 @@
+from functools import partial
+from typing import Optional, Tuple
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from typing import Tuple, List, Optional
 
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
@@ -11,7 +13,8 @@ class Attention(nnx.Module):
 
     def __init__(self,
                  num_heads: int,
-                 num_kv_heads: Optional[int] = None, # add kv_heads for GQA attention and MQA attention
+                 # add kv_heads for GQA attention and MQA attention
+                 num_kv_heads: Optional[int] = None,
                  scale: float = None,
                  use_dot_product_attention: bool = False,
                  rngs: nnx.Rngs = None):
@@ -59,7 +62,8 @@ class Attention(nnx.Module):
             return self._forward_dot_product_attention(q, k, v, forward_batch, attention_mask, is_causal)
         else:
             if forward_batch.forward_mode == ForwardMode.DECODE:
-                k_buffer, v_buffer = self._get_and_set_kv_cache(q, k, v, forward_batch, layer_id)
+                k_buffer, v_buffer = self._get_and_set_kv_cache(
+                    q, k, v, forward_batch, layer_id)
                 return self._forward_native_decode(q, k_buffer, v_buffer, forward_batch.seq_lens, attention_mask)
             else:
                 # update kv cache
@@ -206,9 +210,12 @@ class Attention(nnx.Module):
         v_heads = jnp.repeat(v_heads, num_copies, axis=1)
 
         # Transpose for efficient matrix operations
-        q_t = jnp.transpose(q_heads, (1, 0, 2))  # [num_heads, total_tokens, head_dim]
-        k_t = jnp.transpose(k_heads, (1, 0, 2))  # [num_heads, total_tokens, head_dim]
-        v_t = jnp.transpose(v_heads, (1, 0, 2))  # [num_heads, total_tokens, head_dim]
+        # [num_heads, total_tokens, head_dim]
+        q_t = jnp.transpose(q_heads, (1, 0, 2))
+        # [num_heads, total_tokens, head_dim]
+        k_t = jnp.transpose(k_heads, (1, 0, 2))
+        # [num_heads, total_tokens, head_dim]
+        v_t = jnp.transpose(v_heads, (1, 0, 2))
 
         # Compute full attention weights in one operation: [num_heads, total_tokens, total_tokens]
         attn_weights = jnp.einsum("hqd,hkd->hqk", q_t, k_t) * scale
@@ -244,7 +251,7 @@ class Attention(nnx.Module):
 
         # Reshape to original format: [total_tokens, hidden_size]
         return attn_output.reshape(total_tokens, hidden_size)
-    
+
     def _forward_native_decode(self, q, k_cache, v_cache, seq_lengths: jax.Array, attention_mask=None):
         """
         Forward pass using native JAX implementation with block-diagonal attention.
@@ -261,66 +268,7 @@ class Attention(nnx.Module):
         Returns:
             Output tensor of shape[batch_size, hidden_size]
         """
-        batch_size, hidden_size = q.shape
-        head_dim = hidden_size // self.num_heads
-
-        # Set scale
-        if self.scale is None:
-            scale = 1.0 / jnp.sqrt(head_dim)
-        else:
-            scale = self.scale
-
-        # Reshape to multi-head format
-        # q: [batch_size, num_heads, head_dim]
-        # k, v: [total_prefix_len, num_heads, head_dim]
-        q_heads = q.reshape(batch_size, self.num_heads, head_dim)
-        k_heads = k_cache.reshape(
-            *k_cache.shape[:1], self.num_kv_heads, head_dim)
-        v_heads = v_cache.reshape(
-            *v_cache.shape[:1], self.num_kv_heads, head_dim)
-
-        # Transpose for efficient matrix operations
-        # q: shape of (num_heads, batch_size, head_dim)
-        # k, v: shape of (total_prefix_len, num_heads, head_dim)
-
-        # For GQA attention, we need to copy k and v heads to match the number of query heads
-        num_copies = self.num_heads // self.num_kv_heads
-        # Use repeat to copy k and v heads
-        # [total_prefix_len, num_kv_heads, head_dim] -> [total_prefix_len, num_heads, head_dim]
-        k_heads = jnp.repeat(k_heads, num_copies, axis=1)
-        v_heads = jnp.repeat(v_heads, num_copies, axis=1)
-        
-        q_t = jnp.transpose(q_heads, (1, 0, 2))
-        k_t = jnp.transpose(k_heads, (1, 0, 2))
-        v_t = jnp.transpose(v_heads, (1, 0, 2))
-
-        # Compute full attention weights in one operation: [num_heads, batch_size, head_dim]
-        attn_weights = jnp.einsum("hqd,hkd->hqk", q_t, k_t) * scale
-
-        # Create block-diagonal mask for sequences
-        # This ensures tokens only attend to tokens within their own sequence
-        seq_mask = self._create_decode_sequence_mask(batch_size, seq_lengths)
-        seq_mask = seq_mask[None, :, :]  # [1, batch_size, total_prefix_len]
-
-        # Apply sequence mask (set inter-sequence attention to -inf)
-        mask_value = jnp.finfo(attn_weights.dtype).min
-        attn_weights = jnp.where(seq_mask, attn_weights, mask_value)
-
-        # Apply custom attention mask if provided
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask[None, :, :]
-
-        # Softmax
-        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
-
-        # Compute output in one operation: [num_heads, batch_size, v_head_dim]
-        attn_output = jnp.matmul(attn_weights, v_t)
-
-        # Transpose back: [batch_size, num_heads, head_dim]
-        attn_output = jnp.transpose(attn_output, (1, 0, 2))
-
-        # Reshape to original format: [batch_size, hidden_size]
-        return attn_output.reshape(batch_size, hidden_size)
+        return forward_native_decode(q, k_cache, v_cache, seq_lengths, self.num_heads, self.num_kv_heads, self.scale, attention_mask)
 
     def _create_extend_sequence_mask(self, seq_lengths):
         """
@@ -338,25 +286,6 @@ class Attention(nnx.Module):
 
         # Create mask: tokens can only attend to tokens in the same sequence
         seq_mask = token_seq_ids[:, None] == token_seq_ids[None, :]
-
-        return seq_mask
-    
-    def _create_decode_sequence_mask(self, batch_size: int, seq_lengths):
-        """
-        Create a block-diagonal mask that ensures tokens only attend within their sequence in decode mode.
-
-        Returns:
-            mask: [total_tokens, total_tokens] boolean mask (True for valid positions)
-        """
-        # Create position indices for each token
-        token_seq_ids = []
-        for seq_idx, seq_len in enumerate(seq_lengths):
-            token_seq_ids.extend([seq_idx] * int(seq_len))
-
-        token_seq_ids = jnp.array(token_seq_ids)
-
-        # Create mask: tokens can only attend to tokens in the same sequence
-        seq_mask = jnp.arange(batch_size)[:, None] == token_seq_ids[None, :]
 
         return seq_mask
 
@@ -380,11 +309,11 @@ class Attention(nnx.Module):
         return causal_mask
 
     def _get_and_set_kv_cache(
-        self, 
-        q: jax.Array, 
-        k: jax.Array, 
-        v: jax.Array, 
-        forward_batch: ForwardBatch, 
+        self,
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+        forward_batch: ForwardBatch,
         layer_id: int
     ) -> Tuple[jax.Array, jax.Array]:
         """
@@ -393,11 +322,103 @@ class Attention(nnx.Module):
         k_buffer_list = []
         v_buffer_list = []
         for idx, prefix_str in enumerate(forward_batch.prefix_str):
-            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_cache(prefix_str, layer_id)
-            new_k_buffer = jnp.concatenate([k_buffer, k[idx][jnp.newaxis, :]], axis=0)
-            new_v_buffer = jnp.concatenate([v_buffer, v[idx][jnp.newaxis, :]], axis=0)
+            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_cache(
+                prefix_str, layer_id)
+            new_k_buffer = jnp.concatenate(
+                [k_buffer, k[idx][jnp.newaxis, :]], axis=0)
+            new_v_buffer = jnp.concatenate(
+                [v_buffer, v[idx][jnp.newaxis, :]], axis=0)
             k_buffer_list.append(new_k_buffer)
             v_buffer_list.append(new_v_buffer)
-            forward_batch.current_kv_cache[idx].set_kv_buffer(layer_id, new_k_buffer, new_v_buffer)
-        
+            forward_batch.current_kv_cache[idx].set_kv_buffer(
+                layer_id, new_k_buffer, new_v_buffer)
+
         return jnp.concatenate(k_buffer_list, axis=0), jnp.concatenate(v_buffer_list, axis=0)
+
+
+@partial(jax.jit, static_argnames=["num_heads", "num_kv_heads"])
+def forward_native_decode(q: jax.Array,
+                          k_cache: jax.Array,
+                          v_cache: jax.Array,
+                          seq_lengths: jax.Array,
+                          num_heads, num_kv_heads,
+                          scale=None, attention_mask=None):
+    """
+    Forward pass using native JAX implementation with block-diagonal attention.
+    This avoids padding while maintaining efficient matrix operations.
+
+    Args:
+        q: input token in decode mode, shape(batch_size, hidden_size), each batch has one token
+        k_cache: prefix cache of key, shape(seq_len, hidden_size)
+        v_cache: prefix cache of value, shape(seq_len, hidden_size)
+        num_heads: number of query heads
+        num_kv_heads: number of key/value heads
+        attention_mask: Optional attention mask
+        scale: scale for the attention weights
+        attention_mask: Optional attention mask
+        seq_mask: boolean mask of shape [batch_size, total_prefix_len]
+
+    Returns:
+        Output tensor of shape[batch_size, hidden_size]
+    """
+    batch_size, hidden_size = q.shape
+    head_dim = hidden_size // num_heads
+
+    # Set scale
+    if scale is None:
+        scale = 1.0 / jnp.sqrt(head_dim)
+
+    # Reshape to multi-head format
+    # q: [batch_size, num_heads, head_dim]
+    # k, v: [total_prefix_len, num_heads, head_dim]
+    q_heads = q.reshape(batch_size, num_heads, head_dim)
+    k_heads = k_cache.reshape(
+        *k_cache.shape[:1], num_kv_heads, head_dim)
+    v_heads = v_cache.reshape(
+        *v_cache.shape[:1], num_kv_heads, head_dim)
+
+    # Transpose for efficient matrix operations
+    # q: shape of (num_heads, batch_size, head_dim)
+    # k, v: shape of (total_prefix_len, num_heads, head_dim)
+
+    # For GQA attention, we need to copy k and v heads to match the number of query heads
+    num_copies = num_heads // num_kv_heads
+    # Use repeat to copy k and v heads
+    # [total_prefix_len, num_kv_heads, head_dim] -> [total_prefix_len, num_heads, head_dim]
+    k_heads = jnp.repeat(k_heads, num_copies, axis=1)
+    v_heads = jnp.repeat(v_heads, num_copies, axis=1)
+
+    q_t = jnp.transpose(q_heads, (1, 0, 2))
+    k_t = jnp.transpose(k_heads, (1, 0, 2))
+    v_t = jnp.transpose(v_heads, (1, 0, 2))
+
+    # Compute full attention weights in one operation: [num_heads, batch_size, head_dim]
+    attn_weights = jnp.einsum("hqd,hkd->hqk", q_t, k_t) * scale
+
+    # Apply sequence mask (set inter-sequence attention to -inf)
+    mask_value = jnp.finfo(attn_weights.dtype).min
+    total_prefix_len = k_cache.shape[0]
+    seq_starts = jnp.cumsum(jnp.concatenate(
+        [jnp.array([0]), seq_lengths[:-1]]))
+    seq_ends = seq_starts + seq_lengths
+    all_positions = jnp.arange(total_prefix_len)
+    seq_mask = ((all_positions[None, :] >= seq_starts[:, None]) &
+                (all_positions[None, :] < seq_ends[:, None]))
+    seq_mask = seq_mask[None, :, :]
+    attn_weights = jnp.where(seq_mask, attn_weights, mask_value)
+
+    # Apply custom attention mask if provided
+    if attention_mask is not None:
+        attn_weights = attn_weights + attention_mask[None, :, :]
+
+    # Softmax
+    attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+
+    # Compute output in one operation: [num_heads, batch_size, v_head_dim]
+    attn_output = jnp.matmul(attn_weights, v_t)
+
+    # Transpose back: [batch_size, num_heads, head_dim]
+    attn_output = jnp.transpose(attn_output, (1, 0, 2))
+
+    # Reshape to original format: [batch_size, hidden_size]
+    return attn_output.reshape(batch_size, hidden_size)

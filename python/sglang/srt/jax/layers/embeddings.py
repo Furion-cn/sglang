@@ -14,6 +14,7 @@
 
 """Embedding Layers."""
 
+from functools import partial
 from typing import Optional, Tuple, Union
 
 import jax
@@ -145,6 +146,7 @@ class ParallelLMHead(Embed):
         raise RuntimeError("LMHead's weights should be used in the sampler.")
 
 
+@partial(jax.jit, static_argnames=["is_neox_style"])
 def _apply_rotary_emb(
     x: jax.Array,
     cos: jax.Array,
@@ -177,6 +179,7 @@ def _apply_rotary_emb(
     else:
         stacked = jnp.stack((o1, o2), axis=-1)
         return stacked.reshape(*stacked.shape[:-2], -1)
+
 
 class RotaryEmbedding(nnx.Module):
     """Rotary Position Embedding.
@@ -238,7 +241,8 @@ class RotaryEmbedding(nnx.Module):
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
         query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
-        query = jnp.concatenate((query_rot, query_pass), axis=-1).reshape(query_shape)
+        query = jnp.concatenate((query_rot, query_pass),
+                                axis=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.reshape(num_tokens, -1, self.head_size)
@@ -247,14 +251,14 @@ class RotaryEmbedding(nnx.Module):
         key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
         key = jnp.concatenate((key_rot, key_pass), axis=-1).reshape(key_shape)
         return query, key
-        
+
     def _compute_inv_freq(self, base: Union[int, float]) -> jax.Array:
         """Compute the inverse frequency."""
         inv_freq = 1.0 / (
             base
             ** (
                 jnp.arange(0, self.rotary_dim, 2,
-                             dtype=jnp.float32) / self.rotary_dim
+                           dtype=jnp.float32) / self.rotary_dim
             )
         )
         return inv_freq
