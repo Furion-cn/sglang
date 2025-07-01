@@ -1460,6 +1460,7 @@ class JAXModelLoader(BaseModelLoader):
         mesh: jax.sharding.Mesh,
     ) -> Any:
         with mesh:
+            model_config.hf_config.mesh = mesh
             # Initialize JAX model
             model = self._initialize_jax_model(model_config)
             
