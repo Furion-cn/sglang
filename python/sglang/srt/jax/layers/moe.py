@@ -137,7 +137,7 @@ class Qwen3MoE(nnx.Module):
         
         self.wi_1 = nnx.Param(
             nnx.with_partitioning(
-                nnx.initializers.normal(stddev=0.02),
+                nnx.initializers.normal(s),
                 expert_kernel_axes
             )(
                 rngs.params(), 
@@ -148,7 +148,7 @@ class Qwen3MoE(nnx.Module):
         
         self.wo = nnx.Param(
             nnx.with_partitioning(
-                nnx.initializers.normal(stddev=0.02),
+                nnx.initializers.normal(),
                 expert_kernel_axes
             )(
                 rngs.params(), 
