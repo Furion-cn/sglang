@@ -275,13 +275,20 @@ class Attention(nnx.Module):
         # k, v: [total_prefix_len, num_heads, head_dim]
         q_heads = q.reshape(batch_size, self.num_heads, head_dim)
         k_heads = k_cache.reshape(
-            *k_cache.shape[:1], self.num_heads, head_dim)
+            *k_cache.shape[:1], self.num_kv_heads, head_dim)
         v_heads = v_cache.reshape(
-            *v_cache.shape[:1], self.num_heads, head_dim)
+            *v_cache.shape[:1], self.num_kv_heads, head_dim)
 
         # Transpose for efficient matrix operations
         # q: shape of (num_heads, batch_size, head_dim)
         # k, v: shape of (total_prefix_len, num_heads, head_dim)
+
+        # For GQA attention, we need to copy k and v heads to match the number of query heads
+        num_copies = self.num_heads // self.num_kv_heads
+        # Use repeat to copy k and v heads
+        # [total_prefix_len, num_kv_heads, head_dim] -> [total_prefix_len, num_heads, head_dim]
+        k_heads = jnp.repeat(k_heads, num_copies, axis=1)
+        v_heads = jnp.repeat(v_heads, num_copies, axis=1)
         
         q_t = jnp.transpose(q_heads, (1, 0, 2))
         k_t = jnp.transpose(k_heads, (1, 0, 2))

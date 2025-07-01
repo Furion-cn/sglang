@@ -7,13 +7,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from flax import nnx
-
+from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
 from sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.test.test_utils import CustomTestCase
 
 
-def create_forward_batch(seq_lengths, input_ids=None):
+def create_forward_batch(seq_lengths, input_ids=None, model_config=None):
     """Create a real ForwardBatch for testing."""
     batch_size = len(seq_lengths)
     total_tokens = sum(seq_lengths)
@@ -32,6 +32,13 @@ def create_forward_batch(seq_lengths, input_ids=None):
     extend_start_loc = jnp.array([sum(seq_lengths[:i])
                                  for i in range(batch_size)], dtype=jnp.int32)
 
+    current_kv_cache = [ReqToHashKVCachePool(
+            seq_len=seq_len,
+            head_num=model_config["num_kv_heads"],
+            head_dim=model_config["head_dim"],
+            layer_num=model_config["num_hidden_layers"],
+            dtype=jnp.bfloat16 if model_config["bf16"] else jnp.float32
+        ) for seq_len in seq_lens]
     return ForwardBatch(
         forward_mode=ForwardMode.EXTEND,
         batch_size=batch_size,
@@ -39,6 +46,7 @@ def create_forward_batch(seq_lengths, input_ids=None):
         seq_lens=seq_lens,
         positions=positions,
         extend_start_loc=extend_start_loc,
+        current_kv_cache=current_kv_cache,
         total_tokens=total_tokens
     )
 
@@ -146,7 +154,12 @@ class TestAttention(CustomTestCase):
         total_tokens = sum(seq_lengths)
 
         # Create mock forward_batch
-        forward_batch = create_forward_batch(seq_lengths)
+        forward_batch = create_forward_batch(seq_lengths, model_config={
+            "num_kv_heads": num_heads,
+            "head_dim": head_dim,
+            "num_hidden_layers": 1,
+            "bf16": True
+        })
 
         # Create attention layer
         attention = Attention(num_heads=num_heads, scale=scale)
@@ -159,7 +172,7 @@ class TestAttention(CustomTestCase):
                               1], (total_tokens, hidden_size))
 
         # Test attention
-        output = attention(q, k, v, forward_batch, is_causal=True)
+        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
 
         # Check output shape and properties
         self.assertEqual(output.shape, (total_tokens, hidden_size))
@@ -182,7 +195,12 @@ class TestAttention(CustomTestCase):
         max_seq_len = max(seq_lengths)
 
         # Create mock forward_batch
-        forward_batch = create_forward_batch(seq_lengths)
+        forward_batch = create_forward_batch(seq_lengths, model_config={
+            "num_kv_heads": num_heads,
+            "head_dim": head_dim,
+            "num_hidden_layers": 1,
+            "bf16": True
+        })
 
         # Create test data
         key = jax.random.PRNGKey(42)
@@ -196,7 +214,7 @@ class TestAttention(CustomTestCase):
         # JAX attention
         jax_attention = Attention(num_heads=num_heads, scale=scale)
         jax_output = jax_attention(
-            q_jax, k_jax, v_jax, forward_batch, is_causal=True)
+            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True)
 
         # Create PyTorch equivalent data
         def to_pytorch_batched(tensor, seq_lengths, max_seq_len):
@@ -329,7 +347,12 @@ class TestGroupedQueryAttention(CustomTestCase):
         seq_lengths = jnp.array([5, 7, 5], dtype=jnp.int32)  # 示例：3个序列，总长度17
         
         # 创建ForwardBatch对象
-        forward_batch = create_forward_batch(seq_lengths)
+        forward_batch = create_forward_batch(seq_lengths, model_config={
+            "num_kv_heads": num_kv_heads,
+            "head_dim": head_dim,
+            "num_hidden_layers": 1,
+            "bf16": True
+        })
 
         return q, k, v, forward_batch
 
@@ -349,7 +372,12 @@ class TestGroupedQueryAttention(CustomTestCase):
         total_tokens = sum(seq_lengths)
 
         # Create mock forward_batch
-        forward_batch = create_forward_batch(seq_lengths)
+        forward_batch = create_forward_batch(seq_lengths, model_config={
+            "num_kv_heads": num_kv_heads,
+            "head_dim": head_dim,
+            "num_hidden_layers": 1,
+            "bf16": True
+        })
 
         # Create attention layer
         attention = Attention(num_heads=num_heads, num_kv_heads=num_kv_heads, scale=scale)
@@ -362,7 +390,7 @@ class TestGroupedQueryAttention(CustomTestCase):
                               1], (total_tokens, kv_size))
 
         # Test attention
-        output = attention(q, k, v, forward_batch, is_causal=True)
+        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
 
         # Check output shape and properties
         self.assertEqual(output.shape, (total_tokens, hidden_size))
@@ -380,7 +408,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         for dtype in [jnp.float32, jnp.float16, jnp.bfloat16]:
             with self.subTest(dtype=dtype):
                 q, k, v, forward_batch = self._create_test_inputs(dtype=dtype)
-                output = attention_layer(q, k, v, forward_batch=forward_batch)
+                output = attention_layer(q, k, v, layer_id=0, forward_batch=forward_batch)
                 
                 self.assertEqual(output.dtype, dtype)
                 self.assertTrue(jnp.all(jnp.isfinite(output)))
@@ -403,7 +431,12 @@ class TestGroupedQueryAttention(CustomTestCase):
         max_seq_len = max(seq_lengths)
 
         # Create mock forward_batch
-        forward_batch = create_forward_batch(seq_lengths)
+        forward_batch = create_forward_batch(seq_lengths, model_config={
+            "num_kv_heads": num_kv_heads,
+            "head_dim": head_dim,
+            "num_hidden_layers": 1,
+            "bf16": True
+        })
 
         # Create test data
         key = jax.random.PRNGKey(42)
@@ -417,7 +450,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         # JAX attention
         jax_attention = Attention(num_heads=num_heads, num_kv_heads=num_kv_heads, scale=scale)
         jax_output = jax_attention(
-            q_jax, k_jax, v_jax, forward_batch, is_causal=True)
+            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True)
 
         # Create PyTorch equivalent data
         def to_pytorch_batched(tensor, seq_lengths, max_seq_len):
