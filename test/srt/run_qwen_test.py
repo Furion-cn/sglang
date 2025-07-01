@@ -109,6 +109,7 @@ def run_tests(test_name=None, model_path=None, verbose=False, enable_debug_trace
     print("=" * 50)
     
     try:
+        del env['JAX_PLATFORMS']
         result = subprocess.run(cmd, env=env, cwd=Path(__file__).parent)
         return result.returncode == 0
     except Exception as e:
@@ -278,6 +279,8 @@ def main():
     )
     
     args = parser.parse_args()
+
+    os.environ['JAX_PLATFORMS']='cpu'
     
     if args.list_tests:
         list_available_tests()
@@ -331,7 +334,6 @@ def main():
         print("\nWarning: JAX not available, some tests may fail")
     
     print("\nRunning QWen JAXModelLoader tests...")
-    
     success = run_tests(
         test_name=args.test,
         model_path=args.model_path,
