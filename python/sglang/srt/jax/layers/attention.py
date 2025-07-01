@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from typing import Optional
 
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 
@@ -10,11 +11,16 @@ class Attention(nnx.Module):
 
     def __init__(self,
                  num_heads: int,
+                 num_kv_heads: Optional[int] = None, # add kv_heads for GQA attention and MQA attention
                  scale: float = None,
                  use_dot_product_attention: bool = False,
                  rngs: nnx.Rngs = None):
         self.scale = scale
         self.num_heads = num_heads
+        if num_kv_heads is not None:
+            self.num_kv_heads = num_kv_heads
+        else:
+            self.num_kv_heads = num_heads
         self.use_dot_product_attention = use_dot_product_attention
 
     def __call__(self,
@@ -65,12 +71,13 @@ class Attention(nnx.Module):
         batch_size = len(seq_lengths)
         max_seq_len = int(jnp.max(seq_lengths))
         hidden_size = q.shape[-1]
+        kv_size = k.shape[-1]
         head_dim = hidden_size // self.num_heads
 
-        def pad_tensor(tensor):
+        def pad_tensor(tensor, size):
             """Pad tensor from [total_tokens, hidden_size] to [batch_size, max_seq_len, hidden_size]"""
             padded = jnp.zeros(
-                (batch_size, max_seq_len, hidden_size), dtype=tensor.dtype)
+                (batch_size, max_seq_len, size), dtype=tensor.dtype)
 
             start_idx = 0
             for i in range(batch_size):
@@ -82,19 +89,19 @@ class Attention(nnx.Module):
             return padded
 
         # Pad all tensors
-        q_padded = pad_tensor(q)
-        k_padded = pad_tensor(k)
-        v_padded = pad_tensor(v)
+        q_padded = pad_tensor(q, hidden_size)
+        k_padded = pad_tensor(k, kv_size)
+        v_padded = pad_tensor(v, kv_size)
 
         # Reshape for multi-head attention: [batch_size, max_seq_len, num_heads, head_dim]
         q_reshaped = q_padded.reshape(
             batch_size, max_seq_len, self.num_heads, head_dim)
         k_reshaped = k_padded.reshape(
-            batch_size, max_seq_len, self.num_heads, head_dim)
+            batch_size, max_seq_len, self.num_kv_heads, head_dim)
         v_reshaped = v_padded.reshape(
-            batch_size, max_seq_len, self.num_heads, head_dim)
+            batch_size, max_seq_len, self.num_kv_heads, head_dim)
 
-        return q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size
+        return q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size, head_dim
 
     def _unpad_output(self, attn_output, forward_batch: ForwardBatch, batch_size, max_seq_len, hidden_size):
         """
@@ -135,7 +142,7 @@ class Attention(nnx.Module):
             scale = self.scale
 
         # Prepare tensors
-        q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size = self._prepare_tensors(
+        q_reshaped, k_reshaped, v_reshaped, batch_size, max_seq_len, hidden_size, _ = self._prepare_tensors(
             q, k, v, forward_batch)
 
         # Apply JAX's dot_product_attention
@@ -175,14 +182,22 @@ class Attention(nnx.Module):
             scale = self.scale
 
         # Reshape to multi-head format: [total_tokens, num_heads, head_dim]
+        # For GQA attention, num_heads is the number of query heads, num_kv_heads is the number of key/value heads
         q_heads = q.reshape(total_tokens, self.num_heads, head_dim)
-        k_heads = k.reshape(total_tokens, self.num_heads, head_dim)
-        v_heads = v.reshape(total_tokens, self.num_heads, head_dim)
+        k_heads = k.reshape(total_tokens, self.num_kv_heads, head_dim)
+        v_heads = v.reshape(total_tokens, self.num_kv_heads, head_dim)
 
-        # Transpose for efficient matrix operations: [num_heads, total_tokens, head_dim]
-        q_t = jnp.transpose(q_heads, (1, 0, 2))
-        k_t = jnp.transpose(k_heads, (1, 0, 2))
-        v_t = jnp.transpose(v_heads, (1, 0, 2))
+        # For GQA attention, we need to copy k and v heads to match the number of query heads
+        num_copies = self.num_heads // self.num_kv_heads
+        # Use repeat to copy k and v heads
+        # [total_tokens, num_kv_heads, head_dim] -> [total_tokens, num_heads, head_dim]
+        k_heads = jnp.repeat(k_heads, num_copies, axis=1)
+        v_heads = jnp.repeat(v_heads, num_copies, axis=1)
+
+        # Transpose for efficient matrix operations
+        q_t = jnp.transpose(q_heads, (1, 0, 2))  # [num_heads, total_tokens, head_dim]
+        k_t = jnp.transpose(k_heads, (1, 0, 2))  # [num_heads, total_tokens, head_dim]
+        v_t = jnp.transpose(v_heads, (1, 0, 2))  # [num_heads, total_tokens, head_dim]
 
         # Compute full attention weights in one operation: [num_heads, total_tokens, total_tokens]
         attn_weights = jnp.einsum("hqd,hkd->hqk", q_t, k_t) * scale
