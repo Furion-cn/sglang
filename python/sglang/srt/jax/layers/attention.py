@@ -67,10 +67,7 @@ class Attention(nnx.Module):
                 return self._forward_native_decode(q, k_buffer, v_buffer, forward_batch.seq_lens, attention_mask)
             else:
                 # update kv cache
-                for idx, seq_len in enumerate(forward_batch.seq_lens):
-                    extend_start_loc = forward_batch.extend_start_loc[idx]
-                    forward_batch.current_kv_cache[idx].set_kv_buffer(
-                        layer_id, k[extend_start_loc:extend_start_loc+seq_len], v[extend_start_loc:extend_start_loc+seq_len])
+                self._get_and_set_kv_cache(q, k, v, forward_batch, layer_id)
                 return self._forward_native_extend(q, k, v, forward_batch.seq_lens, attention_mask, is_causal)
 
     def _prepare_tensors(self, q, k, v, forward_batch: ForwardBatch):
@@ -178,8 +175,6 @@ class Attention(nnx.Module):
 
         Args:
             q, k, v: Input tensors of shape [total_tokens, hidden_size]
-            k_cache: cache of key, shape (seq_len, hidden_size)
-            v_cache: cache of value, shape (seq_len, hidden_size)
             seq_length: shape (batch_size,)
             attention_mask: Optional attention mask
             is_causal: Whether to apply causal masking
@@ -307,7 +302,7 @@ class Attention(nnx.Module):
         causal_mask = token_positions[:, None] >= token_positions[None, :]
 
         return causal_mask
-
+    
     def _get_and_set_kv_cache(
         self,
         q: jax.Array,
@@ -321,19 +316,27 @@ class Attention(nnx.Module):
         """
         k_buffer_list = []
         v_buffer_list = []
-        for idx, prefix_str in enumerate(forward_batch.prefix_str):
+        for idx, seq in enumerate(forward_batch.sequences):
+            prefix_str = forward_batch.prefix_str[idx]
             k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_cache(
                 prefix_str, layer_id)
-            new_k_buffer = jnp.concatenate(
-                [k_buffer, k[idx][jnp.newaxis, :]], axis=0)
-            new_v_buffer = jnp.concatenate(
-                [v_buffer, v[idx][jnp.newaxis, :]], axis=0)
-            k_buffer_list.append(new_k_buffer)
-            v_buffer_list.append(new_v_buffer)
-            forward_batch.current_kv_cache[idx].set_kv_buffer(
-                layer_id, new_k_buffer, new_v_buffer)
-
-        return jnp.concatenate(k_buffer_list, axis=0), jnp.concatenate(v_buffer_list, axis=0)
+            
+            if forward_batch.forward_mode == ForwardMode.DECODE:
+                new_k_buffer = k_buffer.at[forward_batch.out_cache_loc[idx]].set(k[idx])
+                new_v_buffer = v_buffer.at[forward_batch.out_cache_loc[idx]].set(v[idx])
+                k_buffer_list.append(new_k_buffer[:forward_batch.out_cache_loc[idx]+1])
+                v_buffer_list.append(new_v_buffer[:forward_batch.out_cache_loc[idx]+1])
+            else:
+                loc = forward_batch.extend_start_loc[idx]
+                seq_len = forward_batch.seq_lens[idx]
+                key_ = k[loc:loc + seq_len]
+                value_ = v[loc:loc + seq_len]
+                new_k_buffer = k_buffer.at[:seq_len].set(key_)
+                new_v_buffer = v_buffer.at[:seq_len].set(value_)
+            forward_batch.token_to_kv_pool.set_kv_cache(
+                seq, layer_id, new_k_buffer, new_v_buffer)
+        if forward_batch.forward_mode == ForwardMode.DECODE:
+            return jnp.concatenate(k_buffer_list, axis=0), jnp.concatenate(v_buffer_list, axis=0)
 
 
 @partial(jax.jit, static_argnames=["num_heads", "num_kv_heads"])

@@ -27,6 +27,8 @@ class ForwardBatch:
     input_ids: jax.Array
     # The sequence length for each request [batch_size]
     seq_lens: jax.Array
+    # decode token position in kv cache
+    out_cache_loc: jax.Array
     # Position information [total_tokens]
     positions: jax.Array = None
     # Start position for each sequence in extend mode [batch_size]

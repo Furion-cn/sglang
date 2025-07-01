@@ -108,26 +108,28 @@ class TestQWenLoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
         # new kv cache
-        current_kv_cache = [ReqToHashKVCachePool(
-            seq_len=seq_len,
+        kv_cache = HashKVCache(
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
-            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32
-        ) for seq_len in seq_lens]
+            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
+            max_seq_len=2048
+        )
+        for text in texts:
+            kv_cache.add(text)
         # Create ForwardBatch
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
             batch_size=len(actual_seq_lens),
             input_ids=input_ids_array,
+            out_cache_loc=seq_lens-1,
             seq_lens=seq_lens,
             positions=positions_array,
             extend_start_loc=extend_start_loc,
             total_tokens=len(input_ids_array),
             sequences=texts.copy(),
             prefix_str=texts.copy(),
-            token_to_kv_pool=HashKVCache(),
-            current_kv_cache=current_kv_cache
+            token_to_kv_pool=kv_cache
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
@@ -332,18 +334,19 @@ class TestQWenLoadWeights(CustomTestCase):
             new_seq_lens.append(seq_len + 1)
             decoded_token = tokenizer.decode(
                 [current_token_id])
-
-            # update prefix
+            
             if forward_batch.forward_mode == ForwardMode.DECODE:
+                # remove old kv cache
+                forward_batch.token_to_kv_pool.remove(
+                    forward_batch.prefix_str[batch_idx])
+                # update prefix
                 forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
 
-            # update kv cache
-            forward_batch.token_to_kv_pool.set_kv_cache(
-                forward_batch.prefix_str[batch_idx],
-                forward_batch.current_kv_cache[batch_idx]
-            )
             # update sequences
             forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
+            # add new kv cache
+            forward_batch.token_to_kv_pool.add(
+                forward_batch.sequences[batch_idx])
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
 
@@ -361,6 +364,8 @@ class TestQWenLoadWeights(CustomTestCase):
         forward_batch.extend_start_loc = extend_start_loc
         # update total tokens
         forward_batch.total_tokens = len(new_input_ids)
+        # update out cache loc
+        forward_batch.out_cache_loc = forward_batch.out_cache_loc + 1
         # update forward mode
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE
