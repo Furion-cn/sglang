@@ -49,6 +49,7 @@ from sglang.srt.model_loader.weight_utils import (
     kv_cache_scales_loader,
 )
 from sglang.srt.utils import add_prefix, make_layers
+from sglang.debug_tracer import global_tracer, trace_function
 
 Qwen2Config = None
 
@@ -62,10 +63,12 @@ class Qwen2MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -87,8 +90,10 @@ class Qwen2MLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
+    @trace_function(stage="MLP", include_args=False, include_output=True)
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        global_tracer.print(gate_up, f"gate_up_proj_output", f"mlp_layer_id_{self.layer_id}")
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -164,6 +169,7 @@ class Qwen2Attention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
+    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,

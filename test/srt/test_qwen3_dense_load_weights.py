@@ -62,6 +62,7 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
         self.device_config = DeviceConfig("cpu")
         self.jax_loader = JAXModelLoader(self.load_config)
         self.tokenizer = self._get_tokenizer()
+        self.enable_debug_tracer = os.environ.get("ENABLE_DEBUG_TRACER", False)
 
     def _get_positions(self, x):
         return jnp.concatenate([
@@ -225,14 +226,15 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                 print("\n🔄 Test model input and output with JAXModelLoader...")
                 
                 print("\n🟢 Starting debug tracer session...")
-                #global_tracer.start_session()
+                if self.enable_debug_tracer:
+                    global_tracer.start_session()
                 
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
 
                 # Multiple questions to simulate batch > 1 scenario
                 input_texts = [
-                    "the capital of France is",
+                    "1+1",
                     # "what is the largest planet in",
                     # "the founder of Apple company was",
                     # "the capital of China is",
@@ -248,7 +250,7 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                 print(f"Input tokens: {input_ids_array}")
 
                 with self.mesh:
-                    for i in range(5):
+                    for i in range(1):
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
@@ -285,17 +287,19 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                     print()
 
                 print("\n🔴 Ending debug tracer session...")
-                debug_file = global_tracer.end_session()
-                if debug_file:
-                    print(f"✅ Debug trace saved to: {debug_file}")
+                if self.enable_debug_tracer:
+                    debug_file = global_tracer.end_session()
+                    if debug_file:
+                        print(f"✅ Debug trace saved to: {debug_file}")
                 else:
                     print("⚠️  Debug trace not saved")
 
         except Exception as e:
             if 'global_tracer' in locals():
                 try:
-                    global_tracer.end_session()
-                    print("🔴 Debug tracer session ended due to exception")
+                    if self.enable_debug_tracer:
+                        global_tracer.end_session()
+                        print("🔴 Debug tracer session ended due to exception")
                 except:
                     pass
             self.fail(f"JAXModelLoader integration test failed: {e}")

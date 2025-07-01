@@ -82,6 +82,7 @@ class QWen3Attention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         qkv, _ = self.qkv_proj(hidden_states)
+        global_tracer.print(qkv, f"qkv_proj_output", f"attention_layer_id_{self.layer_id}")
         
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
 
@@ -93,7 +94,12 @@ class QWen3Attention(nnx.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.reshape(k.shape)
 
+        global_tracer.print(q, f"q_norm_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"k_norm_output", f"attention_layer_id_{self.layer_id}")
+
         q, k = self.rotary_emb(positions, q, k)
+        global_tracer.print(q, f"rotary_emb_output_q", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"rotary_emb_output_k", f"attention_layer_id_{self.layer_id}")
         attn_output = self.attn(q, k, v, layer_id=self.layer_id, forward_batch=forward_batch, is_causal=True)
 
         output, _ = self.o_proj(attn_output)
@@ -143,10 +149,10 @@ class Qwen3MLP(nnx.Module):
     def __call__(self, hidden_states: jnp.ndarray):
         a1, _ = self.gate_proj(hidden_states)
         a2, _ = self.up_proj(hidden_states)
-        print(a1.shape, a2.shape)
         intermediate_parallel = a1 * self.act_fn(a2)
         intermediate_parallel = jax.lax.with_sharding_constraint(
             intermediate_parallel, PartitionSpec(None, 'tensor'))
+        global_tracer.print(intermediate_parallel, f"gate_up_proj_output", f"mlp_layer_id_{self.layer_id}")
         output, _ = self.down_proj(intermediate_parallel)
 
         return output
@@ -199,7 +205,7 @@ class QWen3DecoderLayer(nnx.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        
+        global_tracer.print(hidden_states, f"input_layernorm_output", f"decoder_layer_id_{self.layer_id}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -207,6 +213,7 @@ class QWen3DecoderLayer(nnx.Module):
         )
         
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"decoder_layer_id_{self.layer_id}")
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
