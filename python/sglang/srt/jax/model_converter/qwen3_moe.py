@@ -262,9 +262,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             layer_structure.update({
                 "moe_gate": {"kernel": None},
                 "mlp": {
-                    "wi_0": {"value": None},  # Expert gate weights
-                    "wi_1": {"value": None},  # Expert up weights  
-                    "wo": {"value": None},    # Expert down weights
+                    "wi_0": None,
+                    "wi_1": None,
+                    "wo": None,
                 },
             })
         else:
@@ -472,9 +472,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 all_up_weights = np.stack(expert_up_weights, axis=0)
                 all_down_weights = np.stack(expert_down_weights, axis=0)
                 
-                jax_weights["model"]["layers"][layer_idx]["mlp"]["wi_0"]["value"] = all_gate_weights
-                jax_weights["model"]["layers"][layer_idx]["mlp"]["wi_1"]["value"] = all_up_weights
-                jax_weights["model"]["layers"][layer_idx]["mlp"]["wo"]["value"] = all_down_weights
+                jax_weights["model"]["layers"][layer_idx]["mlp"]["wi_0"] = all_gate_weights
+                jax_weights["model"]["layers"][layer_idx]["mlp"]["wi_1"] = all_up_weights
+                jax_weights["model"]["layers"][layer_idx]["mlp"]["wo"] = all_down_weights
                 
                 converter_logging.log(f"✅ Layer {layer_idx}: Expert weights - gate: {all_gate_weights.shape}, up: {all_up_weights.shape}, down: {all_down_weights.shape}")
             else:
