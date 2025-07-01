@@ -164,24 +164,23 @@ class KVCache(abc.ABC):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        backend: str = "torch",
     ):
         self.size = size
         self.page_size = page_size
         self.dtype = dtype
         self.device = device
 
-        # TPU/JAX backend检测
-        self.is_tpu_backend = is_tpu_device(device)
-        self.jax_device = get_jax_device(device) if self.is_tpu_backend else None
+        self.backend = backend
+        self.is_jax_backend = backend == "jax"
+        self.jax_device = get_jax_device(device) if self.is_jax_backend else None
 
         if dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
-            # NOTE: Store as torch.uint8 because Tensor.index_put is not implemented for torch.float8_e5m2
             self.store_dtype = torch.uint8
         else:
             self.store_dtype = dtype
 
-        # JAX存储数据类型
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             self.jax_dtype = torch_to_jax_dtype(self.store_dtype)
         else:
             self.jax_dtype = None
@@ -195,7 +194,7 @@ class KVCache(abc.ABC):
 
     def _tensor_to_jax(self, tensor: torch.Tensor):
         """将PyTorch tensor转换为JAX array"""
-        if not self.is_tpu_backend or not _has_jax:
+        if not self.is_jax_backend or not _has_jax:
             return tensor
 
         # 转换为numpy，然后转换为JAX array
@@ -207,7 +206,7 @@ class KVCache(abc.ABC):
 
     def _jax_to_tensor(self, jax_array, original_tensor: torch.Tensor = None):
         """将JAX array转换为PyTorch tensor"""
-        if not self.is_tpu_backend or not _has_jax:
+        if not self.is_jax_backend or not _has_jax:
             return jax_array
 
         # 从JAX设备获取数据
@@ -230,7 +229,7 @@ class KVCache(abc.ABC):
 
     def _create_jax_buffer(self, shape, dtype=None):
         """创建JAX buffer"""
-        if not self.is_tpu_backend or not _has_jax:
+        if not self.is_jax_backend or not _has_jax:
             return None
 
         jax_dtype = dtype or self.jax_dtype
@@ -366,6 +365,7 @@ class MHATokenToKVPool(KVCache):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        backend: str = "torch",
     ):
         super().__init__(
             size,
@@ -376,6 +376,7 @@ class MHATokenToKVPool(KVCache):
             enable_memory_saver,
             start_layer,
             end_layer,
+            backend,
         )
 
         self.head_num = head_num
@@ -391,12 +392,12 @@ class MHATokenToKVPool(KVCache):
         k_size, v_size = self.get_kv_size_bytes()
         logger.info(
             f"KV Cache is allocated. #tokens: {size}, K size: {k_size / GB:.2f} GB, V size: {v_size / GB:.2f} GB"
-            f"{' (TPU/JAX backend)' if self.is_tpu_backend else ''}"
+            f"{' (TPU/JAX backend)' if self.is_jax_backend else ''}"
         )
 
     def _create_buffers(self):
         with self.memory_saver_adapter.region():
-            if self.is_tpu_backend and _has_jax:
+            if self.is_jax_backend and _has_jax:
                 # 使用JAX创建缓冲区
                 self.k_buffer = [
                     self._create_jax_buffer(
@@ -438,13 +439,13 @@ class MHATokenToKVPool(KVCache):
         assert hasattr(self, "v_buffer")
         k_size_bytes = 0
         for k_cache in self.k_buffer:
-            if self.is_tpu_backend and _has_jax:
+            if self.is_jax_backend and _has_jax:
                 k_size_bytes += np.prod(k_cache.shape) * k_cache.dtype.itemsize
             else:
                 k_size_bytes += np.prod(k_cache.shape) * k_cache.dtype.itemsize
         v_size_bytes = 0
         for v_cache in self.v_buffer:
-            if self.is_tpu_backend and _has_jax:
+            if self.is_jax_backend and _has_jax:
                 v_size_bytes += np.prod(v_cache.shape) * v_cache.dtype.itemsize
             else:
                 v_size_bytes += np.prod(v_cache.shape) * v_cache.dtype.itemsize
@@ -454,7 +455,7 @@ class MHATokenToKVPool(KVCache):
     def get_contiguous_buf_infos(self):
         # layer_num x [seq_len, head_num, head_dim]
         # layer_num x [page_num, page_size, head_num, head_dim]
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend不支持直接获取指针信息
             logger.warning("get_contiguous_buf_infos not supported for TPU backend")
             return [], [], []
@@ -483,7 +484,7 @@ class MHATokenToKVPool(KVCache):
         return kv_data_ptrs, kv_data_lens, kv_item_lens
 
     def get_cpu_copy(self, indices):
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的CPU拷贝
             kv_cache_cpu = []
             for layer_id in range(self.layer_num):
@@ -516,7 +517,7 @@ class MHATokenToKVPool(KVCache):
             return kv_cache_cpu
 
     def load_cpu_copy(self, kv_cache_cpu, indices):
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的CPU到设备拷贝
             for layer_id in range(self.layer_num):
                 for i in range(0, len(indices), self.chunk_size):
@@ -556,7 +557,7 @@ class MHATokenToKVPool(KVCache):
     # Todo: different memory layout
     def get_flat_data(self, indices):
         # prepare a large chunk of contiguous data for efficient transfer
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的扁平化数据
             k_data = [self.k_buffer[i][indices] for i in range(self.layer_num)]
             v_data = [self.v_buffer[i][indices] for i in range(self.layer_num)]
@@ -587,7 +588,7 @@ class MHATokenToKVPool(KVCache):
     @debug_timing
     def transfer(self, indices, flat_data):
         # transfer prepared data from host to device
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的数据传输
             flat_data = flat_data.to(device=self.device, non_blocking=False)
             k_data, v_data = flat_data[0], flat_data[1]
@@ -606,7 +607,7 @@ class MHATokenToKVPool(KVCache):
 
     def transfer_per_layer(self, indices, flat_data, layer_id):
         # transfer prepared data from host to device
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的逐层传输
             flat_data = flat_data.to(device=self.device, non_blocking=False)
             k_data, v_data = flat_data[0], flat_data[1]
@@ -629,7 +630,7 @@ class MHATokenToKVPool(KVCache):
         if self.layer_transfer_counter is not None:
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend: 返回JAX array转换为tensor
             jax_buffer = self.k_buffer[layer_id - self.start_layer]
             if self.store_dtype != self.dtype:
@@ -646,7 +647,7 @@ class MHATokenToKVPool(KVCache):
         if self.layer_transfer_counter is not None:
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend: 返回JAX array转换为tensor
             jax_buffer = self.v_buffer[layer_id - self.start_layer]
             if self.store_dtype != self.dtype:
@@ -675,7 +676,7 @@ class MHATokenToKVPool(KVCache):
 
         layer_id = layer.layer_id
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的KV缓存设置
             if cache_k.dtype != self.dtype:
                 if k_scale is not None:
@@ -806,6 +807,7 @@ class MLATokenToKVPool(KVCache):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        backend: str = "torch",
     ):
         super().__init__(
             size,
@@ -816,13 +818,14 @@ class MLATokenToKVPool(KVCache):
             enable_memory_saver,
             start_layer,
             end_layer,
+            backend,
         )
 
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
 
         with self.memory_saver_adapter.region():
-            if self.is_tpu_backend and _has_jax:
+            if self.is_jax_backend and _has_jax:
                 # 使用JAX创建MLA缓冲区
                 self.kv_buffer = [
                     self._create_jax_buffer(
@@ -846,14 +849,14 @@ class MLATokenToKVPool(KVCache):
         kv_size = self.get_kv_size_bytes()
         logger.info(
             f"KV Cache is allocated. #tokens: {size}, KV size: {kv_size / GB:.2f} GB"
-            f"{' (TPU/JAX backend)' if self.is_tpu_backend else ''}"
+            f"{' (TPU/JAX backend)' if self.is_jax_backend else ''}"
         )
 
     def get_kv_size_bytes(self):
         assert hasattr(self, "kv_buffer")
         kv_size_bytes = 0
         for kv_cache in self.kv_buffer:
-            if self.is_tpu_backend and _has_jax:
+            if self.is_jax_backend and _has_jax:
                 kv_size_bytes += np.prod(kv_cache.shape) * kv_cache.dtype.itemsize
             else:
                 kv_size_bytes += np.prod(kv_cache.shape) * kv_cache.dtype.itemsize
@@ -862,7 +865,7 @@ class MLATokenToKVPool(KVCache):
     # for disagg
     def get_contiguous_buf_infos(self):
         # MLA has only one kv_buffer, so only the information of this buffer needs to be returned.
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend不支持直接获取指针信息
             logger.warning("get_contiguous_buf_infos not supported for TPU backend")
             return [], [], []
@@ -878,7 +881,7 @@ class MLATokenToKVPool(KVCache):
         if self.layer_transfer_counter is not None:
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend: 返回JAX array转换为tensor
             jax_buffer = self.kv_buffer[layer_id - self.start_layer]
             if self.store_dtype != self.dtype:
@@ -894,7 +897,7 @@ class MLATokenToKVPool(KVCache):
         if self.layer_transfer_counter is not None:
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend: 返回JAX array转换为tensor
             jax_buffer = self.kv_buffer[layer_id - self.start_layer][
                 ..., : self.kv_lora_rank
@@ -922,7 +925,7 @@ class MLATokenToKVPool(KVCache):
     ):
         layer_id = layer.layer_id
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的KV缓存设置
             if cache_k.dtype != self.dtype:
                 cache_k = cache_k.to(self.dtype)
@@ -956,7 +959,7 @@ class MLATokenToKVPool(KVCache):
     ):
         layer_id = layer.layer_id
 
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的MLA KV缓存设置
             if cache_k_nope.dtype != self.dtype:
                 cache_k_nope = cache_k_nope.to(self.dtype)
@@ -989,7 +992,7 @@ class MLATokenToKVPool(KVCache):
 
     def get_flat_data(self, indices):
         # prepare a large chunk of contiguous data for efficient transfer
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的扁平化数据
             jax_data = [self.kv_buffer[i][indices] for i in range(self.layer_num)]
             # 转换为tensor返回
@@ -1004,7 +1007,7 @@ class MLATokenToKVPool(KVCache):
     @debug_timing
     def transfer(self, indices, flat_data):
         # transfer prepared data from host to device
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的数据传输
             flat_data = flat_data.to(device=self.device, non_blocking=False)
             for i in range(self.layer_num):
@@ -1018,7 +1021,7 @@ class MLATokenToKVPool(KVCache):
 
     def transfer_per_layer(self, indices, flat_data, layer_id):
         # transfer prepared data from host to device
-        if self.is_tpu_backend and _has_jax:
+        if self.is_jax_backend and _has_jax:
             # TPU backend的逐层传输
             flat_data = flat_data.to(device=self.device, non_blocking=False)
             jax_data = self._tensor_to_jax(flat_data)
@@ -1045,6 +1048,7 @@ class DoubleSparseTokenToKVPool(KVCache):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        backend: str = "torch",
     ):
         super().__init__(
             size,
@@ -1055,6 +1059,7 @@ class DoubleSparseTokenToKVPool(KVCache):
             enable_memory_saver,
             start_layer,
             end_layer,
+            backend,
         )
 
         with self.memory_saver_adapter.region():
