@@ -16,8 +16,10 @@ from sglang.srt.jax.utils import (
     update_state_recursive,
 )
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.jax.layers.moe import RoutedMoE
 from sglang.srt.jax.models.qwen3 import Qwen3MLP
+from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
+from jax.sharding import Mesh
+import numpy as np
 
 class QWen3MoeAttention(nnx.Module):
     def __init__(self,
@@ -101,7 +103,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 40960)
         head_dim = getattr(config, "head_dim", None)
         
         self.self_attn = QWen3MoeAttention(
@@ -117,12 +119,9 @@ class QWen3MoeDecoderLayer(nnx.Module):
             rngs=rngs,
         )
 
-        decoder_sparse_step = getattr(config, 'decoder_sparse_step', 1)
         mlp_only_layers = getattr(config, 'mlp_only_layers', [])
         
-        # 这里和 ds 不太一样，decoder_sparse_step 的含义是，每隔 decoder_sparse_step 层，使用一个 MoE 层
-        # 不过在 Qwen/Qwen3-30B-A3B 中，decoder_sparse_step 为 1，所以都是 MoE 层
-        if layer_id in mlp_only_layers or (layer_id % decoder_sparse_step != 0):
+        if layer_id in mlp_only_layers:
             self.mlp = Qwen3MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
@@ -130,39 +129,34 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 rngs=rngs,
             )
             self.is_moe_layer = False
+            self.moe_gate = None
         else:
             num_experts = getattr(config, 'num_experts', 128)
             num_experts_per_tok = getattr(config, 'num_experts_per_tok', 8)
-            moe_intermediate_size = getattr(config, 'moe_intermediate_size', config.intermediate_size)
+            moe_intermediate_size = getattr(config, 'moe_intermediate_size', 768)
             
-            # 这里的 mesh 还需要处理，看看怎么从 model loader 里传过来
-            # 可能需要一个上下文管理器
-            try:
-                from jax.sharding import Mesh
-                mesh = jax.sharding.Mesh(jax.devices(), axis_names=('data',))
-                if hasattr(config, 'mesh'):
-                    mesh = config.mesh
-            except:
-                mesh = None
+            if not hasattr(config, 'expert_mesh') or config.expert_mesh is None:
+                devices = jax.devices()
+                config.expert_mesh = Mesh(devices, axis_names=('expert',))
             
-            if not hasattr(config, 'emb_dim'):
-                config.emb_dim = config.hidden_size
-            if not hasattr(config, 'model_name'):
-                config.model_name = 'qwen3_moe'
-            if not hasattr(config, 'dtype'):
-                config.dtype = jnp.bfloat16
+            self.moe_gate = GateLogit(
+                input_size=config.hidden_size,
+                features=num_experts,
+                model_name=getattr(config, 'model_name', 'qwen3_moe'),
+                use_bias=False,
+                kernel_axes=(None, 'expert'), 
+                dtype=jnp.bfloat16,
+                rngs=rngs
+            )
             
-            self.mlp = RoutedMoE(
+            self.mlp = Qwen3MoE(
                 config=config,
                 num_experts=num_experts,
                 num_experts_per_tok=num_experts_per_tok,
-                mesh=mesh,
-                kernel_init=nnx.initializers.normal(),
-                kernel_axes=("exp", "embed_no_exp", "mlp"),
                 intermediate_dim=moe_intermediate_size,
-                weight_dtype=getattr(config, 'weight_dtype', jnp.bfloat16),
-                dtype=getattr(config, 'dtype', jnp.bfloat16),
-                quant=getattr(config, 'quant', None),
+                weight_dtype=jnp.bfloat16,
+                dtype=jnp.bfloat16,
+                expert_axis_name='expert',
                 rngs=rngs,
             )
             self.is_moe_layer = True
@@ -193,11 +187,14 @@ class QWen3MoeDecoderLayer(nnx.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         
         if self.is_moe_layer:
-            mlp_output, aux_loss = self.mlp(hidden_states)
+            router_logits = self.moe_gate(hidden_states)
+            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
             hidden_states = mlp_output
         else:
             hidden_states = self.mlp(hidden_states)
             
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual, residual_mode="add")
+        
         return hidden_states, residual
 
 class QWen3MoeModel(nnx.Module):
@@ -230,9 +227,10 @@ class QWen3MoeModel(nnx.Module):
                  input_ids: jax.Array,
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
-                 ):
+                 ) -> jax.Array:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+        
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
         
@@ -280,7 +278,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                  input_ids: jax.Array,
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
-                 ):
+                 ) -> Any:
         hidden_states = self.model(input_ids, positions, forward_batch)
         result = self.logits_processor(hidden_states, self.lm_head, forward_batch)
         return result
