@@ -335,7 +335,10 @@ class Attention(nnx.Module):
             forward_batch.token_to_kv_pool.set_kv_cache(
                 prefix_str, layer_id, new_k_buffer[start_loc:end_loc], new_v_buffer[start_loc:end_loc])
         if forward_batch.forward_mode == ForwardMode.DECODE:
-            return jnp.concatenate(k_buffer_list, axis=0), jnp.concatenate(v_buffer_list, axis=0)
+            ranges = jnp.arange(forward_batch.batch_size, dtype=jnp.int32) * forward_batch.max_seq_len + forward_batch.out_cache_loc
+            take_indices = jnp.concatenate(
+                [jnp.arange(idx + 1) for idx in ranges])
+            return jnp.take(take_indices, axis=0), jnp.take(take_indices, axis=0)
 
 @partial(jax.jit, static_argnames=["batch_size", "max_seq_len", "forward_mode"])
 def get_and_set_kv_cache(
