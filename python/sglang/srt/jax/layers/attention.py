@@ -353,19 +353,25 @@ def get_and_set_kv_cache(
     seq_lens: jax.Array,
     forward_mode: ForwardMode
 ):
-    def loop_body(idx, carry):
-        k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens = carry
-        
-        def decode_branch():
+    def decode_branch(carry):
+        def loop_body(idx, carry):
+            k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens = carry
             buffer_loc = max_seq_len * idx + out_cache_loc[idx]
             # 使用 dynamic_slice 提取单个元素，然后用 dynamic_update_slice 更新
             k_elem = jax.lax.dynamic_slice(k, (idx,), (1,))
             v_elem = jax.lax.dynamic_slice(v, (idx,), (1,))
-            new_k_buffer = jax.lax.dynamic_update_slice(k_buffer, k_elem, (buffer_loc,))
-            new_v_buffer = jax.lax.dynamic_update_slice(v_buffer, v_elem, (buffer_loc,))
+            new_k_buffer = jax.lax.dynamic_update_slice(
+                k_buffer, k_elem, (buffer_loc,))
+            new_v_buffer = jax.lax.dynamic_update_slice(
+                v_buffer, v_elem, (buffer_loc,))
             return new_k_buffer, new_v_buffer
         
-        def extend_branch():
+        _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(
+            0, batch_size, loop_body, carry)
+        return k_buffer, v_buffer
+    
+    def extend_branch(carry):
+        def loop_body(idx, carry):
             loc = extend_start_loc[idx]
             seq_len = seq_lens[idx]
             # 使用 dynamic_slice 替代动态索引
@@ -373,22 +379,26 @@ def get_and_set_kv_cache(
             value_ = jax.lax.dynamic_slice(v, (loc,), (seq_len,))
             # 使用 dynamic_update_slice 替代动态索引赋值
             start_pos = max_seq_len * idx
-            new_k_buffer = jax.lax.dynamic_update_slice(k_buffer, key_, (start_pos,))
-            new_v_buffer = jax.lax.dynamic_update_slice(v_buffer, value_, (start_pos,))
+            new_k_buffer = jax.lax.dynamic_update_slice(
+                k_buffer, key_, (start_pos,))
+            new_v_buffer = jax.lax.dynamic_update_slice(
+                v_buffer, value_, (start_pos,))
             return new_k_buffer, new_v_buffer
         
-        # 使用 jax.lax.cond 替代 if 语句
-        new_k_buffer, new_v_buffer = jax.lax.cond(
-            forward_mode == ForwardMode.DECODE,
-            decode_branch,
-            extend_branch
-        )
-        
-        return k, v, new_k_buffer, new_v_buffer, out_cache_loc, extend_start_loc, seq_lens
+        _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(
+            0, batch_size, loop_body, carry)
+        return k_buffer, v_buffer
     
-    init_carry = (k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens)
-    _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(0, batch_size, loop_body, init_carry)
-    return k_buffer, v_buffer
+    init_carry = (k, v, k_buffer, v_buffer, out_cache_loc,
+                  extend_start_loc, seq_lens)
+    new_k_buffer, new_v_buffer = jax.lax.cond(
+        forward_mode == ForwardMode.DECODE,
+        decode_branch,
+        extend_branch,
+        init_carry
+    )
+    
+    return new_k_buffer, new_v_buffer
 
 @partial(jax.jit, static_argnames=["num_heads", "num_kv_heads"])
 def forward_native_decode(q: jax.Array,
