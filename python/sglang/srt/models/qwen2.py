@@ -49,6 +49,7 @@ from sglang.srt.model_loader.weight_utils import (
     kv_cache_scales_loader,
 )
 from sglang.srt.utils import add_prefix, make_layers
+from sglang.debug_tracer import global_tracer, trace_function
 
 Qwen2Config = None
 
@@ -62,10 +63,12 @@ class Qwen2MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -87,9 +90,16 @@ class Qwen2MLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
+    @trace_function(stage="MLP", include_args=False, include_output=True)
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        d = gate_up.shape[-1] // 2
+        a1 = gate_up[..., :d]
+        a2 = gate_up[..., d:]
+        global_tracer.print(a1, f"a1_output", f"mlp_layer_id_{self.layer_id}")
+        global_tracer.print(a2, f"a2_output", f"mlp_layer_id_{self.layer_id}")
         x = self.act_fn(gate_up)
+        global_tracer.print(x, f"act_fn_output", f"mlp_layer_id_{self.layer_id}")
         x, _ = self.down_proj(x)
         return x
 
@@ -108,6 +118,7 @@ class Qwen2Attention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -164,6 +175,7 @@ class Qwen2Attention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
+    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -171,8 +183,11 @@ class Qwen2Attention(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        global_tracer.print(qkv, f"qkv_proj_output", f"attention_layer_id_{self.layer_id}")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        global_tracer.print(q, f"rotary_emb_output_q", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"rotary_emb_output_k", f"attention_layer_id_{self.layer_id}")
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
@@ -207,6 +222,7 @@ class Qwen2DecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            layer_id=layer_id,
             prefix=add_prefix("mlp", prefix),
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

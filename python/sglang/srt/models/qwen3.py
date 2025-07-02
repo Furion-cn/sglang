@@ -28,6 +28,7 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2MLP as Qwen3MLP
 from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.utils import add_prefix
+from sglang.debug_tracer import global_tracer, trace_function
 
 Qwen3Config = None
 
@@ -51,6 +52,7 @@ class Qwen3Attention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         self.hidden_size = hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -100,6 +102,7 @@ class Qwen3Attention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
+            is_neox_style=False,
         )
         self.attn = RadixAttention(
             self.num_heads,
@@ -121,6 +124,7 @@ class Qwen3Attention(nn.Module):
         k = k_by_head.view(k.shape)
         return q, k
 
+    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -128,9 +132,15 @@ class Qwen3Attention(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        global_tracer.print(qkv, f"qkv_proj_output", f"attention_layer_id_{self.layer_id}")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        global_tracer.print(q, f"q_split_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"k_split_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(v, f"v_split_output", f"attention_layer_id_{self.layer_id}")
         q, k = self._apply_qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
+        global_tracer.print(q, f"rotary_emb_output_q", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"rotary_emb_output_k", f"attention_layer_id_{self.layer_id}")
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
@@ -145,6 +155,7 @@ class Qwen3DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -169,6 +180,7 @@ class Qwen3DecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            layer_id=layer_id,
             prefix=add_prefix("mlp", prefix),
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -176,6 +188,7 @@ class Qwen3DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+    @trace_function(stage="QWen3DecoderLayer", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -189,6 +202,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        global_tracer.print(hidden_states, f"input_layernorm_output", f"decoder_layer_id_{self.layer_id}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -197,6 +211,7 @@ class Qwen3DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"decoder_layer_id_{self.layer_id}")
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
