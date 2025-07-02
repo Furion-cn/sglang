@@ -354,37 +354,35 @@ def get_and_set_kv_cache(
     forward_mode: ForwardMode
 ):
     def loop_body(idx, carry):
-        k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens, forward_mode, max_seq_len = carry
-        if forward_mode == ForwardMode.DECODE:
+        k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens = carry
+        
+        def decode_branch():
             buffer_loc = max_seq_len * idx + out_cache_loc[idx]
             new_k_buffer = k_buffer.at[buffer_loc].set(k[idx])
             new_v_buffer = v_buffer.at[buffer_loc].set(v[idx])
-        else:
+            return new_k_buffer, new_v_buffer
+        
+        def extend_branch():
             loc = extend_start_loc[idx]
             seq_len = seq_lens[idx]
             key_ = k[loc:loc + seq_len]
             value_ = v[loc:loc + seq_len]
-            new_k_buffer = k_buffer.at[max_seq_len*idx:seq_len].set(key_)
-            new_v_buffer = v_buffer.at[max_seq_len*idx:seq_len].set(value_)
-        return k, v, new_k_buffer, new_v_buffer, out_cache_loc, extend_start_loc, seq_lens, forward_mode, max_seq_len
+            new_k_buffer = k_buffer.at[max_seq_len*idx:max_seq_len*idx+seq_len].set(key_)
+            new_v_buffer = v_buffer.at[max_seq_len*idx:max_seq_len*idx+seq_len].set(value_)
+            return new_k_buffer, new_v_buffer
+        
+        # 使用 jax.lax.cond 替代 if 语句
+        new_k_buffer, new_v_buffer = jax.lax.cond(
+            forward_mode == ForwardMode.DECODE,
+            decode_branch,
+            extend_branch
+        )
+        
+        return k, v, new_k_buffer, new_v_buffer, out_cache_loc, extend_start_loc, seq_lens
     
-    init_carry = (k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens, forward_mode, max_seq_len)
-    _, _, k_buffer, v_buffer, _, _, _, _, _ = jax.lax.fori_loop(0, batch_size, loop_body, init_carry)
+    init_carry = (k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens)
+    _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(0, batch_size, loop_body, init_carry)
     return k_buffer, v_buffer
-
-    for idx in range(batch_size):
-        if forward_mode == ForwardMode.DECODE:
-            buffer_loc = max_seq_len * idx + out_cache_loc[idx]
-            new_k_buffer = k_buffer.at[buffer_loc].set(k[idx])
-            new_v_buffer = v_buffer.at[buffer_loc].set(v[idx])
-        else:
-            loc = extend_start_loc[idx]
-            seq_len = seq_lens[idx]
-            key_ = k[loc:loc + seq_len]
-            value_ = v[loc:loc + seq_len]
-            new_k_buffer = k_buffer.at[max_seq_len*idx:seq_len].set(key_)
-            new_v_buffer = v_buffer.at[max_seq_len*idx:seq_len].set(value_)
-    return new_k_buffer, new_v_buffer
 
 @partial(jax.jit, static_argnames=["num_heads", "num_kv_heads"])
 def forward_native_decode(q: jax.Array,
