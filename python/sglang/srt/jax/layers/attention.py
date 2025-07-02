@@ -365,7 +365,7 @@ def get_and_set_kv_cache(
                 k_buffer, k_elem, (buffer_loc, 0))
             new_v_buffer = jax.lax.dynamic_update_slice(
                 v_buffer, v_elem, (buffer_loc, 0))
-            return new_k_buffer, new_v_buffer
+            return k, v, new_k_buffer, new_v_buffer, out_cache_loc, extend_start_loc, seq_lens
         
         _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(
             0, batch_size, loop_body, carry)
@@ -385,7 +385,7 @@ def get_and_set_kv_cache(
                 k_buffer, key_, (start_pos, 0))
             new_v_buffer = jax.lax.dynamic_update_slice(
                 v_buffer, value_, (start_pos, 0))
-            return new_k_buffer, new_v_buffer
+            return k, v, new_k_buffer, new_v_buffer, out_cache_loc, extend_start_loc, seq_lens
         
         _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(
             0, batch_size, loop_body, carry)
