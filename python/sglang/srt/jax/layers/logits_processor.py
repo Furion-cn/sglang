@@ -6,6 +6,7 @@ from flax import nnx
 
 from sglang.srt.jax.layers.embeddings import Embed
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from functools import partial
 
 
 @dataclasses.dataclass
@@ -44,3 +45,7 @@ class LogitsProcessor(nnx.Module):
         logits = logits[:,
                         :self.vocab_size] if logits.ndim > 1 else logits[:self.vocab_size]
         return LogitsProcessorOutput(next_token_logits=logits)
+
+@partial(jax.jit)
+def __logits_processor_forward():
+    pass

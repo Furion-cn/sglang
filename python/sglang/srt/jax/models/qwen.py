@@ -21,6 +21,7 @@ from sglang.srt.jax.utils import (
     get_expected_param_paths,
     update_state_recursive,
 )
+from functools import partial
 
 
 class QWenMLP(nnx.Module):
@@ -65,15 +66,17 @@ class QWenMLP(nnx.Module):
 
     @trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
-        a1,_ = self.w1(hidden_states)
-        a2,_ = self.w2(hidden_states)
-        intermediate_parallel = a1 * self.act_func(a2)
+        return _mlp_forward(hidden_states,self.w1.weight.value,self.w2.weight.value,self.c_proj.weight.value)
+
+@jax.jit
+def _mlp_forward(hidden_states:jax.Array,w1:jax.Array,w2:jax.Array, c_proj:jax.Array):
+        a1 = jnp.dot(hidden_states,w1)
+        a2 = jnp.dot(hidden_states,w2)
+        intermediate_parallel = a1 * jax.nn.silu(a2)
         intermediate_parallel = jax.lax.with_sharding_constraint(
             intermediate_parallel, PartitionSpec(None, 'tensor'))
-        output,_ = self.c_proj(intermediate_parallel)
-        return output
-
-
+        output= jnp.dot(intermediate_parallel,c_proj)
+        return output 
 class QWenAttention(nnx.Module):
     def __init__(self,
                  hidden_size: int,
