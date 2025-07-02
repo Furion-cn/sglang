@@ -382,9 +382,9 @@ def get_and_set_kv_cache(
             # 使用 dynamic_update_slice 替代动态索引赋值
             start_pos = max_seq_len * idx
             new_k_buffer = jax.lax.dynamic_update_slice(
-                k_buffer, key_, (start_pos,))
+                k_buffer, key_, (start_pos, 0))
             new_v_buffer = jax.lax.dynamic_update_slice(
-                v_buffer, value_, (start_pos,))
+                v_buffer, value_, (start_pos, 0))
             return new_k_buffer, new_v_buffer
         
         _, _, k_buffer, v_buffer, _, _, _ = jax.lax.fori_loop(
