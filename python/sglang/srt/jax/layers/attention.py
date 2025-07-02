@@ -358,8 +358,9 @@ def get_and_set_kv_cache(
             k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens = carry
             buffer_loc = max_seq_len * idx + out_cache_loc[idx]
             # 使用 dynamic_slice 提取单个元素，然后用 dynamic_update_slice 更新
-            k_elem = jax.lax.dynamic_slice(k, (idx,), (1,))
-            v_elem = jax.lax.dynamic_slice(v, (idx,), (1,))
+            print(f'###### {k.shape[-1]=}')
+            k_elem = jax.lax.dynamic_slice(k, (idx, 0), (1, k.shape[-1]))
+            v_elem = jax.lax.dynamic_slice(v, (idx, 0), (1, v.shape[-1]))
             new_k_buffer = jax.lax.dynamic_update_slice(
                 k_buffer, k_elem, (buffer_loc,))
             new_v_buffer = jax.lax.dynamic_update_slice(
@@ -372,11 +373,12 @@ def get_and_set_kv_cache(
     
     def extend_branch(carry):
         def loop_body(idx, carry):
+            k, v, k_buffer, v_buffer, out_cache_loc, extend_start_loc, seq_lens = carry
             loc = extend_start_loc[idx]
             seq_len = seq_lens[idx]
             # 使用 dynamic_slice 替代动态索引
-            key_ = jax.lax.dynamic_slice(k, (loc,), (seq_len,))
-            value_ = jax.lax.dynamic_slice(v, (loc,), (seq_len,))
+            key_ = jax.lax.dynamic_slice(k, (loc, 0), (seq_len, k.shape[-1]))
+            value_ = jax.lax.dynamic_slice(v, (loc, 0), (seq_len, v.shape[-1]))
             # 使用 dynamic_update_slice 替代动态索引赋值
             start_pos = max_seq_len * idx
             new_k_buffer = jax.lax.dynamic_update_slice(
@@ -392,7 +394,8 @@ def get_and_set_kv_cache(
     init_carry = (k, v, k_buffer, v_buffer, out_cache_loc,
                   extend_start_loc, seq_lens)
     new_k_buffer, new_v_buffer = jax.lax.cond(
-        forward_mode == ForwardMode.DECODE,
+        jax.lax.eq(forward_mode == ForwardMode.DECODE,
+                   jnp.
         decode_branch,
         extend_branch,
         init_carry
