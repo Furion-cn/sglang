@@ -23,13 +23,13 @@ from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.jax.layers.sampler import Sampler
+from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
-from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
 
 
 class Sequence:
@@ -219,7 +219,7 @@ class TestQWenLoadWeights(CustomTestCase):
                 print(f"   hidden_size: {model.config.hidden_size}")
                 print(
                     f"   num_hidden_layers: {model.config.num_hidden_layers}")
-                print(f"   nnx_state: {nnx.state(model)}")
+                # print(f"   nnx_state: {nnx.state(model)}")
 
                 print("\n🎉 JAXModelLoader integration test completed successfully!")
 
@@ -252,7 +252,7 @@ class TestQWenLoadWeights(CustomTestCase):
                 jax_profiling_dir = os.environ.get(
                     "JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
-                    for _ in range(20):
+                    for _ in range(10):
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
@@ -271,8 +271,9 @@ class TestQWenLoadWeights(CustomTestCase):
                                 min_ps=jnp.full((len(input_texts), 1), 0.0),
                                 vocab_size=model.config.vocab_size,
                             ))
-                        
-                        self.update_forward_batch(forward_batch, next_token_ids, tokenizer)
+
+                        self.update_forward_batch(
+                            forward_batch, next_token_ids, tokenizer)
 
                 # Decode complete results for each sequence
                 print(f"\n=== Complete Generation Results ===")
@@ -282,12 +283,11 @@ class TestQWenLoadWeights(CustomTestCase):
                     # Extract tokens for each sequence from flattened array
                     seq_len = actual_seq_lens[batch_idx]
                     end_idx = start_idx + seq_len
-                    print(f"Decoded text {batch_idx}: '{forward_batch.sequences[batch_idx]}'")
                     print(
-                        f"Original question {batch_idx}: '{input_texts[batch_idx]}'")
-                    print(f"Actual length {batch_idx}: {seq_len}")
+                        f"Decoded text {batch_idx}: '{forward_batch.sequences[batch_idx]}'")
+                    print(
+                        f"Original question {batch_idx}: '{input_texts[batch_idx]}'\n")
                     start_idx = end_idx
-                    print()
 
                 if self.enable_debug_tracer:
                     print("\n🔴 Ending debug tracer session...")
@@ -322,7 +322,7 @@ class TestQWenLoadWeights(CustomTestCase):
 
     def _batch_tokenize(self, input_text: List[str]) -> List[Sequence]:
         return [Sequence(self.tokenizer, text) for text in input_text]
-    
+
     def update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer):
         new_input_ids = []
         new_seq_lens = []
@@ -345,8 +345,8 @@ class TestQWenLoadWeights(CustomTestCase):
             # update sequences
             forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
-                f"Batch {batch_idx}: token_id={current_token_id}, decoded='{decoded_token} prefix={forward_batch.prefix_str[batch_idx]}")
-            
+                f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
+
         # update seq lens
         forward_batch.seq_lens = jnp.array(new_seq_lens, dtype=jnp.int32)
         # update extend start loc
