@@ -316,11 +316,18 @@ class Attention(nnx.Module):
         """
         k_buffer_list = []
         v_buffer_list = []
-        for idx, seq in enumerate(forward_batch.sequences):
+        for i in range(forward_batch.batch_size):
             prefix_str = forward_batch.prefix_str[idx]
             k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_cache(
                 prefix_str, layer_id)
-            
+            k_buffer_list.append(k_buffer)
+            v_buffer_list.append(v_buffer)
+
+        k_buffer = jnp.concatenate(k_buffer_list, axis=0)
+        v_buffer = jnp.concatenate(v_buffer_list, axis=0)
+        
+        for idx, seq in enumerate(forward_batch.sequences):
+
             if forward_batch.forward_mode == ForwardMode.DECODE:
                 new_k_buffer = k_buffer.at[forward_batch.out_cache_loc[idx]].set(k[idx])
                 new_v_buffer = v_buffer.at[forward_batch.out_cache_loc[idx]].set(v[idx])
@@ -338,6 +345,37 @@ class Attention(nnx.Module):
         if forward_batch.forward_mode == ForwardMode.DECODE:
             return jnp.concatenate(k_buffer_list, axis=0), jnp.concatenate(v_buffer_list, axis=0)
 
+@partial(jax.jit, static_argnames=["batch_size", "max_seq_len", "forward_mode"])
+def get_and_set_kv_cache(
+    k: jax.Array,
+    v: jax.Array,
+    k_buffer: jax.Array,
+    v_buffer: jax.Array,
+    batch_size: int,
+    max_seq_len: int,
+    out_cache_loc: jax.Array,
+    extend_start_loc: jax.Array,
+    seq_lens: jax.Array,
+    forward_mode: ForwardMode
+):
+    k_buffer_list = []
+    v_buffer_list = []
+    for idx in range(batch_size):
+        if forward_mode == ForwardMode.DECODE:
+            buffer_loc = max_seq_len * idx + out_cache_loc[idx]
+            new_k_buffer = k_buffer.at[buffer_loc].set(k[idx])
+            new_v_buffer = v_buffer.at[buffer_loc].set(v[idx])
+            k_buffer_list.append(
+                new_k_buffer[:out_cache_loc[idx]+1])
+            v_buffer_list.append(
+                new_v_buffer[:out_cache_loc[idx]+1])
+        else:
+            loc = extend_start_loc[idx]
+            seq_len = seq_lens[idx]
+            key_ = k[loc:loc + seq_len]
+            value_ = v[loc:loc + seq_len]
+            new_k_buffer = k_buffer.at[max_seq_len*idx:seq_len].set(key_)
+            new_v_buffer = v_buffer.at[max_seq_len*idx:seq_len].set(value_)
 
 @partial(jax.jit, static_argnames=["num_heads", "num_kv_heads"])
 def forward_native_decode(q: jax.Array,
