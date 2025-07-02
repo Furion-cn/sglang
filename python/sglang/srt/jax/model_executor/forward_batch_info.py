@@ -23,6 +23,8 @@ class ForwardBatch:
     forward_mode: ForwardMode
     # The batch size
     batch_size: int
+    # max seq len
+    max_seq_len: int
     # The input ids [total_tokens]
     input_ids: jax.Array
     # The sequence length for each request [batch_size]

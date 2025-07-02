@@ -108,12 +108,13 @@ class TestQWenLoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
         # new kv cache
+        max_seq_len = 2048
         kv_cache = HashKVCache(
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
             dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
-            max_seq_len=2048
+            max_seq_len=max_seq_len
         )
         for text in texts:
             kv_cache.add(text)
@@ -121,6 +122,7 @@ class TestQWenLoadWeights(CustomTestCase):
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
             batch_size=len(actual_seq_lens),
+            max_seq_len=max_seq_len,
             input_ids=input_ids_array,
             out_cache_loc=seq_lens-1,
             seq_lens=seq_lens,
