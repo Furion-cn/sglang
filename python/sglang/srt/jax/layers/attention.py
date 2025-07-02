@@ -394,8 +394,7 @@ def get_and_set_kv_cache(
     init_carry = (k, v, k_buffer, v_buffer, out_cache_loc,
                   extend_start_loc, seq_lens)
     new_k_buffer, new_v_buffer = jax.lax.cond(
-        jax.lax.eq(forward_mode == ForwardMode.DECODE,
-                   jnp.
+        forward_mode == ForwardMode.DECODE,
         decode_branch,
         extend_branch,
         init_carry
