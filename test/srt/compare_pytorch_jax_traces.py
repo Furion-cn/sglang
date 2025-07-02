@@ -47,10 +47,18 @@ def extract_records_by_step(trace_data: Dict[str, Any]) -> Dict[int, Dict[str, L
     all_records = trace_data['all_forward_records']
     step_organized = defaultdict(lambda: defaultdict(list))
     
+    # 创建记录键的标准化映射
+    normalized_keys = {}
+    for record_key in all_records.keys():
+        # 将JAX中的___call___转换为_forward_
+        normalized_key = record_key.replace('___call___', '_forward_')
+        normalized_keys[record_key] = normalized_key
+    
     for record_key, record_list in all_records.items():
+        normalized_key = normalized_keys[record_key]
         for record in record_list:
             step = record.get('forward_step', 0)
-            step_organized[step][record_key].append(record)
+            step_organized[step][normalized_key].append(record)
     
     return dict(step_organized)
 
@@ -118,8 +126,9 @@ def compare_step_records(pt_step_data: Dict, jax_step_data: Dict, step: int, tol
         'step': step,
         'total_comparisons': 0,
         'matches': 0,
+        'match_details': [],
         'differences': 0,
-        'details': []
+        'details': [],
     }
     
     # 获取共同的记录键
@@ -142,6 +151,13 @@ def compare_step_records(pt_step_data: Dict, jax_step_data: Dict, step: int, tol
             
             if is_match:
                 step_result['matches'] += 1
+                step_result['match_details'].append({
+                    'record_key': key,
+                    'record_index': i,
+                    'differences': differences,
+                    'pytorch_record': pt_records[i],
+                    'jax_record': jax_records[i]
+                })
             else:
                 step_result['differences'] += 1
                 step_result['details'].append({
@@ -181,9 +197,29 @@ def identify_key_components(record_key: str) -> Dict[str, str]:
                 pass
     elif 'attention' in key_lower:
         component_info['type'] = 'attention'
+        if 'layer_id_' in key_lower:
+            try:
+                layer_id = key_lower.split('layer_id_')[1].split('_')[0]
+                component_info['layer'] = layer_id
+            except:
+                pass
     elif 'mlp' in key_lower:
         component_info['type'] = 'mlp'
-    
+        if 'layer_id_' in key_lower:
+            try:
+                layer_id = key_lower.split('layer_id_')[1].split('_')[0]
+                component_info['layer'] = layer_id
+            except:
+                pass
+    elif 'decoder_layer' in key_lower:
+        component_info['type'] = 'decoder_layer'
+        if 'layer_id_' in key_lower:
+            try:
+                layer_id = key_lower.split('layer_id_')[1].split('_')[0]
+                component_info['layer'] = layer_id
+            except:
+                pass
+
     # 识别阶段
     if 'input' in key_lower:
         component_info['stage'] = 'input'
@@ -265,6 +301,18 @@ def print_step_summary(step_results: List[Dict]):
                 if len(result['details']) > 3:
                     print(f"       ... 还有 {len(result['details']) - 3} 个差异")
 
+def print_match_details(step_results: List[Dict]):
+    """打印匹配详情"""
+    print("\n" + "="*80)
+    print("🔍 匹配详情")
+    print("="*80)
+    
+    for result in step_results:
+        if result['matches'] > 0:
+            print(f"Step {result['step']}: {result['matches']} 个匹配")
+            for detail in result['match_details']:
+                print(f"   {detail['record_key']}")
+
 
 def print_pattern_analysis(patterns: Dict):
     """打印模式分析"""
@@ -304,36 +352,56 @@ def print_detailed_differences(step_results: List[Dict], max_details: int = 10):
     print(f"🔍 详细差异分析 (显示前 {max_details} 个)")
     print("="*80)
     
-    detail_count = 0
+    # 收集所有差异并按层级排序
+    all_differences = []
     for step_result in step_results:
-        if detail_count >= max_details:
-            break
-            
         step = step_result['step']
         for detail in step_result['details']:
-            if detail_count >= max_details:
-                break
-                
             record_key = detail['record_key']
             component_info = identify_key_components(record_key)
             
-            print(f"\n{detail_count + 1}. Step {step} - {record_key}")
-            print(f"    组件: {component_info['type']} (Layer {component_info['layer']}) - {component_info['stage']}")
+            # 提取层级并转换为整数以便正确排序
+            try:
+                layer_id = int(component_info['layer']) if component_info['layer'].isdigit() else float('inf')
+            except:
+                layer_id = float('inf')  # 对于无法解析的层级，放到最后
+                
+            all_differences.append({
+                'step': step,
+                'record_key': record_key,
+                'component_info': component_info,
+                'layer_id': layer_id,
+                'differences': detail['differences'],
+                'detail': detail
+            })
+    
+    # 按步骤和层级排序
+    all_differences.sort(key=lambda x: (x['step'], x['layer_id']))
+    
+    # 显示排序后的差异
+    for idx, diff in enumerate(all_differences[:max_details]):
+        if idx >= max_details:
+            break
             
-            for diff_type, diff_data in detail['differences'].items():
-                if diff_type == 'shape':
-                    print(f"    📐 Shape差异: PT={diff_data['pytorch']} vs JAX={diff_data['jax']}")
-                elif diff_type in ['has_nan', 'has_inf']:
-                    print(f"    🚨 {diff_type}: PT={diff_data['pytorch']} vs JAX={diff_data['jax']}")
-                elif isinstance(diff_data, dict) and 'relative_diff' in diff_data:
-                    pt_val = diff_data['pytorch']
-                    jax_val = diff_data['jax']
-                    rel_diff = diff_data['relative_diff']
-                    abs_diff = diff_data['diff']
-                    print(f"    📊 {diff_type}: PT={pt_val:.6f} vs JAX={jax_val:.6f} "
-                          f"(相对差异: {rel_diff:.2%}, 绝对差异: {abs_diff:.2e})")
-            
-            detail_count += 1
+        step = diff['step']
+        record_key = diff['record_key']
+        component_info = diff['component_info']
+        
+        print(f"\n{idx + 1}. Step {step} - {record_key}")
+        print(f"    组件: {component_info['type']} (Layer {component_info['layer']}) - {component_info['stage']}")
+        
+        for diff_type, diff_data in diff['differences'].items():
+            if diff_type == 'shape':
+                print(f"    📐 Shape差异: PT={diff_data['pytorch']} vs JAX={diff_data['jax']}")
+            elif diff_type in ['has_nan', 'has_inf']:
+                print(f"    🚨 {diff_type}: PT={diff_data['pytorch']} vs JAX={diff_data['jax']}")
+            elif isinstance(diff_data, dict) and 'relative_diff' in diff_data:
+                pt_val = diff_data['pytorch']
+                jax_val = diff_data['jax']
+                rel_diff = diff_data['relative_diff']
+                abs_diff = diff_data['diff']
+                print(f"    📊 {diff_type}: PT={pt_val:.6f} vs JAX={jax_val:.6f} "
+                      f"(相对差异: {rel_diff:.2%}, 绝对差异: {abs_diff:.2e})")
 
 
 def generate_conclusion(step_results: List[Dict], patterns: Dict, tolerance: float) -> str:
@@ -445,6 +513,7 @@ def main():
     
     # 输出结果
     print_step_summary(step_results)
+    print_match_details(step_results)
     print_pattern_analysis(patterns)
     
     if args.show_details:

@@ -54,13 +54,14 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
         self.test_model_path = os.environ.get(
             'MODEL_PATH', '/tmp/test_qwen_jax_model')
         self.mesh = create_device_mesh(
-            ici_parallelism=[1],
-            dcn_parallelism=[1]
+            ici_parallelism=[-1, 1, 1, 1],
+            dcn_parallelism=[1, 1, 1, 1]
         )
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig("cpu")
         self.jax_loader = JAXModelLoader(self.load_config)
         self.tokenizer = self._get_tokenizer()
+        self.enable_debug_tracer = os.environ.get("ENABLE_DEBUG_TRACER", False)
 
     def _get_positions(self, x):
         return jnp.concatenate([
@@ -210,7 +211,8 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                 print("\n🔄 Test model input and output with JAXModelLoader...")
                 
                 print("\n🟢 Starting debug tracer session...")
-                #global_tracer.start_session()
+                if self.enable_debug_tracer:
+                    global_tracer.start_session()
                 
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
@@ -315,7 +317,8 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
                     print()
 
                 print("\n🔴 Ending debug tracer session...")
-                debug_file = global_tracer.end_session()
+                if self.enable_debug_tracer:
+                    debug_file = global_tracer.end_session()
                 if debug_file:
                     print(f"✅ Debug trace saved to: {debug_file}")
                 else:
@@ -324,8 +327,9 @@ class TestQwen3DenseLoadWeights(CustomTestCase):
         except Exception as e:
             if 'global_tracer' in locals():
                 try:
-                    global_tracer.end_session()
-                    print("🔴 Debug tracer session ended due to exception")
+                    if self.enable_debug_tracer:
+                        global_tracer.end_session()
+                        print("🔴 Debug tracer session ended due to exception")
                 except:
                     pass
             self.fail(f"JAXModelLoader integration test failed: {e}")
