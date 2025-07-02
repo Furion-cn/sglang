@@ -82,8 +82,12 @@ class QWen3Attention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         qkv, _ = self.qkv_proj(hidden_states)
+        global_tracer.print(qkv, f"qkv_proj_output", f"attention_layer_id_{self.layer_id}")
         
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
+        global_tracer.print(q, f"q_split_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"k_split_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(v, f"v_split_output", f"attention_layer_id_{self.layer_id}")
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
@@ -93,8 +97,12 @@ class QWen3Attention(nnx.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.reshape(k.shape)
 
+
         q, k = self.rotary_emb(positions, q, k)
+        global_tracer.print(q, f"rotary_emb_output_q", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"rotary_emb_output_k", f"attention_layer_id_{self.layer_id}")
         attn_output = self.attn(q, k, v, forward_batch=forward_batch, is_causal=True)
+        global_tracer.print(attn_output, f"attn_output", f"attention_layer_id_{self.layer_id}")
 
         output, _ = self.o_proj(attn_output)
         return output
@@ -109,7 +117,6 @@ class Qwen3MLP(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
     ) -> None:
         self.layer_id = layer_id
-
 
         self.gate_proj = LinearBase(
             input_size=hidden_size,
@@ -142,12 +149,15 @@ class Qwen3MLP(nnx.Module):
 
     @trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
-        a1 = self.gate_proj(hidden_states)
-        a2 = self.up_proj(hidden_states)
-        intermediate_parallel = a1 * self.act_func(a2)
+        a1, _ = self.gate_proj(hidden_states)
+        a2, _ = self.up_proj(hidden_states)
+        global_tracer.print(a1, f"a1_output", f"mlp_layer_id_{self.layer_id}")
+        global_tracer.print(a2, f"a2_output", f"mlp_layer_id_{self.layer_id}")
+        intermediate_parallel = a2 * self.act_fn(a1)
         intermediate_parallel = jax.lax.with_sharding_constraint(
             intermediate_parallel, PartitionSpec(None, 'tensor'))
-        output = self.down_proj(intermediate_parallel)
+        global_tracer.print(intermediate_parallel, f"act_fn_output", f"mlp_layer_id_{self.layer_id}")
+        output, _ = self.down_proj(intermediate_parallel)
 
         return output
 
@@ -207,7 +217,9 @@ class QWen3DecoderLayer(nnx.Module):
         )
         
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"decoder_layer_id_{self.layer_id}")
         hidden_states = self.mlp(hidden_states)
+        
         return hidden_states, residual
 
 class QWen3Model(nnx.Module):
@@ -241,10 +253,12 @@ class QWen3Model(nnx.Module):
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
                  ):
+        residual = None
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
-            hidden_states = layer(positions, hidden_states, forward_batch)
-        return self.norm(hidden_states)
+            hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
 class Qwen3ForCausalLMJaxModel(nnx.Module):
     def __init__(self,
