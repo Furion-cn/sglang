@@ -61,17 +61,12 @@ class Attention(nnx.Module):
         if self.use_dot_product_attention:
             return self._forward_dot_product_attention(q, k, v, forward_batch, attention_mask, is_causal)
         else:
+            k_buffer, v_buffer = self._get_and_set_kv_cache(
+                q, k, v, forward_batch, layer_id)
             if forward_batch.forward_mode == ForwardMode.DECODE:
-                k_buffer, v_buffer = self._get_and_set_kv_cache(
-                    q, k, v, forward_batch, layer_id)
-                return self._forward_native_decode(q, k_buffer, v_buffer, forward_batch.seq_lens, attention_mask)
+                return self._forward_native_decode(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, attention_mask)
             else:
-                # update kv cache
-                for idx, seq_len in enumerate(forward_batch.seq_lens):
-                    extend_start_loc = forward_batch.extend_start_loc[idx]
-                    forward_batch.current_kv_cache[idx].set_kv_buffer(
-                        layer_id, k[extend_start_loc:extend_start_loc+seq_len], v[extend_start_loc:extend_start_loc+seq_len])
-                return self._forward_native_extend(q, k, v, forward_batch.seq_lens, attention_mask, is_causal)
+                return self._forward_native_extend(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, attention_mask, is_causal)
 
     def _prepare_tensors(self, q, k, v, forward_batch: ForwardBatch):
         """
@@ -171,15 +166,13 @@ class Attention(nnx.Module):
 
         return self._unpad_output(attn_output, forward_batch, batch_size, max_seq_len, hidden_size)
 
-    def _forward_native_extend(self, q, k, v, seq_lengths: jax.Array, attention_mask=None, is_causal=True):
+    def _forward_native_extend(self, q, k, v, seq_lengths: jax.Array, loc: jax.Array, attention_mask=None, is_causal=True):
         """
         Forward pass using native JAX implementation with block-diagonal attention.
         This avoids padding while maintaining efficient matrix operations.
 
         Args:
             q, k, v: Input tensors of shape [total_tokens, hidden_size]
-            k_cache: cache of key, shape (seq_len, hidden_size)
-            v_cache: cache of value, shape (seq_len, hidden_size)
             seq_length: shape (batch_size,)
             attention_mask: Optional attention mask
             is_causal: Whether to apply causal masking
@@ -187,6 +180,9 @@ class Attention(nnx.Module):
         Returns:
             Output tensor of shape [total_tokens, hidden_size]
         """
+        k = jnp.take(k, loc, axis=0)
+        v = jnp.take(v, loc, axis=0)
+
         total_tokens, hidden_size = q.shape
         head_dim = hidden_size // self.num_heads
 
@@ -252,7 +248,7 @@ class Attention(nnx.Module):
         # Reshape to original format: [total_tokens, hidden_size]
         return attn_output.reshape(total_tokens, hidden_size)
 
-    def _forward_native_decode(self, q, k_cache, v_cache, seq_lengths: jax.Array, attention_mask=None):
+    def _forward_native_decode(self, q, k_cache, v_cache, seq_lengths: jax.Array, loc: jax.Array, attention_mask=None):
         """
         Forward pass using native JAX implementation with block-diagonal attention.
         This avoids padding while maintaining efficient matrix operations.
@@ -268,7 +264,7 @@ class Attention(nnx.Module):
         Returns:
             Output tensor of shape[batch_size, hidden_size]
         """
-        return forward_native_decode(q, k_cache, v_cache, seq_lengths, self.num_heads, self.num_kv_heads, self.scale, attention_mask)
+        return forward_native_decode(q, k_cache, v_cache, seq_lengths, loc, self.num_heads, self.num_kv_heads, self.scale, attention_mask)
 
     def _create_extend_sequence_mask(self, seq_lengths):
         """
@@ -307,7 +303,7 @@ class Attention(nnx.Module):
         causal_mask = token_positions[:, None] >= token_positions[None, :]
 
         return causal_mask
-
+    
     def _get_and_set_kv_cache(
         self,
         q: jax.Array,
@@ -319,21 +315,14 @@ class Attention(nnx.Module):
         """
         Get the kv cache from the forward batch.
         """
-        k_buffer_list = []
-        v_buffer_list = []
-        for idx, prefix_str in enumerate(forward_batch.prefix_str):
-            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_cache(
-                prefix_str, layer_id)
-            new_k_buffer = jnp.concatenate(
-                [k_buffer, k[idx][jnp.newaxis, :]], axis=0)
-            new_v_buffer = jnp.concatenate(
-                [v_buffer, v[idx][jnp.newaxis, :]], axis=0)
-            k_buffer_list.append(new_k_buffer)
-            v_buffer_list.append(new_v_buffer)
-            forward_batch.current_kv_cache[idx].set_kv_buffer(
-                layer_id, new_k_buffer, new_v_buffer)
-
-        return jnp.concatenate(k_buffer_list, axis=0), jnp.concatenate(v_buffer_list, axis=0)
+        if forward_batch.forward_mode == ForwardMode.EXTEND:
+            forward_batch.token_to_kv_pool.set_kv_buffer(
+                layer_id, forward_batch.cache_loc, k, v)
+        else:
+            forward_batch.token_to_kv_pool.set_kv_buffer(
+                layer_id, forward_batch.out_cache_loc, k, v)
+            
+        return forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
 
 
 @partial(jax.jit, static_argnames=["num_heads", "num_kv_heads"])
@@ -341,6 +330,7 @@ def forward_native_decode(q: jax.Array,
                           k_cache: jax.Array,
                           v_cache: jax.Array,
                           seq_lengths: jax.Array,
+                          loc: jax.Array,
                           num_heads, num_kv_heads,
                           scale=None, attention_mask=None):
     """
@@ -361,6 +351,9 @@ def forward_native_decode(q: jax.Array,
     Returns:
         Output tensor of shape[batch_size, hidden_size]
     """
+    k_cache = jnp.take(k_cache, loc, axis=0)
+    v_cache = jnp.take(v_cache, loc, axis=0)
+    
     batch_size, hidden_size = q.shape
     head_dim = hidden_size // num_heads
 
