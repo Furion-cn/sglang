@@ -108,26 +108,32 @@ class TestQWenLoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
         # new kv cache
-        current_kv_cache = [ReqToHashKVCachePool(
-            seq_len=seq_len,
+        kv_cache = ReqToHashKVCachePool(
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
-            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32
-        ) for seq_len in seq_lens]
+            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
+            max_seq_len=1024,
+            max_batch_size=20
+        )
+        # batch size
+        batch_size = len(actual_seq_lens)
+        # cache loc
+        cache_loc = jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
         # Create ForwardBatch
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
-            batch_size=len(actual_seq_lens),
+            batch_size=batch_size,
             input_ids=input_ids_array,
+            cache_loc=cache_loc, # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] if seq_lens = [3,4,3]
+            out_cache_loc=None,
             seq_lens=seq_lens,
             positions=positions_array,
             extend_start_loc=extend_start_loc,
             total_tokens=len(input_ids_array),
             sequences=texts.copy(),
             prefix_str=texts.copy(),
-            token_to_kv_pool=HashKVCache(),
-            current_kv_cache=current_kv_cache
+            token_to_kv_pool=kv_cache,
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
@@ -324,41 +330,51 @@ class TestQWenLoadWeights(CustomTestCase):
         return [Sequence(self.tokenizer, text) for text in input_text]
 
     def update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer):
+        # update out cache loc
+        out_cache_start_loc = jnp.max(forward_batch.cache_loc) + 1
+        forward_batch.out_cache_loc = jnp.arange(
+            out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
+            
+        cache_start_loc = 0
         new_input_ids = []
         new_seq_lens = []
+        new_cache_loc_list = []
         for batch_idx, seq_len in enumerate(forward_batch.seq_lens):
+            new_seq_len = seq_len + 1
             current_token_id = int(next_token_ids[batch_idx, 0])
             new_input_ids.append(current_token_id)
-            new_seq_lens.append(seq_len + 1)
+            new_seq_lens.append(new_seq_len)
             decoded_token = tokenizer.decode(
                 [current_token_id])
-
-            # update prefix
+            
+            # update cache loc
+            old_cache_loc = forward_batch.cache_loc[
+                cache_start_loc:cache_start_loc + seq_len]
+            new_cache_loc_list.append(jnp.concatenate(
+                [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
+            cache_start_loc += seq_len
+            
             if forward_batch.forward_mode == ForwardMode.DECODE:
+                # update prefix
                 forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
 
-            # update kv cache
-            forward_batch.token_to_kv_pool.set_kv_cache(
-                forward_batch.prefix_str[batch_idx],
-                forward_batch.current_kv_cache[batch_idx]
-            )
             # update sequences
             forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
-
+        
+        # update cache loc
+        forward_batch.cache_loc = jnp.concatenate(new_cache_loc_list, axis=0)
         # update seq lens
         forward_batch.seq_lens = jnp.array(new_seq_lens, dtype=jnp.int32)
         # update extend start loc
-        extend_start_loc = jnp.cumsum(
+        forward_batch.extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), forward_batch.seq_lens[:-1]]))
         # update positions
         forward_batch.positions = jnp.array(
             [seq_len - 1 for seq_len in new_seq_lens], dtype=jnp.int32)
         # update input ids
         forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
-        # update extend start loc
-        forward_batch.extend_start_loc = extend_start_loc
         # update total tokens
         forward_batch.total_tokens = len(new_input_ids)
         # update forward mode
