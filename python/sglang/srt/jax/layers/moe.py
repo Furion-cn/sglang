@@ -174,11 +174,9 @@ class Qwen3MoE(nnx.Module):
         
         print(f"MoE processing {total_tokens} tokens with {self.num_experts} experts")
         
-        # 选择每个token的top-k专家
         top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
         top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         
-        # 使用简单但优化的方案
         if self.expert_parallel_size == 1:
             print("Using local forward mode")
             output = self._local_forward(inputs, top_k_indices, top_k_weights)
@@ -416,14 +414,6 @@ class Qwen3MoE(nnx.Module):
         w0_kernel = self.wi_0.value
         w1_kernel = self.wi_1.value
         wo_kernel = self.wo.value
-
-        print(f"w0_kernel sharding: {self.wi_0.value.shape}")
-        print(f"w1_kernel sharding: {self.wi_1.value.shape}")
-        print(f"wo_kernel sharding: {self.wo.value.shape}")
-
-        jax.debug.visualize_array_sharding(self.wi_0.value[0])
-        jax.debug.visualize_array_sharding(self.wi_1.value[0])
-        jax.debug.visualize_array_sharding(self.wo.value[0])
         
         # Key understanding: JAX sharding keeps weights in global shape (128) in code, but local_group_sizes is local size (16)
         # Need to expand local_group_sizes to global expert count to match weight shape
@@ -556,15 +546,3 @@ class Qwen3MoE(nnx.Module):
         recv_sizes = transform_array(all_shards_group_sizes, shard_id, "RECV_SIZE", is_batch_sharded)
         
         return input_offsets, send_sizes, output_offsets, recv_sizes
-
-    def _get_device_expert_range(self):
-        expert_ids = jnp.arange(self.num_experts)
-        expert_ids_sharded = jax.lax.with_sharding_constraint(
-            expert_ids,
-            jax.sharding.PartitionSpec(self.expert_axis_name)
-        )
-        
-        local_expert_start = expert_ids_sharded[0]  # 第一个专家ID
-        local_expert_end = expert_ids_sharded[-1] + 1  # 最后一个专家ID + 1
-        
-        return local_expert_start, local_expert_end

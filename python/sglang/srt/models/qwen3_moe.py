@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 from torch import nn
 
+from sglang.debug_tracer import global_tracer, trace_function
 from sglang.srt.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -205,6 +206,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             topk_weights = torch.empty(
                 (0, self.top_k), dtype=torch.float32, device=hidden_states.device
             )
+            
         if self.ep_size > 1:
             # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
             (
@@ -222,6 +224,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 topk_weights=topk_weights,
                 forward_mode=forward_mode,
             )
+            
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             topk_idx=topk_idx,
@@ -233,6 +236,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             num_recv_tokens_per_expert=num_recv_tokens_per_expert,
             forward_mode=forward_mode,
         )
+        
         if self.ep_size > 1:
             final_hidden_states = self.deepep_dispatcher.combine(
                 hidden_states=final_hidden_states,
@@ -240,6 +244,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 topk_weights=topk_weights,
                 forward_mode=forward_mode,
             )
+        
         return final_hidden_states
 
     def op_gate(self, state):
@@ -357,6 +362,7 @@ class Qwen3MoeAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        self.layer_id = layer_id
 
         attn_tp_rank = get_attention_tp_rank()
         attn_tp_size = get_attention_tp_size()
@@ -470,6 +476,7 @@ class Qwen3MoeAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+    @trace_function(stage="MOE_ATTENTION", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -481,7 +488,9 @@ class Qwen3MoeAttention(nn.Module):
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
-        return self.forward_core(s)
+        result = self.forward_core(s)
+        
+        return result
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
@@ -561,6 +570,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             post_attention_layernorm=self.post_attention_layernorm,
         )
 
+    @trace_function(stage="QWen3MoeDecoderLayer", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -568,10 +578,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        global_tracer.print(hidden_states, f"decoder_layer_input", f"moe_decoder_layer_id_{self.layer_id}")
 
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
+        
+        global_tracer.print(hidden_states, f"input_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_input_norm", f"moe_decoder_layer_id_{self.layer_id}")
 
         if hidden_states.shape[0] != 0:
             hidden_states = self.self_attn(
@@ -579,17 +593,24 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+        
+        global_tracer.print(hidden_states, f"self_attn_output", f"moe_decoder_layer_id_{self.layer_id}")
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-
+        
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_post_attn_norm", f"moe_decoder_layer_id_{self.layer_id}")
+            
         hidden_states = self.mlp(hidden_states, forward_batch)
+        
+        global_tracer.print(hidden_states, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
-
+        
         return hidden_states, residual
 
     def op_comm_prepare_attn(
@@ -691,7 +712,15 @@ class Qwen3MoeForCausalLM(nn.Module):
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
         self.logits_processor = LogitsProcessor(config)
+        self._setup_debug_tracer()
 
+    def _setup_debug_tracer(self):
+        try:
+            global_tracer.set_model(self)
+        except Exception as e:
+            print(f"Warning: Could not setup debug tracer: {str(e)}")
+
+    @trace_function(stage="MOE_CAUSAL_LM", include_args=False, include_output=True)
     @torch.no_grad()
     def forward(
         self,
@@ -708,11 +737,13 @@ class Qwen3MoeForCausalLM(nn.Module):
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
         )
-
+        
         if self.pp_group.is_last_rank:
-            return self.logits_processor(
+            result = self.logits_processor(
                 input_ids, hidden_states, self.lm_head, forward_batch
             )
+            
+            return result
         else:
             return hidden_states
 

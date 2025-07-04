@@ -190,11 +190,16 @@ class QWen3MoeDecoderLayer(nnx.Module):
         forward_batch: ForwardBatch,
         residual: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
+        global_tracer.print(hidden_states, f"decoder_layer_input", f"moe_decoder_layer_id_{self.layer_id}")
+        
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        
+        global_tracer.print(hidden_states, f"input_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_input_norm", f"moe_decoder_layer_id_{self.layer_id}")
         
         hidden_states = self.self_attn(
             positions=positions,
@@ -202,7 +207,12 @@ class QWen3MoeDecoderLayer(nnx.Module):
             forward_batch=forward_batch,
         )
         
+        global_tracer.print(hidden_states, f"self_attn_output", f"moe_decoder_layer_id_{self.layer_id}")
+        
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_post_attn_norm", f"moe_decoder_layer_id_{self.layer_id}")
         
         if self.is_moe_layer:
             print(f"\n[Layer {self.layer_id}] MOE layer is processing...")            
@@ -218,6 +228,8 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 out_specs=P(None), 
                 check_rep=False, 
             )(hidden_states, router_logits)
+            
+            global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
             
             print(f"[Layer {self.layer_id}] MLP output shape: {mlp_output.shape}")
             
