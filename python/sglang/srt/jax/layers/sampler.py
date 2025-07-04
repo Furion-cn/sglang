@@ -4,6 +4,7 @@ import jax
 from flax import nnx
 from jax import numpy as jnp
 from jax import random
+import numpy as np
 
 from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
@@ -61,17 +62,29 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
     rng: nnx.Rngs,
 ):
     """A top-k, top-p and min-p sampling implementation with native pytorch operations."""
-    probs_sort,probs_idx=_sample_part_a(probs,top_ks,top_ps,need_min_p_sampling,min_ps)
+    probs_sort,probs_idx = sort_through_cpu(probs)
+
+    probs_sort=_sample_part_a(probs,probs_sort,top_ks,top_ps,need_min_p_sampling,min_ps)
 
     sampled_index = random.categorical(rng, probs_sort).reshape(-1, 1)
 
     return _sample_part_b(probs_idx,sampled_index)
 
+
+def sort_through_cpu(probs:jax.Array):
+    original_device = probs.device
+    probs_cpu = jax.device_get(probs)
+
+    probs_sorted_cpu = np.sort(probs_cpu, axis=-1)[:, ::-1]
+    probs_idx_cpu = np.argsort(probs_cpu, axis=-1)[:, ::-1]
+
+    probs_sorted = jax.device_put(probs_sorted_cpu, device=original_device)
+    probs_sorted_idx = jax.device_put(probs_idx_cpu, device=original_device)
+    return probs_sorted ,probs_sorted_idx
+
+
 @partial(jax.jit,static_argnames=('need_min_p_sampling'))
-def _sample_part_a(probs,top_ks,top_ps,need_min_p_sampling:bool,min_ps):
-    probs_sort = jnp.sort(
-        probs, axis=-1)[:, ::-1]  # Sort and reverse for descending order
-    probs_idx = jnp.argsort(probs, axis=-1)[:, ::-1]
+def _sample_part_a(probs,probs_sort,top_ks,top_ps,need_min_p_sampling:bool,min_ps):
     probs_sum = jnp.cumsum(probs_sort, axis=-1)
 
     top_k_mask = jnp.arange(
@@ -86,7 +99,7 @@ def _sample_part_a(probs,top_ks,top_ps,need_min_p_sampling:bool,min_ps):
         min_p_mask = probs_sort < min_p_thresholds.reshape(-1, 1)
         probs_sort = jnp.where(min_p_mask, 0.0, probs_sort)
     
-    return probs_sort,probs_idx
+    return probs_sort
 
 @partial(jax.jit)
 def _sample_part_b(probs_idx,sampled_index):
