@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Dict, Optional
 
 import jax
@@ -21,7 +22,6 @@ from sglang.srt.jax.utils import (
     get_expected_param_paths,
     update_state_recursive,
 )
-from functools import partial
 
 
 class QWenMLP(nnx.Module):
@@ -34,7 +34,7 @@ class QWenMLP(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
     ):
         self.layer_id = layer_id
-        
+
         self.w1 = LinearBase(
             input_size=hidden_size,
             output_size=intermediate_size,
@@ -57,7 +57,7 @@ class QWenMLP(nnx.Module):
             input_size=intermediate_size,
             output_size=hidden_size,
             use_bias=False,
-            kernel_axes=("tensor",None),
+            kernel_axes=("tensor", None),
             params_dtype=dtype,
             rngs=rngs,
         )
@@ -66,17 +66,20 @@ class QWenMLP(nnx.Module):
 
     @trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
-        return _mlp_forward(hidden_states,self.w1.weight.value,self.w2.weight.value,self.c_proj.weight.value)
+        return _mlp_forward(hidden_states, self.w1.weight.value, self.w2.weight.value, self.c_proj.weight.value)
+
 
 @jax.jit
-def _mlp_forward(hidden_states:jax.Array,w1:jax.Array,w2:jax.Array, c_proj:jax.Array):
-        a1 = jnp.dot(hidden_states,w1)
-        a2 = jnp.dot(hidden_states,w2)
-        intermediate_parallel = a1 * jax.nn.silu(a2)
-        intermediate_parallel = jax.lax.with_sharding_constraint(
-            intermediate_parallel, PartitionSpec(None, 'tensor'))
-        output= jnp.dot(intermediate_parallel,c_proj)
-        return output 
+def _mlp_forward(hidden_states: jax.Array, w1: jax.Array, w2: jax.Array, c_proj: jax.Array):
+    a1 = jnp.dot(hidden_states, w1)
+    a2 = jnp.dot(hidden_states, w2)
+    intermediate_parallel = a1 * jax.nn.silu(a2)
+    intermediate_parallel = jax.lax.with_sharding_constraint(
+        intermediate_parallel, PartitionSpec(None, 'tensor'))
+    output = jnp.dot(intermediate_parallel, c_proj)
+    return output
+
+
 class QWenAttention(nnx.Module):
     def __init__(self,
                  hidden_size: int,
