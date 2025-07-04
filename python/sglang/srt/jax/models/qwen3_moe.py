@@ -18,7 +18,8 @@ from sglang.srt.jax.utils import (
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
+from jax.experimental.shard_map import shard_map
 import numpy as np
 
 class QWen3MoeAttention(nnx.Module):
@@ -32,6 +33,7 @@ class QWen3MoeAttention(nnx.Module):
                  head_dim: Optional[int] = None,
                  rms_norm_eps: float = None,
                  layer_id: int = 0,
+                 attention_bias: bool = False,
                  rngs: nnx.Rngs = None):
         self.layer_id = layer_id
         assert num_heads % num_kv_heads == 0
@@ -46,14 +48,14 @@ class QWen3MoeAttention(nnx.Module):
         self.c_attn = LinearBase(
             input_size=hidden_size,
             output_size=(num_heads + 2 * num_kv_heads) * self.head_dim,
-            use_bias=True,
+            use_bias=attention_bias,
             kernel_axes=(None, "tensor"),
             rngs=rngs,
         )
         self.c_proj = LinearBase(
             input_size=num_heads * self.head_dim,
             output_size=hidden_size,
-            use_bias=False,
+            use_bias=attention_bias,
             kernel_axes=("tensor", None),
             rngs=rngs,
         )
@@ -79,7 +81,7 @@ class QWen3MoeAttention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         qkv, _ = self.c_attn(hidden_states)
-        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size, self.q_size + 2 * self.kv_size], axis=-1)
+        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
@@ -90,7 +92,7 @@ class QWen3MoeAttention(nnx.Module):
         k = k_by_head.reshape(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, is_causal=True)
+        attn_output = self.attn(q, k, v, forward_batch, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -116,6 +118,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
             head_dim=head_dim,
             rms_norm_eps=config.rms_norm_eps,
             layer_id=layer_id,
+            attention_bias=getattr(config, 'attention_bias', False),
             rngs=rngs,
         )
 
@@ -135,9 +138,25 @@ class QWen3MoeDecoderLayer(nnx.Module):
             num_experts_per_tok = getattr(config, 'num_experts_per_tok', 8)
             moe_intermediate_size = getattr(config, 'moe_intermediate_size', 768)
             
-            if not hasattr(config, 'expert_mesh') or config.expert_mesh is None:
+            if hasattr(config, 'expert_mesh') and config.expert_mesh is not None:
+                self.expert_mesh = config.expert_mesh
+            else:
                 devices = jax.devices()
                 config.expert_mesh = Mesh(devices, axis_names=('expert',))
+                self.expert_mesh = config.expert_mesh
+                
+            
+            if 'expert' not in self.expert_mesh.axis_names:
+                raise ValueError(f"expert_mesh must contain 'expert' axis, current axes: {self.expert_mesh.axis_names}")
+                
+            expert_parallel_size = self.expert_mesh.shape['expert']
+            
+            if num_experts % expert_parallel_size != 0:
+                raise ValueError(
+                    f"expert number ({num_experts}) must be divisible by expert parallel size ({expert_parallel_size})."
+                    f"suggest to adjust expert number to be a multiple of {expert_parallel_size},"
+                    f"or adjust device number."
+                )
             
             self.moe_gate = GateLogit(
                 input_size=config.hidden_size,
@@ -148,7 +167,6 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 dtype=jnp.bfloat16,
                 rngs=rngs
             )
-            
             self.mlp = Qwen3MoE(
                 config=config,
                 num_experts=num_experts,
@@ -187,14 +205,26 @@ class QWen3MoeDecoderLayer(nnx.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         
         if self.is_moe_layer:
-            router_logits = self.moe_gate(hidden_states)
-            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
+            print(f"\n[Layer {self.layer_id}] MOE layer is processing...")            
+            router_logits = self.moe_gate(hidden_states)            
+            def moe_computation(hidden_states, router_logits):
+                result = self.mlp(hidden_states, router_logits=router_logits)
+                return result
+            
+            mlp_output = shard_map(
+                moe_computation,
+                mesh=self.mlp.mesh,
+                in_specs=(P(None), P(None)),
+                out_specs=P(None), 
+                check_rep=False, 
+            )(hidden_states, router_logits)
+            
+            print(f"[Layer {self.layer_id}] MLP output shape: {mlp_output.shape}")
+            
             hidden_states = mlp_output
         else:
             hidden_states = self.mlp(hidden_states)
             
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual, residual_mode="add")
-        
         return hidden_states, residual
 
 class QWen3MoeModel(nnx.Module):
@@ -269,10 +299,107 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 f"Missing weights for parameters: {sorted(missing_paths)}")
 
         update_state_recursive(model_state, flat_weights)
+        self._apply_sharding_constraints_with_mixed_meshes(model_state)
 
+    def _apply_sharding_constraints_with_mixed_meshes(self, model_state):
+        import jax
+        from jax.sharding import PartitionSpec as P
+        
+        expert_mesh = getattr(self.config, 'expert_mesh', None)
+        
+        if expert_mesh is None:
+            pspecs = nnx.get_partition_spec(model_state)
+            pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
+            nnx.update(self, pstate)
+            return
+        
+        print(f"apply mix mesh constraint...")
+        print(f"Expert mesh: {expert_mesh}")
+        
         pspecs = nnx.get_partition_spec(model_state)
-        pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
-        nnx.update(self, pstate)
+        
+        moe_layer_ids = set()
+        for i, layer in enumerate(self.model.layers):
+            if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
+                moe_layer_ids.add(i)
+        
+        print(f"MoE layer ids: {moe_layer_ids}")
+        
+        def is_moe_parameter(path):
+            for layer_id in moe_layer_ids:
+                layer_path = f"model/layers/{layer_id}"
+                if layer_path in path:
+                    if any(component in path for component in ['mlp', 'moe_gate']):
+                        return True
+            return False
+        
+        def get_moe_partition_spec(path, original_pspec):
+            if 'moe_gate' in path:
+                return P(None, 'expert')
+            elif 'mlp' in path:
+                if len(original_pspec.axis_names) >= 2:
+                    return P('expert', *(original_pspec.axis_names[1:]))
+                else:
+                    return P('expert', None)
+            else:
+                return original_pspec
+        
+        def deep_override(specs, state, path=""):
+            if isinstance(specs, dict) and isinstance(state, dict):
+                result = {}
+                for key in specs:
+                    if key in state:
+                        current_path = f"{path}/{key}" if path else key
+                        result[key] = deep_override(specs[key], state[key], current_path)
+                    else:
+                        result[key] = specs[key]
+                return result
+            elif isinstance(specs, P) and hasattr(state, 'shape'):
+                if is_moe_parameter(path):
+                    new_pspec = get_moe_partition_spec(path, specs)
+                    print(f"rewrite: {path} -> {new_pspec}")
+                    return new_pspec
+                else:
+                    return specs
+            else:
+                return specs
+        
+        modified_pspecs = deep_override(pspecs, model_state)
+        
+        try:
+            def apply_mixed_constraints(state, specs, path=""):
+                if isinstance(state, dict) and isinstance(specs, dict):
+                    result = {}
+                    for key in state:
+                        if key in specs:
+                            current_path = f"{path}/{key}" if path else key
+                            result[key] = apply_mixed_constraints(state[key], specs[key], current_path)
+                        else:
+                            result[key] = state[key]
+                    return result
+                elif hasattr(state, 'shape') and isinstance(specs, P):
+                    if is_moe_parameter(path):
+                        with expert_mesh:
+                            return jax.lax.with_sharding_constraint(state, specs)
+                    else:
+                        return jax.lax.with_sharding_constraint(state, specs)
+                else:
+                    return state
+            
+            constrained_state = apply_mixed_constraints(model_state, modified_pspecs)
+            nnx.update(self, constrained_state)
+            print("mix mesh constraint applied")
+            
+        except Exception as e:
+            print(f"mix mesh constraint failed: {e}")
+            try:
+                pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
+                nnx.update(self, pstate)
+                print("fallback to standard constraint")
+            except Exception as fallback_e:
+                print(f"standard constraint failed: {fallback_e}")
+                nnx.update(self, model_state)
+                print("use unconstrainted model state")
 
     def __call__(self,
                  input_ids: jax.Array,
