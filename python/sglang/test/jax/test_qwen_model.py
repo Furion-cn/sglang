@@ -1,9 +1,11 @@
 import os
 import unittest
+from functools import partial
 from pathlib import Path
 from typing import List
 from unittest.mock import patch
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -286,7 +288,7 @@ class TestQwenModel(unittest.TestCase):
             orig_idx = original_indices[batch_idx]
             current_token_id = int(next_token_ids[batch_idx, 0])
             cache_loc = forward_batch.cache_loc[cache_loc_start_loc:
-                                                cache_loc_start_loc + seq_len].tolist()
+                                                cache_loc_start_loc + seq_len]
             cache_loc_start_loc += seq_len
 
             # Check if this request should finish BEFORE updating sequences
@@ -310,15 +312,22 @@ class TestQwenModel(unittest.TestCase):
         forward_batch.batch_size = len(new_seq_lens)
         forward_batch.seq_lens = jnp.array(new_seq_lens, dtype=jnp.int32)
 
+        @partial(jax.jit, static_argnames=["forward_batch"])
+        def _get_cache_loc(new_cache_loc: jax.Array, batch_size: int):
+            """Get the cache loc from the forward batch."""
+            out_cache_start_loc = new_cache_loc[-1][-1] + 1
+            out_cache_loc = jnp.arange(
+                out_cache_start_loc, out_cache_start_loc + batch_size, dtype=jnp.int32)
+            extended_cache_segments = [
+                jnp.concatenate([cache_loc, jnp.array(
+                    [out_cache_loc[i]], dtype=jnp.int32)])
+                for i, cache_loc in enumerate(new_cache_loc)
+            ]
+            return jnp.concatenate(extended_cache_segments), out_cache_loc
+
         # update cache loc
-        out_cache_start_loc = max(
-            item for sublist in new_cache_loc for item in sublist) + 1
-        forward_batch.out_cache_loc = jnp.arange(
-            out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
-        forward_batch.cache_loc = jnp.array([
-            item for i, cache_loc in enumerate(new_cache_loc)
-            for item in cache_loc + [int(forward_batch.out_cache_loc[i])]
-        ], dtype=jnp.int32)
+        forward_batch.cache_loc, forward_batch.out_cache_loc = _get_cache_loc(
+            new_cache_loc=new_cache_loc, batch_size=forward_batch.batch_size)
 
         # Update positions for decode mode
         forward_batch.positions = jnp.array(
