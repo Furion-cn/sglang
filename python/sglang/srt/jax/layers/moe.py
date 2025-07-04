@@ -299,13 +299,14 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, sorted_selected_experts, top_k_weights, group_sizes, sorted_experts
     
     def _expert_dispatch(self, sorted_inputs, global_group_sizes, sorted_experts, expert_shard_id, local_expert_size):
-        print(f"[DEBUG] Dispatch - sorted_inputs.shape={sorted_inputs.shape}")
-        print(f"[DEBUG] Dispatch - global_group_sizes.shape={global_group_sizes.shape}, values={global_group_sizes}")
-        print(f"[DEBUG] Dispatch - expert_shard_id={expert_shard_id}, local_expert_size={local_expert_size}")
+        # Add detailed tracer for dispatch input
+        global_tracer.print(sorted_inputs, f"dispatch_input_sorted", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(global_group_sizes, f"dispatch_global_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
         
         # global_group_sizes: (num_experts,) -> reshaped: (num_expert_parallelism,)
         reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1)
-        print(f"[DEBUG] Dispatch - reshaped_group_sizes.shape={reshaped_group_sizes.shape}, values={reshaped_group_sizes}")
+        
+        global_tracer.print(reshaped_group_sizes, f"dispatch_reshaped_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
         
         # Unified communication abstraction
         x, local_sorted_indices, local_group_sizes, selected_experts = self._unified_expert_communication(
@@ -313,10 +314,10 @@ class Qwen3MoE(nnx.Module):
             local_expert_size, reshaped_group_sizes, is_dispatch=True
         )
         
-        print(f"[DEBUG] Dispatch - output x.shape={x.shape}")
-        print(f"[DEBUG] Dispatch - local_group_sizes.shape={local_group_sizes.shape}, values={local_group_sizes}")
-        print(f"[DEBUG] Dispatch - selected_experts.shape={selected_experts.shape}")
-        print(f"[DEBUG] Dispatch - x stats: min={jnp.min(x):.6f}, max={jnp.max(x):.6f}, mean={jnp.mean(x):.6f}, std={jnp.std(x):.6f}")
+        # Add detailed tracer for dispatch output
+        global_tracer.print(x, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(local_group_sizes, f"dispatch_local_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(selected_experts, f"dispatch_selected_experts", f"moe_dispatch_layer_id_{self.layer_id}")
         
         return x, local_sorted_indices, local_group_sizes, selected_experts
     
@@ -332,20 +333,29 @@ class Qwen3MoE(nnx.Module):
         
         mode = "ragged_all_to_all" if can_use_ragged else "regular_all_to_all"
         action = "dispatching" if is_dispatch else "collecting"
-        print(f"Communication: {action} using {mode}")
+        
+        stage_name = "dispatch" if is_dispatch else "collection"
+        global_tracer.print(data, f"comm_{stage_name}_input", f"moe_{stage_name}_layer_id_{self.layer_id}")
         
         if can_use_ragged:
             # GPU/TPU: use ragged_all_to_all
-            return self._ragged_communication(
+            result = self._ragged_communication(
                 data, global_group_sizes, sorted_experts, expert_shard_id, 
                 local_expert_size, reshaped_group_sizes, is_dispatch
             )
         else:
             # CPU: use regular all_to_all
-            return self._regular_communication(
+            result = self._regular_communication(
                 data, global_group_sizes, sorted_experts, expert_shard_id, 
                 local_expert_size, reshaped_group_sizes, is_dispatch
             )
+        
+        if is_dispatch:
+            global_tracer.print(result[0], f"comm_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
+        else:
+            global_tracer.print(result, f"comm_collection_output", f"moe_combine_layer_id_{self.layer_id}")
+        
+        return result
     
     def _ragged_communication(self, data, global_group_sizes, sorted_experts, expert_shard_id, 
                              local_expert_size, reshaped_group_sizes, is_dispatch):        
@@ -392,10 +402,15 @@ class Qwen3MoE(nnx.Module):
         else:
             padded_data = data
         
+        stage_name = "dispatch" if is_dispatch else "collection"
+        global_tracer.print(padded_data, f"regular_comm_{stage_name}_padded", f"moe_{stage_name}_layer_id_{self.layer_id}")
+        
         tokens_per_device = target_size // self.expert_parallel_size
         reshaped_data = padded_data.reshape(
             self.expert_parallel_size, tokens_per_device, data.shape[1]
         )
+        
+        global_tracer.print(reshaped_data, f"regular_comm_{stage_name}_reshaped", f"moe_{stage_name}_layer_id_{self.layer_id}")
         
         communicated_data = jax.lax.all_to_all(
             reshaped_data,
@@ -404,7 +419,11 @@ class Qwen3MoE(nnx.Module):
             concat_axis=1
         )
         
+        global_tracer.print(communicated_data, f"regular_comm_{stage_name}_all_to_all", f"moe_{stage_name}_layer_id_{self.layer_id}")
+        
         flattened_data = communicated_data.reshape(-1, data.shape[1])
+        
+        global_tracer.print(flattened_data, f"regular_comm_{stage_name}_flattened", f"moe_{stage_name}_layer_id_{self.layer_id}")
         
         if is_dispatch:
             all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
@@ -419,6 +438,9 @@ class Qwen3MoE(nnx.Module):
             
             valid_data = flattened_data[:num_valid_tokens]
             local_sorted_indices = jnp.arange(num_valid_tokens)
+            
+            global_tracer.print(valid_data, f"regular_dispatch_valid_data", f"moe_dispatch_layer_id_{self.layer_id}")
+            global_tracer.print(local_group_sizes, f"regular_dispatch_local_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
             
             return valid_data, local_sorted_indices, local_group_sizes, sorted_experts_ids
         else:
@@ -451,36 +473,39 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
     
     def _gmm_compute_exact(self, x, local_group_sizes, selected_experts):
-        print(f"[DEBUG] GMM - input x.shape={x.shape}, dtype={x.dtype}")
-        print(f"[DEBUG] GMM - x stats: min={jnp.min(x):.6f}, max={jnp.max(x):.6f}, mean={jnp.mean(x):.6f}, std={jnp.std(x):.6f}")
-        print(f"[DEBUG] GMM - local_group_sizes.shape={local_group_sizes.shape}, values={local_group_sizes}")
-        print(f"[DEBUG] GMM - selected_experts.shape={selected_experts.shape}, values={selected_experts}")
+        # Add detailed input tracers
+        global_tracer.print(x, f"gmm_input_x", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(local_group_sizes, f"gmm_local_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(selected_experts, f"gmm_selected_experts", f"moe_compute_layer_id_{self.layer_id}")
         
-        def gmm_layer(inputs, kernel, group_sizes, expert_assignments):
-            print(f"[DEBUG] GMM ragged_dot - inputs.shape={inputs.shape}, kernel.shape={kernel.shape}")
-            print(f"[DEBUG] GMM ragged_dot - group_sizes.shape={group_sizes.shape}, values={group_sizes}")
+        def gmm_layer(inputs, kernel, group_sizes, expert_assignments, layer_name):
+            global_tracer.print(inputs, f"gmm_{layer_name}_input", f"moe_compute_layer_id_{self.layer_id}")
+            global_tracer.print(kernel, f"gmm_{layer_name}_kernel", f"moe_compute_layer_id_{self.layer_id}")
+            global_tracer.print(group_sizes, f"gmm_{layer_name}_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+            
             result = jax.lax.ragged_dot(
                 lhs=inputs,
                 rhs=kernel,
                 group_sizes=group_sizes,
                 preferred_element_type=self.dtype
             )
-            print(f"[DEBUG] GMM ragged_dot - result.shape={result.shape}")
-            print(f"[DEBUG] GMM ragged_dot - result stats: min={jnp.min(result):.6f}, max={jnp.max(result):.6f}, mean={jnp.mean(result):.6f}, std={jnp.std(result):.6f}")
+            
+            global_tracer.print(result, f"gmm_{layer_name}_output", f"moe_compute_layer_id_{self.layer_id}")
+            
             return result
         
         w0_kernel = self.wi_0.value
         w1_kernel = self.wi_1.value
         wo_kernel = self.wo.value
         
-        print(f"[DEBUG] Layer {self.layer_id} GMM: x.shape={x.shape}, local_group_sizes.shape={local_group_sizes.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} GMM: w0_kernel.shape={w0_kernel.shape}, w1_kernel.shape={w1_kernel.shape}, wo_kernel.shape={wo_kernel.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} GMM: local_group_sizes={local_group_sizes}")
-        print(f"[DEBUG] Layer {self.layer_id} GMM: local_group_sizes sum={jnp.sum(local_group_sizes)}")
+        # Add weight tracers
+        global_tracer.print(w0_kernel, f"gmm_w0_kernel", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(w1_kernel, f"gmm_w1_kernel", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(wo_kernel, f"gmm_wo_kernel", f"moe_compute_layer_id_{self.layer_id}")
         
         # Key understanding: JAX sharding keeps weights in global shape (128) in code, but local_group_sizes is local size (16)
         # Need to expand local_group_sizes to global expert count to match weight shape
-        expected_global_experts = w0_kernel.shape[0]  # global expert count (128)
+        expected_global_experts = w0_kernel.shape[0]
         local_expert_count = len(local_group_sizes)   # local expert count (16)
         
         if local_expert_count != expected_global_experts:
@@ -490,7 +515,6 @@ class Qwen3MoE(nnx.Module):
             local_expert_start = expert_shard_id * experts_per_device
             local_expert_end = (expert_shard_id + 1) * experts_per_device
             
-            print(f"[DEBUG] Device {expert_shard_id} handling experts {local_expert_start}:{local_expert_end}")
             
             # 创建全局mask，只有当前设备负责的experts有非零group_sizes
             expanded_group_sizes = jnp.zeros(expected_global_experts, dtype=local_group_sizes.dtype)
@@ -500,115 +524,111 @@ class Qwen3MoE(nnx.Module):
         else:
             final_group_sizes = local_group_sizes
         
-        print(f"[DEBUG] Layer {self.layer_id} GMM: final_group_sizes.shape={final_group_sizes.shape}, sum={jnp.sum(final_group_sizes)}")
-        print(f"[DEBUG] Layer {self.layer_id} GMM: final_group_sizes non-zero indices={jnp.nonzero(final_group_sizes, size=16)[0]}")
         print(f"GMM computing with {jnp.sum(final_group_sizes)} tokens across {len(final_group_sizes)} experts")
         
-        print(f"[DEBUG] GMM - Starting wi_0 computation")
-        layer_w0 = gmm_layer(x, w0_kernel, final_group_sizes, selected_experts)
+        global_tracer.print(final_group_sizes, f"gmm_final_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
         
-        print(f"[DEBUG] GMM - Starting wi_1 computation")
-        layer_w1 = gmm_layer(x, w1_kernel, final_group_sizes, selected_experts)
+        layer_w0 = gmm_layer(x, w0_kernel, final_group_sizes, selected_experts, "wi_0")
         
-        print(f"[DEBUG] Layer {self.layer_id} GMM: layer_w0.shape={layer_w0.shape}, layer_w1.shape={layer_w1.shape}")
+        layer_w1 = gmm_layer(x, w1_kernel, final_group_sizes, selected_experts, "wi_1")
         
-        print(f"[DEBUG] GMM - Computing activation and multiplication")
+        
         layer_act = jax.nn.silu(layer_w0)
-        print(f"[DEBUG] GMM - layer_act stats: min={jnp.min(layer_act):.6f}, max={jnp.max(layer_act):.6f}, mean={jnp.mean(layer_act):.6f}, std={jnp.std(layer_act):.6f}")
+        
+        global_tracer.print(layer_act, f"gmm_silu_activation", f"moe_compute_layer_id_{self.layer_id}")
         
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
-        print(f"[DEBUG] GMM - intermediate_layer stats: min={jnp.min(intermediate_layer):.6f}, max={jnp.max(intermediate_layer):.6f}, mean={jnp.mean(intermediate_layer):.6f}, std={jnp.std(intermediate_layer):.6f}")
         
-        print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_layer.shape={intermediate_layer.shape}")
+        global_tracer.print(intermediate_layer, f"gmm_intermediate_layer", f"moe_compute_layer_id_{self.layer_id}")
         
-        print(f"[DEBUG] GMM - Starting wo computation")
-        intermediate_output = gmm_layer(intermediate_layer, wo_kernel, final_group_sizes, selected_experts)
         
-        print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_output.shape={intermediate_output.shape}")
-        print(f"[DEBUG] GMM - final output stats: min={jnp.min(intermediate_output):.6f}, max={jnp.max(intermediate_output):.6f}, mean={jnp.mean(intermediate_output):.6f}, std={jnp.std(intermediate_output):.6f}")
+        intermediate_output = gmm_layer(intermediate_layer, wo_kernel, final_group_sizes, selected_experts, "wo")
+        
+        
+        global_tracer.print(intermediate_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
         
         return intermediate_output
     
     def _result_collection(self, intermediate_output, local_sorted_indices, global_group_sizes, 
                                    expert_shard_id, local_expert_size, original_inputs_first_dim):        
-        print(f"[DEBUG] Collection - intermediate_output.shape={intermediate_output.shape}")
-        print(f"[DEBUG] Collection - intermediate_output stats: min={jnp.min(intermediate_output):.6f}, max={jnp.max(intermediate_output):.6f}, mean={jnp.mean(intermediate_output):.6f}, std={jnp.std(intermediate_output):.6f}")
-        print(f"[DEBUG] Collection - local_sorted_indices.shape={local_sorted_indices.shape}")
-        print(f"[DEBUG] Collection - original_inputs_first_dim={original_inputs_first_dim}")
+        # Add collection input tracers
+        global_tracer.print(intermediate_output, f"collection_input", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(local_sorted_indices, f"collection_local_indices", f"moe_combine_layer_id_{self.layer_id}")
         
         if len(intermediate_output) == 0:
-            return jnp.zeros((original_inputs_first_dim, intermediate_output.shape[-1]), dtype=self.dtype)
+            empty_result = jnp.zeros((original_inputs_first_dim, intermediate_output.shape[-1]), dtype=self.dtype)
+            global_tracer.print(empty_result, f"collection_empty_result", f"moe_combine_layer_id_{self.layer_id}")
+            return empty_result
         
         local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
-        print(f"[DEBUG] Collection - local_output.shape={local_output.shape}")
-        print(f"[DEBUG] Collection - local_output stats: min={jnp.min(local_output):.6f}, max={jnp.max(local_output):.6f}, mean={jnp.mean(local_output):.6f}, std={jnp.std(local_output):.6f}")
+        
+        global_tracer.print(local_output, f"collection_local_output", f"moe_combine_layer_id_{self.layer_id}")
         
         reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1)
-        print(f"[DEBUG] Collection - reshaped_group_sizes={reshaped_group_sizes}")
+        
+        global_tracer.print(reshaped_group_sizes, f"collection_reshaped_sizes", f"moe_combine_layer_id_{self.layer_id}")
         
         result = self._unified_expert_communication(
             local_output, global_group_sizes, None, expert_shard_id,
             local_expert_size, reshaped_group_sizes, is_dispatch=False
         )
         
-        print(f"[DEBUG] Collection - after communication result.shape={result.shape}")
-        print(f"[DEBUG] Collection - after communication stats: min={jnp.min(result):.6f}, max={jnp.max(result):.6f}, mean={jnp.mean(result):.6f}, std={jnp.std(result):.6f}")
+        global_tracer.print(result, f"collection_after_comm", f"moe_combine_layer_id_{self.layer_id}")
         
         if result.shape[0] > original_inputs_first_dim:
             result = result[:original_inputs_first_dim]
-            print(f"[DEBUG] Collection - trimmed to {result.shape}")
+            global_tracer.print(result, f"collection_trimmed", f"moe_combine_layer_id_{self.layer_id}")
         elif result.shape[0] < original_inputs_first_dim:
             padding_size = original_inputs_first_dim - result.shape[0]
             padding = jnp.zeros((padding_size, result.shape[1]), dtype=result.dtype)
             result = jnp.concatenate([result, padding], axis=0)
-            print(f"[DEBUG] Collection - padded to {result.shape}")
+            global_tracer.print(result, f"collection_padded", f"moe_combine_layer_id_{self.layer_id}")
         
-        print(f"[DEBUG] Collection - final result stats: min={jnp.min(result):.6f}, max={jnp.max(result):.6f}, mean={jnp.mean(result):.6f}, std={jnp.std(result):.6f}")
+        
+        global_tracer.print(result, f"collection_final_result", f"moe_combine_layer_id_{self.layer_id}")
         
         return result
 
     def _unpermute_exact(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):        
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: intermediate.shape={intermediate.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: intermediate stats: min={jnp.min(intermediate):.6f}, max={jnp.max(intermediate):.6f}, mean={jnp.mean(intermediate):.6f}, std={jnp.std(intermediate):.6f}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: sorted_selected_experts.shape={sorted_selected_experts.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: weights.shape={weights.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: weights stats: min={jnp.min(weights):.6f}, max={jnp.max(weights):.6f}, mean={jnp.mean(weights):.6f}, std={jnp.std(weights):.6f}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: batch_size={batch_size}, sequence_length={sequence_length}")
+        # Add unpermute input tracers
+        global_tracer.print(intermediate, f"unpermute_input", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(sorted_selected_experts, f"unpermute_sorted_experts", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(weights, f"unpermute_weights", f"moe_combine_layer_id_{self.layer_id}")
         
         unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
         
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: unsort_intermediate.shape={unsort_intermediate.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: unsort_intermediate stats: min={jnp.min(unsort_intermediate):.6f}, max={jnp.max(unsort_intermediate):.6f}, mean={jnp.mean(unsort_intermediate):.6f}, std={jnp.std(unsort_intermediate):.6f}")
+        global_tracer.print(unsort_intermediate, f"unpermute_unsorted", f"moe_combine_layer_id_{self.layer_id}")
         
         reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
         
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights.shape={reshaped_weights.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights stats: min={jnp.min(reshaped_weights):.6f}, max={jnp.max(reshaped_weights):.6f}, mean={jnp.mean(reshaped_weights):.6f}, std={jnp.std(reshaped_weights):.6f}")
+        global_tracer.print(reshaped_weights, f"unpermute_reshaped_weights", f"moe_combine_layer_id_{self.layer_id}")
         
         reshaped_intermediate = jnp.reshape(
             unsort_intermediate,
             (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
         )
         
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate.shape={reshaped_intermediate.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate stats: min={jnp.min(reshaped_intermediate):.6f}, max={jnp.max(reshaped_intermediate):.6f}, mean={jnp.mean(reshaped_intermediate):.6f}, std={jnp.std(reshaped_intermediate):.6f}")
+        global_tracer.print(reshaped_intermediate, f"unpermute_reshaped_intermediate", f"moe_combine_layer_id_{self.layer_id}")
         
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: Starting einsum 'BKE,BK -> BE'")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate.astype(float32) stats: min={jnp.min(reshaped_intermediate.astype(jnp.float32)):.6f}, max={jnp.max(reshaped_intermediate.astype(jnp.float32)):.6f}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights.astype(float32) stats: min={jnp.min(reshaped_weights.astype(jnp.float32)):.6f}, max={jnp.max(reshaped_weights.astype(jnp.float32)):.6f}")
+        # Add einsum input tracers
+        intermediate_f32 = reshaped_intermediate.astype(jnp.float32)
+        weights_f32 = reshaped_weights.astype(jnp.float32)
+        global_tracer.print(intermediate_f32, f"unpermute_intermediate_f32", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(weights_f32, f"unpermute_weights_f32", f"moe_combine_layer_id_{self.layer_id}")
         
         output = jnp.einsum(
             "BKE,BK -> BE",
-            reshaped_intermediate.astype(jnp.float32),
-            reshaped_weights.astype(jnp.float32),
+            intermediate_f32,
+            weights_f32,
             precision=jax.lax.Precision.DEFAULT,
         )
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: einsum output stats: min={jnp.min(output):.6f}, max={jnp.max(output):.6f}, mean={jnp.mean(output):.6f}, std={jnp.std(output):.6f}")
+        
+        global_tracer.print(output, f"unpermute_einsum_output", f"moe_combine_layer_id_{self.layer_id}")
         
         final_output = output.astype(self.dtype)
         
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: final_output.shape={final_output.shape}")
-        print(f"[DEBUG] Layer {self.layer_id} Unpermute: final_output stats: min={jnp.min(final_output):.6f}, max={jnp.max(final_output):.6f}, mean={jnp.mean(final_output):.6f}, std={jnp.std(final_output):.6f}")
+        
+        global_tracer.print(final_output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
         
         return final_output
 

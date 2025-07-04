@@ -284,6 +284,11 @@ class EPMoE(torch.nn.Module):
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - seg_indptr.shape={seg_indptr.shape}")
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - seg_indptr values: {seg_indptr}")
         
+        # Add detailed dispatch tracers to align with JAX
+        global_tracer.print(hidden_states, f"dispatch_input_sorted", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(topk_ids, f"dispatch_topk_ids", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(seg_indptr, f"dispatch_seg_indptr", f"moe_dispatch_layer_id_{self.layer_id}")
+        
         global_tracer.print(reorder_topk_ids, f"reorder_topk_ids", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(src2dst, f"src2dst", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(seg_indptr, f"seg_indptr", f"moe_dispatch_layer_id_{self.layer_id}")
@@ -302,6 +307,9 @@ class EPMoE(torch.nn.Module):
         )
         
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_input.shape={gateup_input.shape}")
+        
+        # Add detailed preprocessing tracers
+        global_tracer.print(gateup_input, f"dispatch_gateup_input_empty", f"moe_dispatch_layer_id_{self.layer_id}")
         
         if self.activation_scheme == "dynamic" and not self.use_block_quant:
             if self.use_per_token_if_dynamic:
@@ -332,6 +340,9 @@ class EPMoE(torch.nn.Module):
         )
         
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_input after PreReorder stats: min={gateup_input.min():.6f}, max={gateup_input.max():.6f}, mean={gateup_input.mean():.6f}, std={gateup_input.std():.6f}")
+        
+        # Add detailed dispatch output tracers
+        global_tracer.print(gateup_input, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(gateup_input, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         
         dispose_tensor(hidden_states)
@@ -365,6 +376,12 @@ class EPMoE(torch.nn.Module):
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - weight_indices_cur_rank={weight_indices_cur_rank}")
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - w13_weight.shape={self.w13_weight.shape}")
         
+        # Add detailed GMM input tracers
+        global_tracer.print(gateup_input, f"gmm_input_x", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(seg_indptr_cur_rank, f"gmm_seg_indptr", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(weight_indices_cur_rank, f"gmm_weight_indices", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(self.w13_weight, f"gmm_w13_kernel", f"moe_compute_layer_id_{self.layer_id}")
+        
         # GroupGemm-0
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - GroupGemm-0 (gate_up projection)")
         gateup_output = self.grouped_gemm_runner(
@@ -388,6 +405,10 @@ class EPMoE(torch.nn.Module):
         
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_output.shape={gateup_output.shape}")
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_output stats: min={gateup_output.min():.6f}, max={gateup_output.max():.6f}, mean={gateup_output.mean():.6f}, std={gateup_output.std():.6f}")
+        
+        # Add detailed GMM wi_0/wi_1 equivalent tracers  
+        global_tracer.print(gateup_output, f"gmm_wi_0_output", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(gateup_output, f"gmm_wi_1_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(gateup_output, f"gateup_output", f"moe_compute_layer_id_{self.layer_id}")
         
         del gateup_input
@@ -441,6 +462,10 @@ class EPMoE(torch.nn.Module):
             
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_input.shape={down_input.shape}")
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_input stats: min={down_input.min():.6f}, max={down_input.max():.6f}, mean={down_input.mean():.6f}, std={down_input.std():.6f}")
+        
+        # Add detailed activation tracers
+        global_tracer.print(down_input, f"gmm_silu_activation", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(down_input, f"gmm_intermediate_layer", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_input, f"down_input", f"moe_compute_layer_id_{self.layer_id}")
         
         del gateup_output
@@ -458,6 +483,10 @@ class EPMoE(torch.nn.Module):
         # GroupGemm-1
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - GroupGemm-1 (down projection)")
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - w2_weight.shape={self.w2_weight.shape}")
+        
+        # Add detailed GMM wo input tracers
+        global_tracer.print(down_input, f"gmm_wo_input", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(self.w2_weight, f"gmm_wo_kernel", f"moe_compute_layer_id_{self.layer_id}")
         
         down_output = torch.empty(
             down_input.shape[0],
@@ -485,15 +514,23 @@ class EPMoE(torch.nn.Module):
         
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_output.shape={down_output.shape}")
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_output stats: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.6f}, std={down_output.std():.6f}")
+        
+        # Add detailed GMM output tracers
+        global_tracer.print(down_output, f"gmm_wo_output", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(down_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
         
-        del down_input
-
         # Simulate compute output for JAX alignment
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
 
         # PostReorder
         print(f"[DEBUG] EPMoE Layer {self.layer_id} - PostReorder step")
+        
+        # Add detailed collection input tracers
+        global_tracer.print(down_output, f"collection_input", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(src2dst, f"collection_src2dst", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(topk_weights, f"collection_topk_weights", f"moe_combine_layer_id_{self.layer_id}")
+        
         output = torch.empty(
             hidden_states_shape, dtype=hidden_states_dtype, device=hidden_states_device
         )
@@ -509,6 +546,11 @@ class EPMoE(torch.nn.Module):
             hidden_states_shape[1],
             BLOCK_SIZE=512,
         )
+        
+        # Add detailed collection output tracers
+        global_tracer.print(output, f"collection_local_output", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(output, f"collection_after_comm", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(output, f"collection_final_result", f"moe_combine_layer_id_{self.layer_id}")
         
         # Simulate collection output for JAX alignment
         global_tracer.print(output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
