@@ -417,6 +417,7 @@ class Qwen3MoeAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
+            is_neox_style=False,
         )
         self.attn = RadixAttention(
             self.num_heads,
@@ -698,7 +699,6 @@ class Qwen3MoeForCausalLM(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        logger.info("================Setting up debug tracer===========")
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
@@ -713,12 +713,10 @@ class Qwen3MoeForCausalLM(nn.Module):
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
         self.logits_processor = LogitsProcessor(config)
-        logger.info("================Setting up debug tracer2===========")
         self._setup_debug_tracer()
 
     def _setup_debug_tracer(self):
         try:
-            print("================Setting up debug tracer===========")
             global_tracer.set_model(self)
         except Exception as e:
             print(f"Warning: Could not setup debug tracer: {str(e)}")
