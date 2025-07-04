@@ -35,13 +35,5 @@ class ForwardBatch:
     positions: jax.Array = None
     # Start position for each sequence in extend mode [batch_size]
     extend_start_loc: jax.Array = None
-    # Total number of tokens across all sequences
-    total_tokens: int = 0
-    # sequences
-    sequences: List[str] = None
-    # prefix string
-    prefix_str: List[str] = None
     # token to kv cache pool
     token_to_kv_pool: ReqToHashKVCachePool = None
-    # current kv_cache
-    current_kv_cache: List[ReqToHashKVCachePool] = None

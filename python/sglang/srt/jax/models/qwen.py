@@ -119,8 +119,7 @@ class QWenAttention(nnx.Module):
         self.attn = Attention(
             num_heads=num_heads,
             scale=head_size**-0.5,
-            rngs=rngs,
-            use_dot_product_attention=False,
+            rngs=rngs
         )
 
     @trace_function(stage="ATTENTION", include_args=False, include_output=True)

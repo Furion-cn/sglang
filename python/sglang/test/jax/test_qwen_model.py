@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import List
 from unittest.mock import patch
 
-import jax
 import jax.numpy as jnp
 from flax import nnx
+
+# from jax_smi import initialise_tracking
 from transformers import AutoTokenizer
 
 from sglang.srt.configs.device_config import DeviceConfig
@@ -35,6 +36,7 @@ class TestQwenModel(unittest.TestCase):
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig()
         self.jax_loader = JAXModelLoader(self.load_config)
+        # initialise_tracking()
 
     def _get_tokenizer(self):
         """Get tokenizer from local path if available, otherwise use HuggingFace"""
@@ -133,17 +135,14 @@ class TestQwenModel(unittest.TestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
 
-        # Create real KV cache using existing JAX implementation
-        current_kv_cache = []
-        for seq_len in seq_lens:
-            kv_cache = ReqToHashKVCachePool(
-                seq_len=max(seq_len + 100, 128),  # Allow room for generation
-                head_num=model_config.num_attention_heads,
-                head_dim=model_config.hidden_size // model_config.num_attention_heads,
-                layer_num=model_config.num_hidden_layers,
-                dtype=jnp.float32
-            )
-            current_kv_cache.append(kv_cache)
+        cache_pool = ReqToHashKVCachePool(
+            head_num=model_config.num_attention_heads,
+            head_dim=model_config.hidden_size // model_config.num_attention_heads,
+            layer_num=model_config.num_hidden_layers,
+            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
+            max_seq_len=128,
+            max_batch_size=20,
+        )
 
         # Create ForwardBatch
         forward_batch = ForwardBatch(
@@ -152,12 +151,10 @@ class TestQwenModel(unittest.TestCase):
             input_ids=input_ids_array,
             seq_lens=seq_lens,
             positions=positions_array,
+            cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32),
+            out_cache_loc=None,
             extend_start_loc=extend_start_loc,
-            total_tokens=len(input_ids_array),
-            sequences=texts.copy(),
-            prefix_str=texts.copy(),
-            token_to_kv_pool=HashKVCache(),
-            current_kv_cache=current_kv_cache
+            token_to_kv_pool=cache_pool,
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
@@ -185,61 +182,51 @@ class TestQwenModel(unittest.TestCase):
 
         return False
 
-    def _update_forward_batch_with_finished_handling(self, forward_batch, next_token_ids, tokenizer, finished_requests, original_indices):
+    def _update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer, finished_requests, original_indices):
         """Update forward batch while handling finished requests"""
         new_input_ids = []
         new_seq_lens = []
-        batch_indices_to_keep = []
         new_original_indices = []
+        new_cache_loc = []
 
+        cache_loc_start_loc = 0
         for batch_idx, seq_len in enumerate(forward_batch.seq_lens):
             orig_idx = original_indices[batch_idx]
-
-            if orig_idx in finished_requests:
-                continue  # Skip finished requests
-
             current_token_id = int(next_token_ids[batch_idx, 0])
-            decoded_token = tokenizer.decode(
-                [current_token_id], skip_special_tokens=False)
-
-            print(
-                f"Request {orig_idx} (batch_idx {batch_idx}): token_id={current_token_id}, decoded='{decoded_token}'")
+            cache_loc = forward_batch.cache_loc[cache_loc_start_loc:
+                                                cache_loc_start_loc + seq_len].tolist()
+            cache_loc_start_loc += seq_len
 
             # Check if this request should finish BEFORE updating sequences
             if self._is_finished(current_token_id, tokenizer):
                 print(
-                    f"🛑 Request {orig_idx} finished with EOS token: {current_token_id} ('{decoded_token}')")
+                    f"🛑 Request {orig_idx} will be removed from batch (token: {current_token_id})")
                 finished_requests.add(orig_idx)
                 continue
 
             # Only update sequences for non-finished requests
             new_input_ids.append(current_token_id)
             new_seq_lens.append(seq_len + 1)
-            batch_indices_to_keep.append(batch_idx)
             new_original_indices.append(orig_idx)
+            new_cache_loc.append(cache_loc)
 
-            # Update prefix
-            if forward_batch.forward_mode == ForwardMode.DECODE:
-                forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
-
-            # Update kv cache
-            forward_batch.token_to_kv_pool.set_kv_cache(
-                forward_batch.prefix_str[batch_idx],
-                forward_batch.current_kv_cache[batch_idx]
-            )
-
-            # Update sequences and print ONLY for continuing requests
-            forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
-            print(
-                f"   → Updated sequence: '{forward_batch.sequences[batch_idx]}'")
-
-        if not batch_indices_to_keep:
+        if len(new_seq_lens) == 0:
             # All requests are finished
-            return None, None
+            return None
 
         # Update batch with only unfinished requests
-        forward_batch.batch_size = len(batch_indices_to_keep)
+        forward_batch.batch_size = len(new_seq_lens)
         forward_batch.seq_lens = jnp.array(new_seq_lens, dtype=jnp.int32)
+
+        # update cache loc
+        out_cache_start_loc = max(
+            item for sublist in new_cache_loc for item in sublist) + 1
+        forward_batch.out_cache_loc = jnp.arange(
+            out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
+        forward_batch.cache_loc = jnp.array([
+            item for i, cache_loc in enumerate(new_cache_loc)
+            for item in cache_loc + [int(forward_batch.out_cache_loc[i])]
+        ], dtype=jnp.int32)
 
         # Update positions for decode mode
         forward_batch.positions = jnp.array(
@@ -252,22 +239,11 @@ class TestQwenModel(unittest.TestCase):
         forward_batch.extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), forward_batch.seq_lens[:-1]]))
 
-        # Update total tokens
-        forward_batch.total_tokens = len(new_input_ids)
-
         # Update forward mode
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE
 
-        # Update other batch-related fields
-        forward_batch.sequences = [forward_batch.sequences[i]
-                                   for i in batch_indices_to_keep]
-        forward_batch.prefix_str = [
-            forward_batch.prefix_str[i] for i in batch_indices_to_keep]
-        forward_batch.current_kv_cache = [
-            forward_batch.current_kv_cache[i] for i in batch_indices_to_keep]
-
-        return batch_indices_to_keep, new_original_indices
+        return new_original_indices
 
     def test_qwen_model_decode(self):
         """Test model with batch processing and EOS handling"""
@@ -344,25 +320,28 @@ class TestQwenModel(unittest.TestCase):
 
                 print(f"Generated tokens: {next_token_ids.tolist()}")
 
+                for batch_idx, token_id in enumerate(next_token_ids):
+                    decoded_token = tokenizer.decode(
+                        int(token_id[0]), skip_special_tokens=False)
+                    final_results[original_indices[batch_idx]
+                                  ]['output'] += decoded_token
+                    print(
+                        f"Request {original_indices[batch_idx]} (batch_idx {batch_idx}): token_id={token_id[0]}, decoded={decoded_token}")
+
                 # Update batch and handle finished requests
-                batch_indices_to_keep, new_original_indices = self._update_forward_batch_with_finished_handling(
+                new_original_indices = self._update_forward_batch(
                     forward_batch, next_token_ids, tokenizer, finished_requests, original_indices)
 
-                # Update final results for active requests
-                if batch_indices_to_keep is not None:
-                    for new_idx, orig_idx in enumerate(new_original_indices):
-                        final_results[orig_idx]['output'] = forward_batch.sequences[new_idx]
+                if new_original_indices is not None:
                     original_indices = new_original_indices
+                else:
+                    forward_batch = None  # All requests finished
 
                 # Handle newly finished requests
                 for orig_idx in range(len(input_texts)):
                     if orig_idx in finished_requests and not final_results[orig_idx]['finished']:
                         final_results[orig_idx]['finished'] = True
                         print(f"✅ Request {orig_idx} completed!")
-
-                # Update forward_batch to None if no active requests
-                if batch_indices_to_keep is None:
-                    forward_batch = None
 
             # Print final results
             print(f"\n🎉 === Final Generation Results ===")
