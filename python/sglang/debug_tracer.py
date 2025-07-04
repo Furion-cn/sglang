@@ -70,10 +70,6 @@ class UnifiedDebugTracer:
     def set_tokenizer(self, tokenizer):
         self._tokenizer = tokenizer
     
-    def set_model_class(self, model_class_name: str):
-        self._model_class_name = model_class_name
-        print(f"Model class set to: {model_class_name}")
-    
     def set_model(self, model_obj, tokenizer=None):
         if hasattr(model_obj, '__class__'):
             class_name = model_obj.__class__.__name__

@@ -716,6 +716,7 @@ class Qwen3MoeForCausalLM(nn.Module):
 
     def _setup_debug_tracer(self):
         try:
+            print("================Setting up debug tracer===========")
             global_tracer.set_model(self)
         except Exception as e:
             print(f"Warning: Could not setup debug tracer: {str(e)}")
