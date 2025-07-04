@@ -418,9 +418,9 @@ class Qwen3MoE(nnx.Module):
         w1_kernel = self.wi_1.value
         wo_kernel = self.wo.value
 
-        print(f"w0 sharding: {w0_kernel.sharding}")
-        print(f"w1 sharding: {w1_kernel.sharding}")
-        print(f"wo sharding: {wo_kernel.sharding}")
+        jax.debug.visualize_array_sharding(w0_kernel)
+        jax.debug.visualize_array_sharding(w1_kernel)
+        jax.debug.visualize_array_sharding(wo_kernel)
         
         # Key understanding: JAX sharding keeps weights in global shape (128) in code, but local_group_sizes is local size (16)
         # Need to expand local_group_sizes to global expert count to match weight shape
