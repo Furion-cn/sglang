@@ -7,6 +7,7 @@ from jax import random
 
 from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
+from functools import partial
 
 
 class Sampler(nnx.Module):
@@ -51,7 +52,6 @@ class Sampler(nnx.Module):
             )
         return batch_next_token_ids
 
-
 def top_k_top_p_min_p_sampling_from_probs_torch(
     probs: jax.Array,
     top_ks: jax.Array,
@@ -61,6 +61,14 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
     rng: nnx.Rngs,
 ):
     """A top-k, top-p and min-p sampling implementation with native pytorch operations."""
+    probs_sort,probs_idx=_sample_part_a(probs,top_ks,top_ps,need_min_p_sampling,min_ps)
+
+    sampled_index = random.categorical(rng, probs_sort).reshape(-1, 1)
+
+    return _sample_part_b(probs_idx,sampled_index)
+
+@partial(jax.jit,static_argnames=('need_min_p_sampling'))
+def _sample_part_a(probs,top_ks,top_ps,need_min_p_sampling:bool,min_ps):
     probs_sort = jnp.sort(
         probs, axis=-1)[:, ::-1]  # Sort and reverse for descending order
     probs_idx = jnp.argsort(probs, axis=-1)[:, ::-1]
@@ -77,9 +85,11 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
         min_p_thresholds = probs_sort[:, 0] * min_ps
         min_p_mask = probs_sort < min_p_thresholds.reshape(-1, 1)
         probs_sort = jnp.where(min_p_mask, 0.0, probs_sort)
+    
+    return probs_sort,probs_idx
 
-    sampled_index = random.categorical(rng, probs_sort).reshape(-1, 1)
+@partial(jax.jit)
+def _sample_part_b(probs_idx,sampled_index):
     probs_idx = probs_idx.astype(jnp.int32)
-    batch_next_token_ids = jnp.take_along_axis(
+    return jnp.take_along_axis(
         probs_idx, axis=1, indices=sampled_index).reshape(-1, 1)
-    return batch_next_token_ids
