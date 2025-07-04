@@ -417,9 +417,9 @@ class Qwen3MoE(nnx.Module):
         w1_kernel = self.wi_1.value
         wo_kernel = self.wo.value
 
-        print(f"w0_kernel sharding: {self.wi_0.sharding}")
-        print(f"w1_kernel sharding: {self.wi_1.sharding}")
-        print(f"wo_kernel sharding: {self.wo.sharding}")
+        print(f"w0_kernel sharding: {self.wi_0.value.shape}")
+        print(f"w1_kernel sharding: {self.wi_1.value.shape}")
+        print(f"wo_kernel sharding: {self.wo.value.shape}")
 
         jax.debug.visualize_array_sharding(self.wi_0.value[0])
         jax.debug.visualize_array_sharding(self.wi_1.value[0])
