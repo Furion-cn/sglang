@@ -417,7 +417,6 @@ class Qwen3MoeAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=False,
         )
         self.attn = RadixAttention(
             self.num_heads,
