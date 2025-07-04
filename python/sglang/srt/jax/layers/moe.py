@@ -299,14 +299,24 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, sorted_selected_experts, top_k_weights, group_sizes, sorted_experts
     
     def _expert_dispatch(self, sorted_inputs, global_group_sizes, sorted_experts, expert_shard_id, local_expert_size):
+        print(f"[DEBUG] Dispatch - sorted_inputs.shape={sorted_inputs.shape}")
+        print(f"[DEBUG] Dispatch - global_group_sizes.shape={global_group_sizes.shape}, values={global_group_sizes}")
+        print(f"[DEBUG] Dispatch - expert_shard_id={expert_shard_id}, local_expert_size={local_expert_size}")
+        
         # global_group_sizes: (num_experts,) -> reshaped: (num_expert_parallelism,)
         reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1)
+        print(f"[DEBUG] Dispatch - reshaped_group_sizes.shape={reshaped_group_sizes.shape}, values={reshaped_group_sizes}")
         
         # Unified communication abstraction
         x, local_sorted_indices, local_group_sizes, selected_experts = self._unified_expert_communication(
             sorted_inputs, global_group_sizes, sorted_experts, expert_shard_id, 
             local_expert_size, reshaped_group_sizes, is_dispatch=True
         )
+        
+        print(f"[DEBUG] Dispatch - output x.shape={x.shape}")
+        print(f"[DEBUG] Dispatch - local_group_sizes.shape={local_group_sizes.shape}, values={local_group_sizes}")
+        print(f"[DEBUG] Dispatch - selected_experts.shape={selected_experts.shape}")
+        print(f"[DEBUG] Dispatch - x stats: min={jnp.min(x):.6f}, max={jnp.max(x):.6f}, mean={jnp.mean(x):.6f}, std={jnp.std(x):.6f}")
         
         return x, local_sorted_indices, local_group_sizes, selected_experts
     
@@ -441,13 +451,23 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
     
     def _gmm_compute_exact(self, x, local_group_sizes, selected_experts):
+        print(f"[DEBUG] GMM - input x.shape={x.shape}, dtype={x.dtype}")
+        print(f"[DEBUG] GMM - x stats: min={jnp.min(x):.6f}, max={jnp.max(x):.6f}, mean={jnp.mean(x):.6f}, std={jnp.std(x):.6f}")
+        print(f"[DEBUG] GMM - local_group_sizes.shape={local_group_sizes.shape}, values={local_group_sizes}")
+        print(f"[DEBUG] GMM - selected_experts.shape={selected_experts.shape}, values={selected_experts}")
+        
         def gmm_layer(inputs, kernel, group_sizes, expert_assignments):
-            return jax.lax.ragged_dot(
+            print(f"[DEBUG] GMM ragged_dot - inputs.shape={inputs.shape}, kernel.shape={kernel.shape}")
+            print(f"[DEBUG] GMM ragged_dot - group_sizes.shape={group_sizes.shape}, values={group_sizes}")
+            result = jax.lax.ragged_dot(
                 lhs=inputs,
                 rhs=kernel,
                 group_sizes=group_sizes,
                 preferred_element_type=self.dtype
             )
+            print(f"[DEBUG] GMM ragged_dot - result.shape={result.shape}")
+            print(f"[DEBUG] GMM ragged_dot - result stats: min={jnp.min(result):.6f}, max={jnp.max(result):.6f}, mean={jnp.mean(result):.6f}, std={jnp.std(result):.6f}")
+            return result
         
         w0_kernel = self.wi_0.value
         w1_kernel = self.wi_1.value
@@ -464,14 +484,16 @@ class Qwen3MoE(nnx.Module):
         local_expert_count = len(local_group_sizes)   # local expert count (16)
         
         if local_expert_count != expected_global_experts:
-            print(f"Expanding group_sizes from {local_expert_count} to {expected_global_experts}")
+            print(f"Expanding group_sizes from {local_expert_count} to {expected_global_experts} using mask logic")
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
             experts_per_device = self.experts_per_device
             local_expert_start = expert_shard_id * experts_per_device
             local_expert_end = (expert_shard_id + 1) * experts_per_device
             
-            expanded_group_sizes = jnp.zeros(expected_global_experts, dtype=local_group_sizes.dtype)
+            print(f"[DEBUG] Device {expert_shard_id} handling experts {local_expert_start}:{local_expert_end}")
             
+            # 创建全局mask，只有当前设备负责的experts有非零group_sizes
+            expanded_group_sizes = jnp.zeros(expected_global_experts, dtype=local_group_sizes.dtype)
             expanded_group_sizes = expanded_group_sizes.at[local_expert_start:local_expert_end].set(local_group_sizes)
             
             final_group_sizes = expanded_group_sizes
@@ -479,60 +501,89 @@ class Qwen3MoE(nnx.Module):
             final_group_sizes = local_group_sizes
         
         print(f"[DEBUG] Layer {self.layer_id} GMM: final_group_sizes.shape={final_group_sizes.shape}, sum={jnp.sum(final_group_sizes)}")
+        print(f"[DEBUG] Layer {self.layer_id} GMM: final_group_sizes non-zero indices={jnp.nonzero(final_group_sizes, size=16)[0]}")
         print(f"GMM computing with {jnp.sum(final_group_sizes)} tokens across {len(final_group_sizes)} experts")
         
+        print(f"[DEBUG] GMM - Starting wi_0 computation")
         layer_w0 = gmm_layer(x, w0_kernel, final_group_sizes, selected_experts)
+        
+        print(f"[DEBUG] GMM - Starting wi_1 computation")
         layer_w1 = gmm_layer(x, w1_kernel, final_group_sizes, selected_experts)
         
         print(f"[DEBUG] Layer {self.layer_id} GMM: layer_w0.shape={layer_w0.shape}, layer_w1.shape={layer_w1.shape}")
         
+        print(f"[DEBUG] GMM - Computing activation and multiplication")
         layer_act = jax.nn.silu(layer_w0)
+        print(f"[DEBUG] GMM - layer_act stats: min={jnp.min(layer_act):.6f}, max={jnp.max(layer_act):.6f}, mean={jnp.mean(layer_act):.6f}, std={jnp.std(layer_act):.6f}")
+        
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
+        print(f"[DEBUG] GMM - intermediate_layer stats: min={jnp.min(intermediate_layer):.6f}, max={jnp.max(intermediate_layer):.6f}, mean={jnp.mean(intermediate_layer):.6f}, std={jnp.std(intermediate_layer):.6f}")
         
         print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_layer.shape={intermediate_layer.shape}")
         
+        print(f"[DEBUG] GMM - Starting wo computation")
         intermediate_output = gmm_layer(intermediate_layer, wo_kernel, final_group_sizes, selected_experts)
         
         print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_output.shape={intermediate_output.shape}")
+        print(f"[DEBUG] GMM - final output stats: min={jnp.min(intermediate_output):.6f}, max={jnp.max(intermediate_output):.6f}, mean={jnp.mean(intermediate_output):.6f}, std={jnp.std(intermediate_output):.6f}")
         
         return intermediate_output
     
     def _result_collection(self, intermediate_output, local_sorted_indices, global_group_sizes, 
                                    expert_shard_id, local_expert_size, original_inputs_first_dim):        
+        print(f"[DEBUG] Collection - intermediate_output.shape={intermediate_output.shape}")
+        print(f"[DEBUG] Collection - intermediate_output stats: min={jnp.min(intermediate_output):.6f}, max={jnp.max(intermediate_output):.6f}, mean={jnp.mean(intermediate_output):.6f}, std={jnp.std(intermediate_output):.6f}")
+        print(f"[DEBUG] Collection - local_sorted_indices.shape={local_sorted_indices.shape}")
+        print(f"[DEBUG] Collection - original_inputs_first_dim={original_inputs_first_dim}")
+        
         if len(intermediate_output) == 0:
             return jnp.zeros((original_inputs_first_dim, intermediate_output.shape[-1]), dtype=self.dtype)
         
         local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
+        print(f"[DEBUG] Collection - local_output.shape={local_output.shape}")
+        print(f"[DEBUG] Collection - local_output stats: min={jnp.min(local_output):.6f}, max={jnp.max(local_output):.6f}, mean={jnp.mean(local_output):.6f}, std={jnp.std(local_output):.6f}")
         
         reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1)
+        print(f"[DEBUG] Collection - reshaped_group_sizes={reshaped_group_sizes}")
         
         result = self._unified_expert_communication(
             local_output, global_group_sizes, None, expert_shard_id,
             local_expert_size, reshaped_group_sizes, is_dispatch=False
         )
         
+        print(f"[DEBUG] Collection - after communication result.shape={result.shape}")
+        print(f"[DEBUG] Collection - after communication stats: min={jnp.min(result):.6f}, max={jnp.max(result):.6f}, mean={jnp.mean(result):.6f}, std={jnp.std(result):.6f}")
+        
         if result.shape[0] > original_inputs_first_dim:
             result = result[:original_inputs_first_dim]
+            print(f"[DEBUG] Collection - trimmed to {result.shape}")
         elif result.shape[0] < original_inputs_first_dim:
             padding_size = original_inputs_first_dim - result.shape[0]
             padding = jnp.zeros((padding_size, result.shape[1]), dtype=result.dtype)
             result = jnp.concatenate([result, padding], axis=0)
+            print(f"[DEBUG] Collection - padded to {result.shape}")
+        
+        print(f"[DEBUG] Collection - final result stats: min={jnp.min(result):.6f}, max={jnp.max(result):.6f}, mean={jnp.mean(result):.6f}, std={jnp.std(result):.6f}")
         
         return result
 
     def _unpermute_exact(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):        
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: intermediate.shape={intermediate.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: intermediate stats: min={jnp.min(intermediate):.6f}, max={jnp.max(intermediate):.6f}, mean={jnp.mean(intermediate):.6f}, std={jnp.std(intermediate):.6f}")
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: sorted_selected_experts.shape={sorted_selected_experts.shape}")
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: weights.shape={weights.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: weights stats: min={jnp.min(weights):.6f}, max={jnp.max(weights):.6f}, mean={jnp.mean(weights):.6f}, std={jnp.std(weights):.6f}")
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: batch_size={batch_size}, sequence_length={sequence_length}")
         
         unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
         
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: unsort_intermediate.shape={unsort_intermediate.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: unsort_intermediate stats: min={jnp.min(unsort_intermediate):.6f}, max={jnp.max(unsort_intermediate):.6f}, mean={jnp.mean(unsort_intermediate):.6f}, std={jnp.std(unsort_intermediate):.6f}")
         
         reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
         
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights.shape={reshaped_weights.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights stats: min={jnp.min(reshaped_weights):.6f}, max={jnp.max(reshaped_weights):.6f}, mean={jnp.mean(reshaped_weights):.6f}, std={jnp.std(reshaped_weights):.6f}")
         
         reshaped_intermediate = jnp.reshape(
             unsort_intermediate,
@@ -540,6 +591,11 @@ class Qwen3MoE(nnx.Module):
         )
         
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate.shape={reshaped_intermediate.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate stats: min={jnp.min(reshaped_intermediate):.6f}, max={jnp.max(reshaped_intermediate):.6f}, mean={jnp.mean(reshaped_intermediate):.6f}, std={jnp.std(reshaped_intermediate):.6f}")
+        
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: Starting einsum 'BKE,BK -> BE'")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate.astype(float32) stats: min={jnp.min(reshaped_intermediate.astype(jnp.float32)):.6f}, max={jnp.max(reshaped_intermediate.astype(jnp.float32)):.6f}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights.astype(float32) stats: min={jnp.min(reshaped_weights.astype(jnp.float32)):.6f}, max={jnp.max(reshaped_weights.astype(jnp.float32)):.6f}")
         
         output = jnp.einsum(
             "BKE,BK -> BE",
@@ -547,9 +603,12 @@ class Qwen3MoE(nnx.Module):
             reshaped_weights.astype(jnp.float32),
             precision=jax.lax.Precision.DEFAULT,
         )
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: einsum output stats: min={jnp.min(output):.6f}, max={jnp.max(output):.6f}, mean={jnp.mean(output):.6f}, std={jnp.std(output):.6f}")
+        
         final_output = output.astype(self.dtype)
         
         print(f"[DEBUG] Layer {self.layer_id} Unpermute: final_output.shape={final_output.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: final_output stats: min={jnp.min(final_output):.6f}, max={jnp.max(final_output):.6f}, mean={jnp.mean(final_output):.6f}, std={jnp.std(final_output):.6f}")
         
         return final_output
 
