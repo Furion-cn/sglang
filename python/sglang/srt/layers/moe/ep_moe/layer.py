@@ -227,12 +227,6 @@ class EPMoE(torch.nn.Module):
 
     @trace_function(stage="MOE_SPARSE_FORWARD", include_args=False, include_output=True)
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - forward starting")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - hidden_states.shape={hidden_states.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - hidden_states stats: min={hidden_states.min():.6f}, max={hidden_states.max():.6f}, mean={hidden_states.mean():.6f}, std={hidden_states.std():.6f}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - router_logits.shape={router_logits.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - router_logits stats: min={router_logits.min():.6f}, max={router_logits.max():.6f}, mean={router_logits.mean():.6f}, std={router_logits.std():.6f}")
-        
         global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
         
@@ -249,7 +243,6 @@ class EPMoE(torch.nn.Module):
                 use_per_token_if_dynamic=self.use_per_token_if_dynamic,
             )
 
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - calling select_experts")
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -266,23 +259,12 @@ class EPMoE(torch.nn.Module):
             ),
         )
         
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - topk_weights.shape={topk_weights.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - topk_weights stats: min={topk_weights.min():.6f}, max={topk_weights.max():.6f}, mean={topk_weights.mean():.6f}, std={topk_weights.std():.6f}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - topk_ids.shape={topk_ids.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - topk_ids stats: min={topk_ids.min():.6f}, max={topk_ids.max():.6f}, mean={topk_ids.float().mean():.6f}, std={topk_ids.float().std():.6f}")
-        
         global_tracer.print(topk_ids, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
 
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - calling run_moe_ep_preproess")
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
-        
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - reorder_topk_ids.shape={reorder_topk_ids.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - src2dst.shape={src2dst.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - seg_indptr.shape={seg_indptr.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - seg_indptr values: {seg_indptr}")
         
         # Add detailed dispatch tracers to align with JAX
         global_tracer.print(hidden_states, f"dispatch_input_sorted", f"moe_dispatch_layer_id_{self.layer_id}")
@@ -306,8 +288,6 @@ class EPMoE(torch.nn.Module):
             ),
         )
         
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_input.shape={gateup_input.shape}")
-        
         # Add detailed preprocessing tracers
         global_tracer.print(gateup_input, f"dispatch_gateup_input_empty", f"moe_dispatch_layer_id_{self.layer_id}")
         
@@ -323,7 +303,6 @@ class EPMoE(torch.nn.Module):
                 )
                 self.w13_input_scale = max_value / torch.finfo(self.fp8_dtype).max
 
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - PreReorder step")
         # PreReorder
         pre_reorder_triton_kernel[(hidden_states.shape[0],)](
             hidden_states,
@@ -338,8 +317,6 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
-        
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_input after PreReorder stats: min={gateup_input.min():.6f}, max={gateup_input.max():.6f}, mean={gateup_input.mean():.6f}, std={gateup_input.std():.6f}")
         
         # Add detailed dispatch output tracers
         global_tracer.print(gateup_input, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
@@ -372,10 +349,6 @@ class EPMoE(torch.nn.Module):
             dtype=torch.int64,
         )
         
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - seg_indptr_cur_rank={seg_indptr_cur_rank}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - weight_indices_cur_rank={weight_indices_cur_rank}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - w13_weight.shape={self.w13_weight.shape}")
-        
         # Add detailed GMM input tracers
         global_tracer.print(gateup_input, f"gmm_input_x", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(seg_indptr_cur_rank, f"gmm_seg_indptr", f"moe_compute_layer_id_{self.layer_id}")
@@ -383,7 +356,6 @@ class EPMoE(torch.nn.Module):
         global_tracer.print(self.w13_weight, f"gmm_w13_kernel", f"moe_compute_layer_id_{self.layer_id}")
         
         # GroupGemm-0
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - GroupGemm-0 (gate_up projection)")
         gateup_output = self.grouped_gemm_runner(
             a=gateup_input,
             b=self.w13_weight,
@@ -403,9 +375,6 @@ class EPMoE(torch.nn.Module):
             block_shape=self.block_shape,
         )
         
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_output.shape={gateup_output.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - gateup_output stats: min={gateup_output.min():.6f}, max={gateup_output.max():.6f}, mean={gateup_output.mean():.6f}, std={gateup_output.std():.6f}")
-        
         # Add detailed GMM wi_0/wi_1 equivalent tracers  
         global_tracer.print(gateup_output, f"gmm_wi_0_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(gateup_output, f"gmm_wi_1_output", f"moe_compute_layer_id_{self.layer_id}")
@@ -414,7 +383,6 @@ class EPMoE(torch.nn.Module):
         del gateup_input
 
         # Act
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - Activation step")
         if self.activation_scheme == "dynamic" and not self.use_block_quant:
             self.w2_input_scale = None
             down_input = torch.empty(
@@ -460,9 +428,6 @@ class EPMoE(torch.nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {self.activation=}")
             
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_input.shape={down_input.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_input stats: min={down_input.min():.6f}, max={down_input.max():.6f}, mean={down_input.mean():.6f}, std={down_input.std():.6f}")
-        
         # Add detailed activation tracers
         global_tracer.print(down_input, f"gmm_silu_activation", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_input, f"gmm_intermediate_layer", f"moe_compute_layer_id_{self.layer_id}")
@@ -481,9 +446,6 @@ class EPMoE(torch.nn.Module):
                 )
 
         # GroupGemm-1
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - GroupGemm-1 (down projection)")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - w2_weight.shape={self.w2_weight.shape}")
-        
         # Add detailed GMM wo input tracers
         global_tracer.print(down_input, f"gmm_wo_input", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(self.w2_weight, f"gmm_wo_kernel", f"moe_compute_layer_id_{self.layer_id}")
@@ -512,9 +474,6 @@ class EPMoE(torch.nn.Module):
             block_shape=self.block_shape,
         )
         
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_output.shape={down_output.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - down_output stats: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.6f}, std={down_output.std():.6f}")
-        
         # Add detailed GMM output tracers
         global_tracer.print(down_output, f"gmm_wo_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
@@ -524,8 +483,6 @@ class EPMoE(torch.nn.Module):
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
 
         # PostReorder
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - PostReorder step")
-        
         # Add detailed collection input tracers
         global_tracer.print(down_output, f"collection_input", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(src2dst, f"collection_src2dst", f"moe_combine_layer_id_{self.layer_id}")
@@ -556,8 +513,6 @@ class EPMoE(torch.nn.Module):
         global_tracer.print(output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
         
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - final output.shape={output.shape}")
-        print(f"[DEBUG] EPMoE Layer {self.layer_id} - final output stats: min={output.min():.6f}, max={output.max():.6f}, mean={output.mean():.6f}, std={output.std():.6f}")
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return output
@@ -1061,38 +1016,24 @@ class DeepEPMoE(EPMoE):
         num_recv_tokens_per_expert: List[int],
         forward_mode: ForwardMode,
     ):
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - forward starting")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - hidden_states.shape={hidden_states.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - hidden_states stats: min={hidden_states.min():.6f}, max={hidden_states.max():.6f}, mean={hidden_states.mean():.6f}, std={hidden_states.std():.6f}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - topk_idx.shape={topk_idx.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - topk_weights.shape={topk_weights.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - expected_m={expected_m}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - num_recv_tokens_per_expert={num_recv_tokens_per_expert}")
-        
         global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(topk_idx, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
         
         resolved_deepep_mode = self.deepep_mode.resolve(forward_mode)
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - resolved_deepep_mode={resolved_deepep_mode}")
         
         if resolved_deepep_mode == DeepEPMode.normal:
             if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
-                print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - using forward_deepgemm_contiguous")
                 result = self.forward_deepgemm_contiguous(
                     hidden_states, topk_idx, topk_weights, num_recv_tokens_per_expert
                 )
             else:
-                print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - using forward_normal")
                 result = self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:
-            print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - using forward_deepgemm_masked")
             result = self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
             
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - final result.shape={result.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - final result stats: min={result.min():.6f}, max={result.max():.6f}, mean={result.mean():.6f}, std={result.std():.6f}")
         global_tracer.print(result, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return result
@@ -1103,10 +1044,8 @@ class DeepEPMoE(EPMoE):
         reorder_topk_ids: torch.Tensor,
         seg_indptr: torch.Tensor,
     ):
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - forward_normal starting")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - hidden_states.shape={hidden_states.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - seg_indptr.shape={seg_indptr.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - seg_indptr={seg_indptr}")
+        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(seg_indptr, f"seg_indptr", f"moe_sparse_layer_id_{self.layer_id}")
         
         hidden_states_dtype = hidden_states.dtype
         hidden_states_device = hidden_states.device
@@ -1132,11 +1071,7 @@ class DeepEPMoE(EPMoE):
             dtype=torch.int64,
         )
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - w13_weight.shape={self.w13_weight.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - num_experts_per_partition={self.num_experts_per_partition}")
-
         # GroupGemm-0
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - GroupGemm-0 starting")
         if hidden_states.shape[0] > 0:
             gateup_output = self.grouped_gemm_runner(
                 a=hidden_states,
@@ -1164,12 +1099,9 @@ class DeepEPMoE(EPMoE):
                 dtype=hidden_states.dtype,
             )
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gateup_output.shape={gateup_output.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gateup_output stats: min={gateup_output.min():.6f}, max={gateup_output.max():.6f}, mean={gateup_output.mean():.6f}, std={gateup_output.std():.6f}")
         global_tracer.print(gateup_output, f"gateup_output", f"moe_compute_layer_id_{self.layer_id}")
-
+        
         # Act
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - Activation step")
         down_input = torch.empty(
             gateup_output.shape[0],
             gateup_output.shape[1] // 2,
@@ -1197,16 +1129,11 @@ class DeepEPMoE(EPMoE):
         else:
             raise ValueError(f"Unsupported activation: {self.activation=}")
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_input.shape={down_input.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_input stats: min={down_input.min():.6f}, max={down_input.max():.6f}, mean={down_input.mean():.6f}, std={down_input.std():.6f}")
         global_tracer.print(down_input, f"down_input", f"moe_compute_layer_id_{self.layer_id}")
 
         del gateup_output
 
         # GroupGemm-1
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - GroupGemm-1 starting")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - w2_weight.shape={self.w2_weight.shape}")
-        
         down_output = torch.empty(
             down_input.shape[0],
             self.w2_weight.shape[1],
@@ -1232,11 +1159,7 @@ class DeepEPMoE(EPMoE):
                 block_shape=self.block_shape,
             )
             
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_output.shape={down_output.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_output stats: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.6f}, std={down_output.std():.6f}")
         global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
-        
-        # Simulate compute output for JAX alignment  
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         
         return down_output
@@ -1248,12 +1171,11 @@ class DeepEPMoE(EPMoE):
         topk_weights,
         num_recv_tokens_per_expert: List[int],
     ):
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - forward_deepgemm_contiguous starting")
-        
         hidden_states_fp8, hidden_states_scale = hidden_states_fp8
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - hidden_states_fp8.shape={hidden_states_fp8.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - hidden_states_scale.shape={hidden_states_scale.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - num_recv_tokens_per_expert={num_recv_tokens_per_expert}")
+        
+        global_tracer.print(hidden_states_fp8, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(topk_idx, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
         
         assert self.quant_method is not None
         assert self.activation == "silu"
@@ -1265,8 +1187,6 @@ class DeepEPMoE(EPMoE):
         M, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
         scale_block_size = 128
-
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - all_tokens={all_tokens}, M={M}, K={K}, N={N}")
 
         hidden_states_fp8_shape = hidden_states_fp8.shape
         hidden_states_fp8_device = hidden_states_fp8.device
@@ -1297,7 +1217,6 @@ class DeepEPMoE(EPMoE):
         ).cuda(non_blocking=True)
         expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling ep_scatter")
         ep_scatter(
             hidden_states_fp8,
             hidden_states_scale,
@@ -1311,7 +1230,6 @@ class DeepEPMoE(EPMoE):
         )
         dispose_tensor(hidden_states_fp8)
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - ep_scatter done, input_tensor[0].shape={input_tensor[0].shape}")
         global_tracer.print(input_tensor[0], f"scattered_input", f"moe_dispatch_layer_id_{self.layer_id}")
 
         gateup_output = torch.empty(
@@ -1321,14 +1239,11 @@ class DeepEPMoE(EPMoE):
         )
         input_tensor[1] = tma_align_input_scale(input_tensor[1])
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling grouped_gemm_nt_f8f8bf16_contig for gate_up")
         deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
             input_tensor, self.w13_weight_fp8, gateup_output, m_indices
         )
         del input_tensor
-        
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gateup_output.shape={gateup_output.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gateup_output stats: min={gateup_output.min():.6f}, max={gateup_output.max():.6f}, mean={gateup_output.mean():.6f}, std={gateup_output.std():.6f}")
+
         global_tracer.print(gateup_output, f"gateup_output", f"moe_compute_layer_id_{self.layer_id}")
         
         down_input = torch.empty(
@@ -1340,12 +1255,9 @@ class DeepEPMoE(EPMoE):
             dtype=torch.bfloat16,
         )
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling silu_and_mul")
         silu_and_mul(gateup_output.view(-1, N), down_input)
         del gateup_output
-        
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_input.shape={down_input.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_input stats: min={down_input.min():.6f}, max={down_input.max():.6f}, mean={down_input.mean():.6f}, std={down_input.std():.6f}")
+
         global_tracer.print(down_input, f"down_input", f"moe_compute_layer_id_{self.layer_id}")
         
         down_output = torch.empty(
@@ -1359,17 +1271,13 @@ class DeepEPMoE(EPMoE):
         del down_input
         down_input_scale = tma_align_input_scale(down_input_scale)
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling grouped_gemm_nt_f8f8bf16_contig for down")
         deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
             (down_input_fp8, down_input_scale),
             self.w2_weight_fp8,
             down_output,
             m_indices,
         )
-        del down_input_fp8, down_input_scale
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_output.shape={down_output.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_output stats: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.6f}, std={down_output.std():.6f}")
         global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
 
         gather_out = torch.empty(
@@ -1378,17 +1286,13 @@ class DeepEPMoE(EPMoE):
             dtype=torch.bfloat16,
         )
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling ep_gather")
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gather_out.shape={gather_out.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gather_out stats: min={gather_out.min():.6f}, max={gather_out.max():.6f}, mean={gather_out.mean():.6f}, std={gather_out.std():.6f}")
         global_tracer.print(gather_out, f"gather_out", f"moe_combine_layer_id_{self.layer_id}")
-
-        # Simulate collection and unpermute outputs for JAX alignment
         global_tracer.print(gather_out, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(gather_out, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-
+        global_tracer.print(gather_out, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
+        
         return gather_out
 
     def forward_deepgemm_masked(
@@ -1397,9 +1301,8 @@ class DeepEPMoE(EPMoE):
         masked_m: torch.Tensor,
         expected_m: int,
     ):
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - forward_deepgemm_masked starting")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - masked_m.shape={masked_m.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - expected_m={expected_m}")
+        global_tracer.print(hidden_states_fp8[0], f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(masked_m, f"masked_m", f"moe_sparse_layer_id_{self.layer_id}")
         
         assert self.quant_method is not None
         assert self.activation == "silu"
@@ -1409,13 +1312,10 @@ class DeepEPMoE(EPMoE):
         n = self.w13_weight.size(1)
         expected_m = min(expected_m, m)
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - num_groups={num_groups}, m={m}, k={k}, n={n}, expected_m={expected_m}")
-        
         gateup_output = torch.empty(
             (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
         )
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling grouped_gemm_nt_f8f8bf16_masked for gate_up")
         deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_masked(
             hidden_states_fp8,
             self.w13_weight_fp8,
@@ -1426,8 +1326,6 @@ class DeepEPMoE(EPMoE):
         )
         dispose_tensor(hidden_states_fp8[0])
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gateup_output.shape={gateup_output.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - gateup_output stats: min={gateup_output.min():.6f}, max={gateup_output.max():.6f}, mean={gateup_output.mean():.6f}, std={gateup_output.std():.6f}")
         global_tracer.print(gateup_output, f"gateup_output", f"moe_compute_layer_id_{self.layer_id}")
 
         # Act
@@ -1451,7 +1349,6 @@ class DeepEPMoE(EPMoE):
             dtype=torch.float32,
         )
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling silu_and_mul_masked_post_quant_fwd")
         silu_and_mul_masked_post_quant_fwd(
             gateup_output,
             down_input,
@@ -1462,8 +1359,6 @@ class DeepEPMoE(EPMoE):
         )
         del gateup_output
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_input.shape={down_input.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_input stats: min={down_input.min():.6f}, max={down_input.max():.6f}, mean={down_input.mean():.6f}, std={down_input.std():.6f}")
         global_tracer.print(down_input, f"down_input", f"moe_compute_layer_id_{self.layer_id}")
 
         # GroupGemm-1
@@ -1482,7 +1377,6 @@ class DeepEPMoE(EPMoE):
             (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
         )
         
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - calling grouped_gemm_nt_f8f8bf16_masked for down")
         deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_masked(
             down_input_fp8,
             self.w2_weight_fp8,
@@ -1492,15 +1386,12 @@ class DeepEPMoE(EPMoE):
             recipe=(1, 128, 128) if deep_gemm_wrapper.DEEPGEMM_V202506 else None,
         )
 
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_output.shape={down_output.shape}")
-        print(f"[DEBUG] DeepEPMoE Layer {self.layer_id} - down_output stats: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.6f}, std={down_output.std():.6f}")
         global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
-
-        # Simulate compute, collection and unpermute outputs for JAX alignment
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(down_output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-
+        global_tracer.print(down_output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
+        
         return down_output
 
 
