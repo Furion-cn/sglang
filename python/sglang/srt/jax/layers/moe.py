@@ -453,6 +453,11 @@ class Qwen3MoE(nnx.Module):
         w1_kernel = self.wi_1.value
         wo_kernel = self.wo.value
         
+        print(f"[DEBUG] Layer {self.layer_id} GMM: x.shape={x.shape}, local_group_sizes.shape={local_group_sizes.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} GMM: w0_kernel.shape={w0_kernel.shape}, w1_kernel.shape={w1_kernel.shape}, wo_kernel.shape={wo_kernel.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} GMM: local_group_sizes={local_group_sizes}")
+        print(f"[DEBUG] Layer {self.layer_id} GMM: local_group_sizes sum={jnp.sum(local_group_sizes)}")
+        
         # Key understanding: JAX sharding keeps weights in global shape (128) in code, but local_group_sizes is local size (16)
         # Need to expand local_group_sizes to global expert count to match weight shape
         expected_global_experts = w0_kernel.shape[0]  # global expert count (128)
@@ -473,15 +478,22 @@ class Qwen3MoE(nnx.Module):
         else:
             final_group_sizes = local_group_sizes
         
+        print(f"[DEBUG] Layer {self.layer_id} GMM: final_group_sizes.shape={final_group_sizes.shape}, sum={jnp.sum(final_group_sizes)}")
         print(f"GMM computing with {jnp.sum(final_group_sizes)} tokens across {len(final_group_sizes)} experts")
         
         layer_w0 = gmm_layer(x, w0_kernel, final_group_sizes, selected_experts)
         layer_w1 = gmm_layer(x, w1_kernel, final_group_sizes, selected_experts)
         
+        print(f"[DEBUG] Layer {self.layer_id} GMM: layer_w0.shape={layer_w0.shape}, layer_w1.shape={layer_w1.shape}")
+        
         layer_act = jax.nn.silu(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
         
+        print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_layer.shape={intermediate_layer.shape}")
+        
         intermediate_output = gmm_layer(intermediate_layer, wo_kernel, final_group_sizes, selected_experts)
+        
+        print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_output.shape={intermediate_output.shape}")
         
         return intermediate_output
     
@@ -509,14 +521,25 @@ class Qwen3MoE(nnx.Module):
         return result
 
     def _unpermute_exact(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):        
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: intermediate.shape={intermediate.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: sorted_selected_experts.shape={sorted_selected_experts.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: weights.shape={weights.shape}")
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: batch_size={batch_size}, sequence_length={sequence_length}")
+        
         unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
         
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: unsort_intermediate.shape={unsort_intermediate.shape}")
+        
         reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+        
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_weights.shape={reshaped_weights.shape}")
         
         reshaped_intermediate = jnp.reshape(
             unsort_intermediate,
             (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
         )
+        
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: reshaped_intermediate.shape={reshaped_intermediate.shape}")
         
         output = jnp.einsum(
             "BKE,BK -> BE",
@@ -525,6 +548,8 @@ class Qwen3MoE(nnx.Module):
             precision=jax.lax.Precision.DEFAULT,
         )
         final_output = output.astype(self.dtype)
+        
+        print(f"[DEBUG] Layer {self.layer_id} Unpermute: final_output.shape={final_output.shape}")
         
         return final_output
 
