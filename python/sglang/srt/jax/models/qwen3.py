@@ -64,7 +64,7 @@ class QWen3Attention(nnx.Module):
             rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
             base=rope_theta,
-            is_neox_style=False,
+            is_neox_style=True,
             dtype=jnp.bfloat16,
         )
 

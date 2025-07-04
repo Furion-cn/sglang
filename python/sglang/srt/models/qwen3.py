@@ -102,7 +102,7 @@ class Qwen3Attention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=False,
+            is_neox_style=True,
         )
         self.attn = RadixAttention(
             self.num_heads,
