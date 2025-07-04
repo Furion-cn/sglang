@@ -4,7 +4,7 @@ from typing import List
 
 import jax
 
-from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 
 
 class ForwardMode(IntEnum):

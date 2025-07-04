@@ -14,7 +14,7 @@ from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.jax.layers.sampler import Sampler
-from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
@@ -160,27 +160,119 @@ class TestQwenModel(unittest.TestCase):
         return input_ids_array, actual_seq_lens, forward_batch
 
     def _is_finished(self, token_id, tokenizer):
-        """Check if token is an end-of-sequence token using sglang's standard logic"""
-        # Standard EOS token check
-        if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
-            if token_id == tokenizer.eos_token_id:
-                return True
+        """Check if a token indicates the end of generation"""
+        return (token_id == tokenizer.eos_token_id or
+                token_id == 151643 or  # Common stop token
+                token_id == 151645)    # Another common stop token
 
-        # Check additional stop token ids (this is where Qwen's special tokens would be)
-        if hasattr(tokenizer, 'additional_stop_token_ids') and tokenizer.additional_stop_token_ids:
-            if token_id in tokenizer.additional_stop_token_ids:
-                return True
+    def _generate_random_questions(self, batch_size: int) -> list[str]:
+        """
+        生成指定数量的随机问题，用于批量性能测试
 
-        # Fallback: Check for known Qwen stop tokens if additional_stop_token_ids is not set
-        # This covers the case where the tokenizer doesn't configure additional_stop_token_ids properly
-        qwen_stop_token_ids = [
-            151643,  # <|endoftext|>
-            151645,  # <|im_end|>
+        Args:
+            batch_size: 需要生成的问题数量
+
+        Returns:
+            包含随机问题的列表
+        """
+        import random
+
+        # 预定义的问题模板
+        question_templates = [
+            # 数学问题
+            "What is {} + {}?",
+            "Calculate {} * {} =",
+            "Solve {} - {} =",
+            "What is {} divided by {}?",
+
+            # 知识问答
+            "The capital of {} is",
+            "What is the population of {}?",
+            "Tell me about the history of {}",
+            "What language is spoken in {}?",
+
+            # 科学问题
+            "Explain the concept of {}",
+            "What is the formula for {}?",
+            "How does {} work?",
+            "What are the properties of {}?",
+
+            # 编程问题
+            "Write a {} function in Python",
+            "How to implement {} algorithm?",
+            "What is {} in programming?",
+            "Explain {} design pattern",
+
+            # 哲学问题
+            "What is the meaning of {}?",
+            "Discuss the philosophy of {}",
+            "What are the ethics of {}?",
+            "How does {} affect society?",
+
+            # 中文问题
+            "请解释{}的含义",
+            "{}有什么作用？",
+            "如何理解{}这个概念？",
+            "{}的历史背景是什么？",
+            "描述一下{}的特点",
+
+            # 简单对话
+            "Hello, how are you",
+            "What's your favorite {}?",
+            "Can you help me with {}?",
+            "I want to learn about {}",
+            "Please tell me about {}",
         ]
-        if token_id in qwen_stop_token_ids:
-            return True
 
-        return False
+        # 填充词汇
+        fill_words = [
+            # 国家/城市
+            "France", "China", "Japan", "Germany", "Brazil", "India", "Australia", "Canada",
+            "Beijing", "Tokyo", "London", "Paris", "New York", "Sydney", "Berlin", "Moscow",
+
+            # 科学概念
+            "gravity", "photosynthesis", "evolution", "quantum mechanics", "relativity",
+            "DNA", "atoms", "molecules", "electricity", "magnetism", "thermodynamics",
+
+            # 编程概念
+            "recursion", "inheritance", "polymorphism", "encapsulation", "algorithm",
+            "database", "machine learning", "artificial intelligence", "blockchain",
+
+            # 抽象概念
+            "happiness", "justice", "freedom", "love", "truth", "beauty", "wisdom",
+            "technology", "progress", "innovation", "creativity", "sustainability",
+
+            # 中文概念
+            "道德", "智慧", "仁义", "礼仪", "文化", "传统", "和谐", "平衡",
+            "自然", "科学", "技术", "教育", "艺术", "音乐", "文学", "历史",
+
+            # 随机数字
+            "5", "10", "25", "100", "1000", "2024", "42", "365", "7", "12",
+        ]
+
+        questions = []
+        for i in range(batch_size):
+            # 随机选择模板
+            template = random.choice(question_templates)
+
+            # 根据模板填充内容
+            if "{}" in template:
+                # 计算需要填充的参数数量
+                param_count = template.count("{}")
+                fill_params = random.sample(
+                    fill_words, min(param_count, len(fill_words)))
+
+                try:
+                    question = template.format(*fill_params)
+                except (IndexError, ValueError):
+                    # 如果格式化失败，使用简单的模板
+                    question = f"Question {i+1}: Tell me about {random.choice(fill_words)}"
+            else:
+                question = template
+
+            questions.append(question)
+
+        return questions
 
     def _update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer, finished_requests, original_indices):
         """Update forward batch while handling finished requests"""
@@ -245,38 +337,52 @@ class TestQwenModel(unittest.TestCase):
 
         return new_original_indices
 
-    def test_qwen_model_decode(self):
-        """Test model with batch processing and EOS handling"""
+    def test_qwen_model_decode(self, batch_size: int = None):
+        """
+        Test Qwen model generation with configurable batch size
+
+        Args:
+            batch_size: Number of questions to generate for testing.
+                       If None, uses the default small set.
+        """
+        print("🧪 Testing Qwen model generation...")
         model = self._setup_model()
         jax_profiling_dir = os.environ.get(
             "JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
+        batch_size = int(os.environ.get("BATCH_SIZE", 10))
         with self.mesh, jax_trace_context(jax_profiling_dir):
             sampler = Sampler(rngs=nnx.Rngs(0))
             tokenizer = self._get_tokenizer()
 
-            # Multiple input texts to test batch processing and EOS handling
-            input_texts = [
-                "The capital of France is",
-                "What is 2+2?",
-                "Hello, how are you",
-                "道可道，非常道。请阐述这句话的哲学含义",
-                "天地不仁，以万物为刍狗。请解释这句话的深层含义",
-                "请解释道德经中无为而治的思想",
-            ]
+            # Generate input texts based on batch_size
+            input_texts = self._generate_random_questions(batch_size)
+            print(
+                f"\n🚀 Generated {batch_size} random questions for batch testing")
 
-            print(f"\n🚀 Starting generation with {len(input_texts)} requests:")
-            for i, text in enumerate(input_texts):
-                print(f"   Request {i}: '{text}'")
-                print(f"   Encoded: {tokenizer.encode(text)}")
+            print(f"\n📊 Batch Configuration:")
+            print(f"   Total requests: {len(input_texts)}")
+            print(f"   Batch size: {len(input_texts)}")
+
+            # 打印前几个问题作为示例
+            print(f"\n📝 Sample questions:")
+            for i, text in enumerate(input_texts[:min(5, len(input_texts))]):
+                print(f"   {i+1}: '{text}'")
+            if len(input_texts) > 5:
+                print(f"   ... and {len(input_texts) - 5} more questions")
+
+            # 开始计时
+            import time
+            start_time = time.time()
 
             input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
                 model.config, input_texts, tokenizer)
 
-            print(f"\nBatch size: {len(input_texts)}")
-            print(f"Actual sequence lengths: {actual_seq_lens}")
-            print(f"Input tokens shape: {input_ids_array.shape}")
-            print(f"Model vocab size: {model.config.vocab_size}")
-            print(f"Tokenizer EOS token ID: {tokenizer.eos_token_id}")
+            print(f"\n⚙️  Batch Processing Info:")
+            print(f"   Input tokens shape: {input_ids_array.shape}")
+            print(
+                f"   Actual sequence lengths: {actual_seq_lens[:10]}{'...' if len(actual_seq_lens) > 10 else ''}")
+            print(f"   Model vocab size: {model.config.vocab_size}")
+            print(f"   Tokenizer EOS token ID: {tokenizer.eos_token_id}")
 
             # Keep track of finished requests and their final results
             finished_requests = set()
@@ -292,15 +398,19 @@ class TestQwenModel(unittest.TestCase):
                     'finished': False
                 }
 
-            max_iterations = 30  # Reduced for testing
+            max_iterations = 15 if batch_size and batch_size > 10 else 30
+            print(
+                f"\n🔄 Starting generation (max {max_iterations} iterations)...")
+
             for iteration in range(max_iterations):
                 if forward_batch is None:
-                    print("\n🏁 All requests finished!")
+                    print(
+                        f"\n🏁 All requests finished at iteration {iteration}!")
                     break
 
-                print(f"\n--- Iteration {iteration + 1} ---")
-                print(f"Active requests: {forward_batch.batch_size}")
-                print(f"Original indices: {original_indices}")
+                if iteration % 5 == 0 or len(input_texts) <= 10:  # 减少大批量时的输出
+                    print(f"--- Iteration {iteration + 1} ---")
+                    print(f"Active requests: {forward_batch.batch_size}")
 
                 # Forward pass
                 y = model(forward_batch.input_ids,
@@ -318,15 +428,20 @@ class TestQwenModel(unittest.TestCase):
                         vocab_size=model.config.vocab_size,
                     ))
 
-                print(f"Generated tokens: {next_token_ids.tolist()}")
+                # 只为小批量打印详细信息
+                if len(input_texts) <= 10 and (iteration % 5 == 0):
+                    print(f"Generated tokens: {next_token_ids.tolist()}")
 
                 for batch_idx, token_id in enumerate(next_token_ids):
                     decoded_token = tokenizer.decode(
                         int(token_id[0]), skip_special_tokens=False)
                     final_results[original_indices[batch_idx]
                                   ]['output'] += decoded_token
-                    print(
-                        f"Request {original_indices[batch_idx]} (batch_idx {batch_idx}): token_id={token_id[0]}, decoded={decoded_token}")
+
+                    # 只为小批量打印详细信息
+                    if len(input_texts) <= 10 and (iteration % 5 == 0):
+                        print(
+                            f"Request {original_indices[batch_idx]} (batch_idx {batch_idx}): token_id={token_id[0]}, decoded={decoded_token}")
 
                 # Update batch and handle finished requests
                 new_original_indices = self._update_forward_batch(
@@ -337,20 +452,60 @@ class TestQwenModel(unittest.TestCase):
                 else:
                     forward_batch = None  # All requests finished
 
-                # Handle newly finished requests
-                for orig_idx in range(len(input_texts)):
-                    if orig_idx in finished_requests and not final_results[orig_idx]['finished']:
-                        final_results[orig_idx]['finished'] = True
-                        print(f"✅ Request {orig_idx} completed!")
+                # Handle newly finished requests (只为小批量打印)
+                if len(input_texts) <= 10:
+                    for orig_idx in range(len(input_texts)):
+                        if orig_idx in finished_requests and not final_results[orig_idx]['finished']:
+                            final_results[orig_idx]['finished'] = True
+                            print(f"✅ Request {orig_idx} completed!")
+                else:
+                    # 批量更新 finished 状态
+                    for orig_idx in range(len(input_texts)):
+                        if orig_idx in finished_requests:
+                            final_results[orig_idx]['finished'] = True
 
-            # Print final results
-            print(f"\n🎉 === Final Generation Results ===")
-            for i in range(len(input_texts)):
-                result = final_results[i]
-                status = "✅ Finished" if result['finished'] else "⏰ Max iterations reached"
-                print(f"\nRequest {i} ({status}):")
-                print(f"  Input:  '{result['input']}'")
-                print(f"  Output: '{result['output']}'")
+            # 计算总时间
+            end_time = time.time()
+            total_time = end_time - start_time
+
+            # 统计结果
+            finished_count = sum(
+                1 for r in final_results.values() if r['finished'])
+            avg_output_length = sum(
+                len(r['output']) for r in final_results.values()) / len(final_results)
+
+            print(f"\n🎉 === Generation Results Summary ===")
+            print(f"📊 Performance Metrics:")
+            print(f"   Total time: {total_time:.2f} seconds")
+            print(f"   Requests processed: {len(input_texts)}")
+            print(f"   Requests finished: {finished_count}/{len(input_texts)}")
+            print(
+                f"   Average output length: {avg_output_length:.1f} characters")
+            print(
+                f"   Throughput: {len(input_texts)/total_time:.2f} requests/second")
+            print(
+                f"   Time per request: {total_time/len(input_texts)*1000:.2f} ms")
+
+            # Print detailed results for small batches
+            if len(input_texts) <= 10:
+                print(f"\n📝 Detailed Results:")
+                for i in range(len(input_texts)):
+                    result = final_results[i]
+                    status = "✅ Finished" if result['finished'] else "⏰ Max iterations reached"
+                    print(f"\nRequest {i} ({status}):")
+                    print(f"  Input:  '{result['input']}'")
+                    print(f"  Output: '{result['output']}'")
+            else:
+                # 只显示几个示例
+                print(f"\n📝 Sample Results (first 3):")
+                for i in range(min(3, len(input_texts))):
+                    result = final_results[i]
+                    status = "✅ Finished" if result['finished'] else "⏰ Max iterations"
+                    print(f"\nRequest {i} ({status}):")
+                    print(
+                        f"  Input:  '{result['input'][:50]}{'...' if len(result['input']) > 50 else ''}'")
+                    print(
+                        f"  Output: '{result['output'][:100]}{'...' if len(result['output']) > 100 else ''}'")
 
             # Verify shapes for the test
             self.assertEqual(len(final_results), len(input_texts))
@@ -358,7 +513,13 @@ class TestQwenModel(unittest.TestCase):
                 self.assertIsNotNone(result['output'])
                 self.assertTrue(len(result['output']) >= len(result['input']))
 
-            print(f"\n✅ Test completed successfully!")
+            print(f"\n✅ Batch test completed successfully!")
+            return {
+                'total_time': total_time,
+                'throughput': len(input_texts)/total_time,
+                'finished_count': finished_count,
+                'total_requests': len(input_texts)
+            }
 
     def test_eos_detection(self):
         """Test EOS token detection logic specifically"""

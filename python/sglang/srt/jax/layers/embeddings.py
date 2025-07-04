@@ -146,41 +146,6 @@ class ParallelLMHead(Embed):
         raise RuntimeError("LMHead's weights should be used in the sampler.")
 
 
-@partial(jax.jit, static_argnames=["is_neox_style"])
-def _apply_rotary_emb(
-    x: jax.Array,
-    cos: jax.Array,
-    sin: jax.Array,
-    is_neox_style: bool,
-) -> jax.Array:
-    """
-    Args:
-        x: [num_tokens, num_heads, head_size]
-        cos: [num_tokens, head_size // 2]
-        sin: [num_tokens, head_size // 2]
-        is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
-            positional embeddings.
-    """
-    cos = jnp.expand_dims(cos, axis=-2).astype(x.dtype)
-    sin = jnp.expand_dims(sin, axis=-2).astype(x.dtype)
-    if is_neox_style:
-        cos = cos.reshape(*cos.shape[:-1], -1, 1)
-        sin = sin.reshape(*sin.shape[:-1], -1, 1)
-        x = x.reshape(*x.shape[:-1], -1, 2)
-        x1, x2 = jnp.split(x, 2, axis=-1)
-    else:
-        x1 = x[..., ::2]
-        x2 = x[..., 1::2]
-    o1 = x1 * cos - x2 * sin
-    o2 = x2 * cos + x1 * sin
-    if is_neox_style:
-        concatenated = jnp.concatenate((o1, o2), axis=-1)
-        return concatenated.reshape(*concatenated.shape[:-2], -1)
-    else:
-        stacked = jnp.stack((o1, o2), axis=-1)
-        return stacked.reshape(*stacked.shape[:-2], -1)
-
-
 class RotaryEmbedding(nnx.Module):
     """Rotary Position Embedding.
 
@@ -231,26 +196,7 @@ class RotaryEmbedding(nnx.Module):
           a Tuple of jax.Array of shape [B*S, H] which includes the inputs together with
           the rotary position embedding incorporated in it.
         """
-        positions = positions.flatten()
-        num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.take(positions, axis=0)
-        cos, sin = jnp.split(cos_sin, 2, axis=-1)
-
-        query_shape = query.shape
-        query = query.reshape(num_tokens, -1, self.head_size)
-        query_rot = query[..., : self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
-        query = jnp.concatenate((query_rot, query_pass),
-                                axis=-1).reshape(query_shape)
-
-        key_shape = key.shape
-        key = key.reshape(num_tokens, -1, self.head_size)
-        key_rot = key[..., : self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
-        key = jnp.concatenate((key_rot, key_pass), axis=-1).reshape(key_shape)
-        return query, key
+        return rotary_embedding_forward(positions, query, key, self.cos_sin_cache, self.rotary_dim, self.head_size, self.is_neox_style)
 
     def _compute_inv_freq(self, base: Union[int, float]) -> jax.Array:
         """Compute the inverse frequency."""
@@ -271,3 +217,72 @@ class RotaryEmbedding(nnx.Module):
         sin, cos = jnp.sin(freqs), jnp.cos(freqs)
         cache = jnp.concatenate((cos, sin), axis=-1)
         return cache
+
+
+@partial(jax.jit, static_argnames=["rotary_dim", "head_size", "is_neox_style"])
+def rotary_embedding_forward(
+    positions: jax.Array,
+    query: jax.Array,
+    key: jax.Array,
+    cos_sin_cache: jax.Array,
+    rotary_dim: int,
+    head_size: int,
+    is_neox_style: bool,
+) -> Tuple[jax.Array, jax.Array]:
+    """Rotary Position Embedding.
+    """
+    positions = positions.flatten()
+    num_tokens = positions.shape[0]
+    cos_sin = cos_sin_cache.take(positions, axis=0)
+    cos, sin = jnp.split(cos_sin, 2, axis=-1)
+
+    query_shape = query.shape
+    query = query.reshape(num_tokens, -1, head_size)
+    query_rot = query[..., : rotary_dim]
+    query_pass = query[..., rotary_dim:]
+    query_rot = _apply_rotary_emb(query_rot, cos, sin, is_neox_style)
+    query = jnp.concatenate((query_rot, query_pass),
+                            axis=-1).reshape(query_shape)
+
+    key_shape = key.shape
+    key = key.reshape(num_tokens, -1, head_size)
+    key_rot = key[..., : rotary_dim]
+    key_pass = key[..., rotary_dim:]
+    key_rot = _apply_rotary_emb(key_rot, cos, sin, is_neox_style)
+    key = jnp.concatenate((key_rot, key_pass), axis=-1).reshape(key_shape)
+    return query, key
+
+
+@partial(jax.jit, static_argnames=["is_neox_style"])
+def _apply_rotary_emb(
+    x: jax.Array,
+    cos: jax.Array,
+    sin: jax.Array,
+    is_neox_style: bool,
+) -> jax.Array:
+    """
+    Args:
+        x: [num_tokens, num_heads, head_size]
+        cos: [num_tokens, head_size // 2]
+        sin: [num_tokens, head_size // 2]
+        is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
+            positional embeddings.
+    """
+    cos = jnp.expand_dims(cos, axis=-2).astype(x.dtype)
+    sin = jnp.expand_dims(sin, axis=-2).astype(x.dtype)
+    if is_neox_style:
+        cos = cos.reshape(*cos.shape[:-1], -1, 1)
+        sin = sin.reshape(*sin.shape[:-1], -1, 1)
+        x = x.reshape(*x.shape[:-1], -1, 2)
+        x1, x2 = jnp.split(x, 2, axis=-1)
+    else:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    if is_neox_style:
+        concatenated = jnp.concatenate((o1, o2), axis=-1)
+        return concatenated.reshape(*concatenated.shape[:-2], -1)
+    else:
+        stacked = jnp.stack((o1, o2), axis=-1)
+        return stacked.reshape(*stacked.shape[:-2], -1)

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from flax import nnx
-from sglang.srt.jax.mem_cache.hash_kvcache import HashKVCache, ReqToHashKVCachePool
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 from sglang.srt.jax.layers.attention import Attention
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.test.test_utils import CustomTestCase
