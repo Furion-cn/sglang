@@ -236,7 +236,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 print("\n🔄 Test Qwen3 MoE model input and output with JAXModelLoader...")
                 
                 print("\n🟢 Starting debug tracer session...")
-                #global_tracer.start_session()
+                global_tracer.start_session()
                 
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
@@ -244,9 +244,10 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 # Multiple questions to simulate batch > 1 scenario
                 # Use simpler prompts for MoE testing
                 input_texts = [
-                    "The capital of France is",
-                    "What is 2+2?",
-                    "Hello, my name is"
+                    # "The capital of France is",
+                    # "What is 2+2?",
+                    # "Hello, my name is"
+                    "1+1=?",
                 ]
 
                 input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
@@ -259,7 +260,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 print(f"Input tokens: {input_ids_array}")
 
                 with self.mesh:
-                    for i in range(5):  # Reduced iterations for MoE testing
+                    for i in range(1):  # Reduced iterations for MoE testing
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)

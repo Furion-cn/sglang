@@ -64,7 +64,7 @@ class QWen3MoeAttention(nnx.Module):
             rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
             base=rope_theta,
-            is_neox_style=False,
+            is_neox_style=True,
             dtype=jnp.bfloat16,
         )
         self.attn = Attention(
@@ -73,7 +73,7 @@ class QWen3MoeAttention(nnx.Module):
             scale=self.scaling,
         )
 
-    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
+    @trace_function(stage="MOE_ATTENTION_FORWARD", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -165,6 +165,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 use_bias=False,
                 kernel_axes=(None, 'expert'), 
                 dtype=jnp.bfloat16,
+                layer_id=layer_id,
                 rngs=rngs
             )
             self.mlp = Qwen3MoE(
@@ -175,6 +176,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 weight_dtype=jnp.bfloat16,
                 dtype=jnp.bfloat16,
                 expert_axis_name='expert',
+                layer_id=layer_id,
                 rngs=rngs,
             )
             self.is_moe_layer = True
@@ -182,7 +184,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
-    @trace_function(stage="QWen3MoeDecoderLayer", include_args=False, include_output=True)
+    @trace_function(stage="MOE_DECODER_LAYER_FORWARD", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -190,11 +192,16 @@ class QWen3MoeDecoderLayer(nnx.Module):
         forward_batch: ForwardBatch,
         residual: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
+        global_tracer.print(hidden_states, f"decoder_layer_input", f"moe_decoder_layer_id_{self.layer_id}")
+        
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        
+        global_tracer.print(hidden_states, f"input_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_input_norm", f"moe_decoder_layer_id_{self.layer_id}")
         
         hidden_states = self.self_attn(
             positions=positions,
@@ -202,22 +209,20 @@ class QWen3MoeDecoderLayer(nnx.Module):
             forward_batch=forward_batch,
         )
         
+        global_tracer.print(hidden_states, f"self_attn_output", f"moe_decoder_layer_id_{self.layer_id}")
+        
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_post_attn_norm", f"moe_decoder_layer_id_{self.layer_id}")
         
         if self.is_moe_layer:
             print(f"\n[Layer {self.layer_id}] MOE layer is processing...")            
             router_logits = self.moe_gate(hidden_states)            
-            def moe_computation(hidden_states, router_logits):
-                result = self.mlp(hidden_states, router_logits=router_logits)
-                return result
+            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
-            mlp_output = shard_map(
-                moe_computation,
-                mesh=self.mlp.mesh,
-                in_specs=(P(None), P(None)),
-                out_specs=P(None), 
-                check_rep=False, 
-            )(hidden_states, router_logits)
+            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
+            global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
             
             print(f"[Layer {self.layer_id}] MLP output shape: {mlp_output.shape}")
             
@@ -252,7 +257,7 @@ class QWen3MoeModel(nnx.Module):
 
         self.norm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
-    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
+    @trace_function(stage="MOE_TRANSFORMER_FORWARD", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
@@ -401,6 +406,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 nnx.update(self, model_state)
                 print("use unconstrainted model state")
 
+    @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
