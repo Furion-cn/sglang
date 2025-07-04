@@ -73,7 +73,7 @@ class QWen3MoeAttention(nnx.Module):
             scale=self.scaling,
         )
 
-    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
+    @trace_function(stage="MOE_ATTENTION_FORWARD", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -182,7 +182,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
-    @trace_function(stage="QWen3MoeDecoderLayer", include_args=False, include_output=True)
+    @trace_function(stage="MOE_DECODER_LAYER_FORWARD", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -217,6 +217,8 @@ class QWen3MoeDecoderLayer(nnx.Module):
         if self.is_moe_layer:
             print(f"\n[Layer {self.layer_id}] MOE layer is processing...")            
             router_logits = self.moe_gate(hidden_states)            
+            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate")
+            
             def moe_computation(hidden_states, router_logits):
                 result = self.mlp(hidden_states, router_logits=router_logits)
                 return result
@@ -264,7 +266,7 @@ class QWen3MoeModel(nnx.Module):
 
         self.norm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
-    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
+    @trace_function(stage="MOE_TRANSFORMER_FORWARD", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
@@ -413,6 +415,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 nnx.update(self, model_state)
                 print("use unconstrainted model state")
 
+    @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
