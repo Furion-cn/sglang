@@ -88,7 +88,6 @@ class GateLogit(nnx.Module):
             output += bias
             
         return output
-
 class Qwen3MoE(nnx.Module):
     def __init__(self,
                  config,
@@ -421,6 +420,10 @@ class Qwen3MoE(nnx.Module):
         print(f"w0_kernel sharding: {self.wi_0.sharding}")
         print(f"w1_kernel sharding: {self.wi_1.sharding}")
         print(f"wo_kernel sharding: {self.wo.sharding}")
+
+        jax.debug.visualize_array_sharding(self.wi_0.value[0])
+        jax.debug.visualize_array_sharding(self.wi_1.value[0])
+        jax.debug.visualize_array_sharding(self.wo.value[0])
         
         # Key understanding: JAX sharding keeps weights in global shape (128) in code, but local_group_sizes is local size (16)
         # Need to expand local_group_sizes to global expert count to match weight shape
