@@ -170,36 +170,36 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         
-        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer")
+        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
         
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         
-        global_tracer.print(router_logits, f"gate_final_output", f"moe_gate")
-        global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer")
+        global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
+        global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
         
         # Extract top-k for debugging (similar to JAX version)
         top_k_logits, top_k_indices = torch.topk(router_logits, k=self.experts.top_k, dim=-1)
         top_k_weights = torch.softmax(top_k_logits, dim=-1)
         
-        global_tracer.print(top_k_logits, f"top_k_logits", f"moe_sparse_layer")
-        global_tracer.print(top_k_indices, f"top_k_indices", f"moe_sparse_layer")
-        global_tracer.print(top_k_weights, f"top_k_weights", f"moe_sparse_layer")
+        global_tracer.print(top_k_logits, f"top_k_logits", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(top_k_indices, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(top_k_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
         
         # Expert computation
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
         
-        global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute")
+        global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-            global_tracer.print(final_hidden_states, f"moe_after_all_reduce", f"moe_combine")
+            global_tracer.print(final_hidden_states, f"moe_after_all_reduce", f"moe_combine_layer_id_{self.layer_id}")
 
-        global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer")
+        global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -207,15 +207,15 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
-        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer")
+        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
         
         forward_mode = forward_batch.forward_mode
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
             
-            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate")
-            global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer")
+            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
+            global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
 
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
@@ -229,8 +229,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 ),
             )
             
-            global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer")
-            global_tracer.print(topk_idx, f"top_k_indices", f"moe_sparse_layer")
+            global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
+            global_tracer.print(topk_idx, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
         else:
             topk_idx = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -257,7 +257,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 forward_mode=forward_mode,
             )
             
-            global_tracer.print(hidden_states, f"moe_dispatch_output", f"moe_dispatch")
+            global_tracer.print(hidden_states, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
             
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -271,7 +271,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             forward_mode=forward_mode,
         )
         
-        global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute")
+        global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         
         if self.ep_size > 1:
             final_hidden_states = self.deepep_dispatcher.combine(
@@ -281,9 +281,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 forward_mode=forward_mode,
             )
             
-            global_tracer.print(final_hidden_states, f"moe_combine_output", f"moe_combine")
+            global_tracer.print(final_hidden_states, f"moe_combine_output", f"moe_combine_layer_id_{self.layer_id}")
         
-        global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer")
+        global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return final_hidden_states
 

@@ -165,6 +165,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 use_bias=False,
                 kernel_axes=(None, 'expert'), 
                 dtype=jnp.bfloat16,
+                layer_id=layer_id,
                 rngs=rngs
             )
             self.mlp = Qwen3MoE(
@@ -175,6 +176,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 weight_dtype=jnp.bfloat16,
                 dtype=jnp.bfloat16,
                 expert_axis_name='expert',
+                layer_id=layer_id,
                 rngs=rngs,
             )
             self.is_moe_layer = True
@@ -217,7 +219,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
         if self.is_moe_layer:
             print(f"\n[Layer {self.layer_id}] MOE layer is processing...")            
             router_logits = self.moe_gate(hidden_states)            
-            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate")
+            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
             def moe_computation(hidden_states, router_logits):
                 result = self.mlp(hidden_states, router_logits=router_logits)
