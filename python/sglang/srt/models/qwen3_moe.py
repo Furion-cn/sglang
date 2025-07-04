@@ -698,6 +698,7 @@ class Qwen3MoeForCausalLM(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        logger.info("================Setting up debug tracer===========")
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
@@ -712,6 +713,7 @@ class Qwen3MoeForCausalLM(nn.Module):
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
         self.logits_processor = LogitsProcessor(config)
+        logger.info("================Setting up debug tracer2===========")
         self._setup_debug_tracer()
 
     def _setup_debug_tracer(self):
