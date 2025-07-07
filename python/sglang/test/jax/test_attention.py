@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from flax import nnx
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 from sglang.srt.jax.layers.attention import Attention
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_EXTEND,FORWARD_MODE_DECODE
 from sglang.test.test_utils import CustomTestCase
 
 
@@ -39,8 +39,8 @@ def create_forward_batch(seq_lengths, input_ids=None, model_config=None):
             layer_num=model_config["num_hidden_layers"],
             dtype=jnp.bfloat16 if model_config["bf16"] else jnp.float32
         ) for seq_len in seq_lens]
+    # TODO: aolemila
     return ForwardBatch(
-        forward_mode=ForwardMode.EXTEND,
         batch_size=batch_size,
         input_ids=input_ids,
         seq_lens=seq_lens,
@@ -172,7 +172,7 @@ class TestAttention(CustomTestCase):
                               1], (total_tokens, hidden_size))
 
         # Test attention
-        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
+        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
         # Check output shape and properties
         self.assertEqual(output.shape, (total_tokens, hidden_size))
@@ -214,7 +214,7 @@ class TestAttention(CustomTestCase):
         # JAX attention
         jax_attention = Attention(num_heads=num_heads, scale=scale)
         jax_output = jax_attention(
-            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True)
+            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
         # Create PyTorch equivalent data
         def to_pytorch_batched(tensor, seq_lengths, max_seq_len):
@@ -390,7 +390,7 @@ class TestGroupedQueryAttention(CustomTestCase):
                               1], (total_tokens, kv_size))
 
         # Test attention
-        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
+        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
         # Check output shape and properties
         self.assertEqual(output.shape, (total_tokens, hidden_size))
@@ -408,7 +408,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         for dtype in [jnp.float32, jnp.float16, jnp.bfloat16]:
             with self.subTest(dtype=dtype):
                 q, k, v, forward_batch = self._create_test_inputs(dtype=dtype)
-                output = attention_layer(q, k, v, layer_id=0, forward_batch=forward_batch)
+                output = attention_layer(q, k, v, layer_id=0, forward_batch=forward_batch,forward_mode=FORWARD_MODE_EXTEND)
                 
                 self.assertEqual(output.dtype, dtype)
                 self.assertTrue(jnp.all(jnp.isfinite(output)))
@@ -450,7 +450,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         # JAX attention
         jax_attention = Attention(num_heads=num_heads, num_kv_heads=num_kv_heads, scale=scale)
         jax_output = jax_attention(
-            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True)
+            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
         # Create PyTorch equivalent data
         def to_pytorch_batched(tensor, seq_lengths, max_seq_len):

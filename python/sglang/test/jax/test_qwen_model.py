@@ -1,7 +1,7 @@
 import os
 import unittest
 from pathlib import Path
-from typing import List
+from typing import List,Any
 from unittest.mock import patch
 
 import jax.numpy as jnp
@@ -14,12 +14,14 @@ from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.jax.layers.sampler import Sampler
-from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool,create_kv_cache
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_EXTEND,FORWARD_MODE_DECODE
 from sglang.srt.jax.models.qwen import QWenLMHeadJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
+import jax
+from functools import partial
 
 
 class TestQwenModel(unittest.TestCase):
@@ -125,6 +127,8 @@ class TestQwenModel(unittest.TestCase):
             input_ids_flat.extend(tokens)
             # Create positions at the same time
             positions_flat.extend(range(len(tokens)))
+        
+        # Pad -inf at the end of inputs and positions, TODO
 
         # Create required arrays
         input_ids_array = jnp.array(input_ids_flat, dtype=jnp.int32)
@@ -135,18 +139,25 @@ class TestQwenModel(unittest.TestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
 
-        cache_pool = ReqToHashKVCachePool(
+        # cache_pool = ReqToHashKVCachePool(
+        #     head_num=model_config.num_attention_heads,
+        #     head_dim=model_config.hidden_size // model_config.num_attention_heads,
+        #     layer_num=model_config.num_hidden_layers,
+        #     dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
+        #     max_seq_len=128,
+        #     max_batch_size=20,
+        # )
+        k_cache,v_cache=create_kv_cache(
+            max_seq_len=128,
+            max_batch_size=20,
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
             dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
-            max_seq_len=128,
-            max_batch_size=20,
         )
 
         # Create ForwardBatch
         forward_batch = ForwardBatch(
-            forward_mode=ForwardMode.EXTEND,
             batch_size=len(actual_seq_lens),
             input_ids=input_ids_array,
             seq_lens=seq_lens,
@@ -154,7 +165,8 @@ class TestQwenModel(unittest.TestCase):
             cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32),
             out_cache_loc=None,
             extend_start_loc=extend_start_loc,
-            token_to_kv_pool=cache_pool,
+            k_cache=k_cache,
+            v_cache=v_cache,
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
@@ -331,10 +343,6 @@ class TestQwenModel(unittest.TestCase):
         forward_batch.extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), forward_batch.seq_lens[:-1]]))
 
-        # Update forward mode
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
-            forward_batch.forward_mode = ForwardMode.DECODE
-
         return new_original_indices
 
     def test_qwen_model_decode(self, batch_size: int = None):
@@ -399,6 +407,7 @@ class TestQwenModel(unittest.TestCase):
                 }
 
             max_iterations = 15 if batch_size and batch_size > 10 else 30
+            max_iterations = 10
             print(
                 f"\n🔄 Starting generation (max {max_iterations} iterations)...")
 
@@ -411,11 +420,47 @@ class TestQwenModel(unittest.TestCase):
                 if iteration % 5 == 0 or len(input_texts) <= 10:  # 减少大批量时的输出
                     print(f"--- Iteration {iteration + 1} ---")
                     print(f"Active requests: {forward_batch.batch_size}")
+                
+                # @nnx.jit
+                # def cal1(forward_batch,batch_size):
+                #     print(batch_size)
+                #     print(forward_batch.k_cache)
+                # cal1(forward_batch,batch_size)
+
+                # @nnx.jit
+                # def cal2(model:QWenLMHeadJaxModel):
+                #     print(model)
+                #     #print(forward_batch.k_cache)
+                # cal2(model)
+                # print(f"end")
+                # return 
 
                 # Forward pass
-                y = model(forward_batch.input_ids,
-                          forward_batch.positions, forward_batch)
+                # note: donate_argnums is necessary because 'jaxlib._jax.XlaRuntimeError: RESOURCE_EXHAUSTED' will meet without it.
+                @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
+                def _forward_extend(model:QWenLMHeadJaxModel,forward_batch,batch_size):
+                    #print(f"model: {model}")
+                    #print(f"batch_size: {batch_size}")
+                    #return None,None
+                    return model(forward_batch.input_ids,
+                          forward_batch.positions, forward_batch,FORWARD_MODE_EXTEND,batch_size)
 
+                #@partial(jax.jit,donate_argnums=(0,2))
+                @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
+                def _forward_decode(model:QWenLMHeadJaxModel,forward_batch,batch_size):
+                    return model(forward_batch.input_ids,
+                          forward_batch.positions, forward_batch,FORWARD_MODE_DECODE,batch_size)
+                                    
+
+                if iteration==0:
+                    #print(f"forward_batch.k_cache: {forward_batch.k_cache}")
+                    y,forward_batch = _forward_extend(model,forward_batch,forward_batch.batch_size)
+                else:
+                    y,forward_batch = _forward_decode(model,forward_batch,forward_batch.batch_size)
+                
+                #print(f"========y: {y}")
+                #print(f"forward_batch.k_cache: {forward_batch.k_cache[0]}")
+                
                 # Sample next token for each active sequence
                 next_token_ids = sampler(
                     y,

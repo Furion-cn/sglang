@@ -1,11 +1,12 @@
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_DECODE,FORWARD_MODE_EXTEND
+from sglang.srt.jax.mem_cache.hash_kvcache import get_kv_buffer,set_kv_buffer
 
 
 class Attention(nnx.Module):
@@ -31,7 +32,9 @@ class Attention(nnx.Module):
                  forward_batch: ForwardBatch,
                  layer_id: int,
                  attention_mask: jax.Array = None,
-                 is_causal: bool = True):
+                 is_causal: bool = True,
+                 forward_mode:str=None,
+                 ):
         """
         Args:
             q, k, v: Input tensors of shape [total_tokens, hidden_size]
@@ -42,8 +45,8 @@ class Attention(nnx.Module):
             Output tensor of shape [total_tokens, hidden_size]
         """
 
-        k_buffer, v_buffer = self._get_and_set_kv_cache(
-            q, k, v, forward_batch, layer_id)
+        k_buffer, v_buffer, forward_batch = self._get_and_set_kv_cache(
+            q, k, v, forward_batch, layer_id,forward_mode)
 
         head_dim = q.shape[1] // self.num_heads
 
@@ -52,40 +55,62 @@ class Attention(nnx.Module):
         else:
             scale = self.scale
 
-        if forward_batch.forward_mode == ForwardMode.DECODE:
+        if forward_mode == FORWARD_MODE_DECODE:
             is_causal = False
 
-        return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, is_causal, forward_batch.forward_mode)
-
+        return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, is_causal, forward_mode), forward_batch
     def _get_and_set_kv_cache(
         self,
         q: jax.Array,
         k: jax.Array,
         v: jax.Array,
         forward_batch: ForwardBatch,
-        layer_id: int
+        layer_id: int,
+        forward_mode:str,
+    ):
+        """
+        Get the kv cache from the forward batch.
+        """
+        #k_cache,v_cache=get_kv_buffer(forward_batch.k_cache,forward_batch.v_cache,layer_id)
+        if forward_mode ==FORWARD_MODE_EXTEND:
+            forward_batch.k_cache,forward_batch.v_cache=set_kv_buffer(layer_id, forward_batch.cache_loc, k, v,forward_batch.k_cache,forward_batch.v_cache)
+        else:
+            forward_batch.k_cache,forward_batch.v_cache=set_kv_buffer(layer_id, forward_batch.out_cache_loc, k, v,forward_batch.k_cache,forward_batch.v_cache) 
+        k_buffer,v_buffer=get_kv_buffer(forward_batch.k_cache,forward_batch.v_cache,layer_id)
+        return k_buffer,v_buffer, forward_batch
+
+
+    def _get_and_set_kv_cache_old(
+        self,
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+        forward_batch: ForwardBatch,
+        layer_id: int,
+        forward_mode:str,
     ) -> Tuple[jax.Array, jax.Array]:
         """
         Get the kv cache from the forward batch.
         """
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
-            forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer_id, forward_batch.cache_loc, k, v)
-        else:
-            forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer_id, forward_batch.out_cache_loc, k, v)
+        pass
+        # if forward_mode == FORWARD_MODE_EXTEND:
+        #     forward_batch.token_to_kv_pool.set_kv_buffer(
+        #         layer_id, forward_batch.cache_loc, k, v)
+        # else:
+        #     forward_batch.token_to_kv_pool.set_kv_buffer(
+        #         layer_id, forward_batch.out_cache_loc, k, v)
 
-        return forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
+        # return forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
 
 
-@partial(jax.jit, static_argnames=["num_heads", "num_kv_heads", "is_causal", "mode"])
+#@partial(jax.jit, static_argnames=["num_heads", "num_kv_heads", "is_causal", "mode"])
 def forward_attention(q: jax.Array,
                       k_cache: jax.Array,
                       v_cache: jax.Array,
                       seq_lengths: jax.Array,
                       loc: jax.Array,
                       num_heads, num_kv_heads,
-                      scale=None, attention_mask=None, is_causal=True, mode=ForwardMode.DECODE):
+                      scale=None, attention_mask=None, is_causal=True, mode=FORWARD_MODE_DECODE):
     """
     Forward pass using native JAX implementation with block-diagonal attention.
     This avoids padding while maintaining efficient matrix operations.
@@ -154,7 +179,7 @@ def forward_attention(q: jax.Array,
     return attn_output.reshape(num_tokens, hidden_size)
 
 
-def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: ForwardMode):
+def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: str):
     """Create a sequence mask that ensures tokens only attend within their sequence."""
     batch_size = seq_lengths.shape[0]
     _, query_len, key_len = attn_weights.shape
@@ -194,7 +219,7 @@ def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: 
                     (all_positions[None, :] < seq_ends[:, None]))
         return seq_mask
 
-    if mode == ForwardMode.EXTEND:
+    if mode == FORWARD_MODE_EXTEND:
         mask = create_extend_sequence_mask()
     else:
         mask = create_decode_sequence_mask()
