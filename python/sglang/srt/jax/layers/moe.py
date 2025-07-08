@@ -307,13 +307,13 @@ class Qwen3MoE(nnx.Module):
         print(f"[DEBUG] _permute_exact: inputs_2d.shape={inputs_2d.shape}, bsz_times_seq_len={bsz_times_seq_len}")
         
         flatten_selected_experts = jnp.ravel(top_k_indices)
-        print(f"[DEBUG] _permute_exact: flatten_selected_experts={flatten_selected_experts}")
+        print(f"[DEBUG] _permute_exact: flatten_selected_experts.shape={flatten_selected_experts.shape}")
         
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-        print(f"[DEBUG] _permute_exact: sorted_selected_experts={sorted_selected_experts}")
+        print(f"[DEBUG] _permute_exact: sorted_selected_experts.shape={sorted_selected_experts.shape}")
         
         sorted_indices = sorted_selected_experts // self.num_experts_per_tok
-        print(f"[DEBUG] _permute_exact: sorted_indices={sorted_indices}")
+        print(f"[DEBUG] _permute_exact: sorted_indices.shape={sorted_indices.shape}")
         
         # Sort inputs by expert
         sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
@@ -322,13 +322,17 @@ class Qwen3MoE(nnx.Module):
         # Compute global group_sizes (number of tokens per expert)
         group_sizes = jnp.bincount(flatten_selected_experts, length=self.num_experts)
         print(f"[DEBUG] _permute_exact: group_sizes.shape={group_sizes.shape}")
-        print(f"[DEBUG] _permute_exact: non-zero experts: {jnp.where(group_sizes > 0)[0]}")
-        print(f"[DEBUG] _permute_exact: corresponding group_sizes: {group_sizes[group_sizes > 0]}")
+        
+        # 🛠️ FIX: 使用JAX兼容的方式显示非零专家信息
+        non_zero_mask = group_sizes > 0
+        non_zero_count = jnp.sum(non_zero_mask)
+        print(f"[DEBUG] _permute_exact: number of non-zero experts: {non_zero_count}")
+        print(f"[DEBUG] _permute_exact: total tokens distributed: {jnp.sum(group_sizes)}")
         
         # Generate sorted_experts
         expert_indices = jnp.arange(self.num_experts)
         sorted_experts = jnp.repeat(expert_indices, repeats=group_sizes, total_repeat_length=flatten_selected_experts.shape[0])
-        print(f"[DEBUG] _permute_exact: sorted_experts={sorted_experts}")
+        print(f"[DEBUG] _permute_exact: sorted_experts.shape={sorted_experts.shape}")
         
         print(f"[DEBUG] _permute_exact: returning - sorted_inputs.shape={sorted_inputs.shape}, group_sizes.shape={group_sizes.shape}")
         
@@ -428,7 +432,7 @@ class Qwen3MoE(nnx.Module):
                               local_expert_size, reshaped_group_sizes, is_dispatch):
         print(f"[DEBUG] _regular_communication: {'dispatch' if is_dispatch else 'collection'} mode")
         print(f"[DEBUG] _regular_communication: data.shape={data.shape}, expert_shard_id={expert_shard_id}")
-        print(f"[DEBUG] _regular_communication: reshaped_group_sizes={reshaped_group_sizes}")
+        print(f"[DEBUG] _regular_communication: reshaped_group_sizes.shape={reshaped_group_sizes.shape}")
         
         total_data = data.shape[0]
         remainder = total_data % self.expert_parallel_size
@@ -483,7 +487,7 @@ class Qwen3MoE(nnx.Module):
 
             num_valid_tokens = jnp.sum(local_group_sizes)
             
-            print(f"[DEBUG] _regular_communication: local_group_sizes={local_group_sizes}")
+            print(f"[DEBUG] _regular_communication: local_group_sizes.shape={local_group_sizes.shape}")
             print(f"[DEBUG] _regular_communication: num_valid_tokens={num_valid_tokens}")
             
             # 🛠️ FIX: 更安全的数据提取 - 考虑all_to_all的具体语义
@@ -522,7 +526,7 @@ class Qwen3MoE(nnx.Module):
             local_sorted_indices = jnp.arange(num_valid_tokens)
             
             print(f"[DEBUG] _regular_communication: final valid_data.shape={valid_data.shape}")
-            print(f"[DEBUG] _regular_communication: sorted_experts_ids={sorted_experts_ids}")
+            print(f"[DEBUG] _regular_communication: sorted_experts_ids.shape={sorted_experts_ids.shape}")
             
             global_tracer.print(valid_data, f"regular_dispatch_valid_data", f"moe_dispatch_layer_id_{self.layer_id}")
             global_tracer.print(local_group_sizes, f"regular_dispatch_local_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
@@ -541,10 +545,10 @@ class Qwen3MoE(nnx.Module):
         local_sizes = all_shard_local_sizes.reshape(-1)
         
         print(f"[DEBUG] _local_permute_exact: all_shard_local_sizes.shape={all_shard_local_sizes.shape}")
-        print(f"[DEBUG] _local_permute_exact: local_sizes={local_sizes}")
+        print(f"[DEBUG] _local_permute_exact: local_sizes.shape={local_sizes.shape}")
         
         local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
-        print(f"[DEBUG] _local_permute_exact: local_group_size={local_group_size}")
+        print(f"[DEBUG] _local_permute_exact: local_group_size.shape={local_group_size.shape}")
         
         if is_offset:
             divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
@@ -555,10 +559,13 @@ class Qwen3MoE(nnx.Module):
             )
             print(f"[DEBUG] _local_permute_exact: using is_offset=True branch")
         else:
-            # 🛠️ FIX: 正确的expert索引分配逻辑
+            # 🛠️ FIX: 正确的expert索引分配逻辑 - 需要在host上执行
             print(f"[DEBUG] _local_permute_exact: generating expert_indices for {inputs.shape[0]} tokens")
+            
+            # 将local_sizes转移到host进行处理
+            local_sizes_host = jax.device_get(local_sizes)
             expert_indices_list = []
-            for i, size in enumerate(local_sizes):
+            for i, size in enumerate(local_sizes_host):
                 expert_indices_list.extend([i] * int(size))
                 print(f"[DEBUG] _local_permute_exact: expert {i} gets {int(size)} tokens")
             
@@ -569,11 +576,11 @@ class Qwen3MoE(nnx.Module):
                     expert_indices_list = expert_indices_list[:inputs.shape[0]]
                 else:
                     # 如果不够，用最后一个expert ID填充
-                    last_expert_id = len(local_sizes) - 1
+                    last_expert_id = len(local_sizes_host) - 1
                     expert_indices_list.extend([last_expert_id] * (inputs.shape[0] - len(expert_indices_list)))
             
             expert_indices = jnp.array(expert_indices_list)
-            print(f"[DEBUG] _local_permute_exact: expert_indices={expert_indices}")
+            print(f"[DEBUG] _local_permute_exact: expert_indices.shape={expert_indices.shape}")
         
         # Sort by local expert ID
         sorted_indices = jnp.argsort(expert_indices)
@@ -581,7 +588,7 @@ class Qwen3MoE(nnx.Module):
         sorted_experts_ids = expert_indices[sorted_indices]
         
         print(f"[DEBUG] _local_permute_exact: sorted_indices.shape={sorted_indices.shape}")
-        print(f"[DEBUG] _local_permute_exact: sorted_experts_ids={sorted_experts_ids}")
+        print(f"[DEBUG] _local_permute_exact: sorted_experts_ids.shape={sorted_experts_ids.shape}")
         print(f"[DEBUG] _local_permute_exact: output shapes - sorted_inputs={sorted_inputs.shape}, local_group_size={local_group_size}")
         
         return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
@@ -593,12 +600,11 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(selected_experts, f"gmm_selected_experts", f"moe_compute_layer_id_{self.layer_id}")
         
         print(f"[DEBUG] _gmm_compute_exact: x.shape={x.shape}, local_group_sizes.shape={local_group_sizes.shape}")
-        print(f"[DEBUG] _gmm_compute_exact: local_group_sizes={local_group_sizes}")
-        print(f"[DEBUG] _gmm_compute_exact: selected_experts={selected_experts}")
+        print(f"[DEBUG] _gmm_compute_exact: selected_experts.shape={selected_experts.shape}")
         
         def gmm_layer(inputs, kernel, group_sizes, expert_assignments, layer_name):
             print(f"[DEBUG] gmm_layer {layer_name}: inputs.shape={inputs.shape}, kernel.shape={kernel.shape}")
-            print(f"[DEBUG] gmm_layer {layer_name}: group_sizes.shape={group_sizes.shape}, group_sizes={group_sizes}")
+            print(f"[DEBUG] gmm_layer {layer_name}: group_sizes.shape={group_sizes.shape}")
             
             global_tracer.print(inputs, f"gmm_{layer_name}_input", f"moe_compute_layer_id_{self.layer_id}")
             global_tracer.print(kernel, f"gmm_{layer_name}_kernel", f"moe_compute_layer_id_{self.layer_id}")
@@ -658,7 +664,6 @@ class Qwen3MoE(nnx.Module):
             final_group_sizes = local_group_sizes
             print(f"[DEBUG] _gmm_compute_exact: no expansion needed, final_group_sizes.shape={final_group_sizes.shape}")
         
-        print(f"[DEBUG] _gmm_compute_exact: final_group_sizes={final_group_sizes}")
         print(f"[DEBUG] _gmm_compute_exact: GMM computing with {jnp.sum(final_group_sizes)} tokens across {len(final_group_sizes)} experts")
         
         global_tracer.print(final_group_sizes, f"gmm_final_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
