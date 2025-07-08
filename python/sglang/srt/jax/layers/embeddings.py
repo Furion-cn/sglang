@@ -162,9 +162,6 @@ def _apply_rotary_emb(
     cos = jnp.expand_dims(cos, axis=-2).astype(x.dtype)
     sin = jnp.expand_dims(sin, axis=-2).astype(x.dtype)
     if is_neox_style:
-        # cos = cos.reshape(*cos.shape[:-1], -1, 1)
-        # sin = sin.reshape(*sin.shape[:-1], -1, 1)
-        # x = x.reshape(*x.shape[:-1], -1, 2)
         x1, x2 = jnp.split(x, 2, axis=-1)
     else:
         x1 = x[..., ::2]
@@ -172,8 +169,6 @@ def _apply_rotary_emb(
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
     if is_neox_style:
-        # concatenated = jnp.concatenate((o1, o2), axis=-1)
-        # return concatenated.reshape(*concatenated.shape[:-2], -1)
         return jnp.concatenate((o1, o2), axis=-1)
     else:
         stacked = jnp.stack((o1, o2), axis=-1)

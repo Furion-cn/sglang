@@ -270,6 +270,10 @@ class Qwen3MoE(nnx.Module):
         return final_output
     
     def _permute_exact(self, inputs, top_k_indices, top_k_weights):
+        """
+        top_k_indices: (seq_len, num_experts_per_tok)
+        top_k_weights: (seq_len, num_experts_per_tok)
+        """
         inputs_shape = inputs.shape
         
         # Fix reshape logic: input is already (seq_len, hidden_dim)
@@ -282,18 +286,41 @@ class Qwen3MoE(nnx.Module):
             bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
             inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[-1]))
         
+        # [tokens, hidden_dim]
+        
+        # 将每个token选择的专家索引展平成一维数组
+        # 形状从[num_tokens, num_experts_per_tok]变为[num_tokens * num_experts_per_tok]
+        # 例如：如果token0选择专家[2,5]，token1选择专家[1,3]，则结果为[2,5,1,3]
         flatten_selected_experts = jnp.ravel(top_k_indices)
+
+        # 获取展平数组的排序索引，这样相同专家的索引会被排在一起
+        # 例如：如果flatten_selected_experts=[2,5,1,3]，则sorted_selected_experts=[2,0,3,1]
+        # 表示flatten_selected_experts中第2个元素(值为1)应该排第一，第0个元素(值为2)排第二...
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-        sorted_indices = sorted_selected_experts // self.num_experts_per_tok
-        
-        # Sort inputs by expert
+
+        # 计算排序后的token索引
+        # 由于每个token选择了num_experts_per_tok个专家，所以除以num_experts_per_tok得到原始token索引(得到sorted_selected_experts对应对应的token，比如值为1，代表对应了第一个token的专家顺序)
+        # 例如：如果sorted_selected_experts=[2,0,3,1]，num_experts_per_tok=2
+        # 则sorted_indices=[1,0,1,0]，表示这些位置对应的是token1,token0,token1,token0
+        sorted_indices = sorted_selected_experts // self.num_experts_per_tok  # 按experts分组
+
+        # 根据sorted_indices重新排列输入数据
+        # 这样相同专家处理的token会被排在一起，便于批量计算
         sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
-        
-        # Compute global group_sizes (number of tokens per expert)
+
+        # 计算每个专家需要处理的token数量
+        # 使用bincount统计flatten_selected_experts中每个专家索引出现的次数
+        # 例如：如果flatten_selected_experts=[2,5,1,3]，num_experts=6
+        # 则group_sizes=[0,1,1,1,0,1]，表示专家0处理0个token，专家1处理1个token...
         group_sizes = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-        
-        # Generate sorted_experts
+
+        # 生成排序后的专家索引数组
+        # 首先创建专家索引数组[0,1,2,...,num_experts-1]
         expert_indices = jnp.arange(self.num_experts)
+
+        # 根据每个专家处理的token数量重复专家索引
+        # 例如：如果group_sizes=[0,1,1,1,0,1]
+        # 则sorted_experts=[1,2,3,5]，表示排序后的数据中，前1个由专家1处理，接下来1个由专家2处理...
         sorted_experts = jnp.repeat(expert_indices, repeats=group_sizes, total_repeat_length=flatten_selected_experts.shape[0])
         
         return sorted_inputs, sorted_selected_experts, top_k_weights, group_sizes, sorted_experts
@@ -481,6 +508,7 @@ class Qwen3MoE(nnx.Module):
         print(f"[DEBUG] Layer {self.layer_id} GMM: final_group_sizes.shape={final_group_sizes.shape}, sum={jnp.sum(final_group_sizes)}")
         print(f"GMM computing with {jnp.sum(final_group_sizes)} tokens across {len(final_group_sizes)} experts")
         
+        global_tracer.print(x, f"moe_gateup_input", f"moe_ep_layer_id_{self.layer_id}")
         layer_w0 = gmm_layer(x, w0_kernel, final_group_sizes, selected_experts)
         layer_w1 = gmm_layer(x, w1_kernel, final_group_sizes, selected_experts)
         
@@ -488,6 +516,8 @@ class Qwen3MoE(nnx.Module):
         
         layer_act = jax.nn.silu(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
+
+        global_tracer.print(layer_act, f"moe_down_input", f"moe_ep_layer_id_{self.layer_id}")
         
         print(f"[DEBUG] Layer {self.layer_id} GMM: intermediate_layer.shape={intermediate_layer.shape}")
         

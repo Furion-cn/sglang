@@ -412,4 +412,4 @@ def select_experts(
 
     get_global_expert_distribution_recorder().on_select_experts(topk_ids=topk_ids)
 
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids #[batch_size, top_k], [batch_size, top_k]

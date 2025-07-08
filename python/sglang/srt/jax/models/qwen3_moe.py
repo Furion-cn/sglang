@@ -144,7 +144,6 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 devices = jax.devices()
                 config.expert_mesh = Mesh(devices, axis_names=('expert',))
                 self.expert_mesh = config.expert_mesh
-                
             
             if 'expert' not in self.expert_mesh.axis_names:
                 raise ValueError(f"expert_mesh must contain 'expert' axis, current axes: {self.expert_mesh.axis_names}")
@@ -278,6 +277,9 @@ class QWen3MoeModel(nnx.Module):
         residual = None
         
         for layer in self.layers:
+            # hack for debug only run one layer
+            if layer.layer_id > 0:
+                break
             hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
         
         if residual is not None:

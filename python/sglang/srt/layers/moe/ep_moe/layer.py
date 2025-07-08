@@ -48,6 +48,7 @@ from sglang.srt.utils import (
     is_hip,
     set_weight_attrs,
 )
+from sglang.debug_tracer import global_tracer, trace_function
 
 _is_hip = is_hip()
 
@@ -254,6 +255,9 @@ class EPMoE(torch.nn.Module):
             ),
         )
 
+        global_tracer.print(topk_ids, f"moe_topk_ids", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(topk_weights, f"moe_topk_weights", f"moe_sparse_layer_id_{self.layer_id}")
+
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
@@ -319,6 +323,7 @@ class EPMoE(torch.nn.Module):
             device=hidden_states_device,
             dtype=torch.int64,
         )
+        global_tracer.print(gateup_input, f"moe_gateup_input", f"moe_ep_layer_id_{self.layer_id}")
         # GroupGemm-0
         gateup_output = self.grouped_gemm_runner(
             a=gateup_input,
@@ -386,6 +391,8 @@ class EPMoE(torch.nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {self.activation=}")
         del gateup_output
+
+        global_tracer.print(down_input, f"moe_down_input", f"moe_ep_layer_id_{self.layer_id}")
 
         if self.activation_scheme == "dynamic" and not self.use_block_quant:
             if self.use_per_token_if_dynamic:
