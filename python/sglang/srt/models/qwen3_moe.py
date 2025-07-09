@@ -192,6 +192,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+
+        logger.info(f"layer_id: {self.layer_id}, ==========moe_compute_output===========: {final_hidden_states}, min: {final_hidden_states.min()}, max: {final_hidden_states.max()}, mean: {final_hidden_states.mean()}, std: {final_hidden_states.std()}")
         
         global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         
@@ -283,9 +285,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
             
             global_tracer.print(final_hidden_states, f"moe_combine_output", f"moe_combine_layer_id_{self.layer_id}")
-        
-        global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
-        
+                
         return final_hidden_states
 
     def op_gate(self, state):

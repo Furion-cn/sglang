@@ -304,7 +304,6 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
-        logger.info(f"gateup_input: {gateup_input}, shape: {gateup_input.shape}, layer_id: {self.layer_id}")
         # Add detailed dispatch output tracers
         global_tracer.print(gateup_input, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(gateup_input, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
@@ -491,8 +490,7 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
         )
         
-        logger.info(f"moe_final_output: {output}, min: {output.min()}, max: {output.max()}, mean: {output.mean()}, std: {output.std()}")
-        global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
+        logger.info(f"layer_id: {self.layer_id}, ==============ep_moe_final_output============: {output}, min: {output.min()}, max: {output.max()}, mean: {output.mean()}, std: {output.std()}")
         
         return output
 
@@ -1012,8 +1010,6 @@ class DeepEPMoE(EPMoE):
             result = self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
-            
-        global_tracer.print(result, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return result
 
@@ -1266,11 +1262,6 @@ class DeepEPMoE(EPMoE):
         )
         
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
-
-        global_tracer.print(gather_out, f"gather_out", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(gather_out, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(gather_out, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(gather_out, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return gather_out
 
