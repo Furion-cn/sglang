@@ -219,7 +219,7 @@ class Qwen3MoE(nnx.Module):
         else:
             # ✅ 多设备模式：在MoE内部使用shard_map，权重作为参数传入
             output = self._expert_parallel_forward_with_shard_map(inputs, router_logits)
-        
+        jax.debug.print("layer_id={layer_id}, jax_moe_final_output={output}", layer_id=self.layer_id, shape=output)
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
     
