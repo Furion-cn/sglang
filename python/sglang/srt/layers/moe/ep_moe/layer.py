@@ -258,7 +258,6 @@ class EPMoE(torch.nn.Module):
                 layer_id=self.layer_id,
             ),
         )
-        logger.info(f"hidden_states: {hidden_states}")
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
@@ -305,7 +304,7 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
-        
+        logger.info(f"gateup_input: {gateup_input}")
         # Add detailed dispatch output tracers
         global_tracer.print(gateup_input, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(gateup_input, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")

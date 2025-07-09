@@ -258,17 +258,11 @@ class Qwen3MoE(nnx.Module):
                 # 3D输入：(batch_size, seq_len, hidden_dim)
                 batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
                 total_tokens = batch_size * seq_len
-            jax.debug.print("hidden_states={hidden_states}", hidden_states=hidden_states)          
-            jax.debug.print("computed_dimensions: total={total} batch={batch} seq={seq}", 
-                           total=total_tokens, batch=batch_size, seq=seq_len)
             
-            # ✅ Step 1: Permute - 按专家分组
             x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
                 hidden_states, top_k_indices, top_k_weights
             )
-            
-            jax.debug.print("permute_x_shape={shape}", shape=x.shape)
-            jax.debug.print("group_sizes={sizes}", sizes=group_sizes)
+            jax.debug.print("permute_x={x}, sorted_selected_experts={sorted_selected_experts}, weights={weights}, group_sizes={group_sizes}, selected_experts={selected_experts}, layer_id={layer_id}", x=x, sorted_selected_experts=sorted_selected_experts, weights=weights, group_sizes=group_sizes, selected_experts=selected_experts, layer_id=self.layer_id)
             
             # ✅ Step 2: Expert Parallelism Dispatch
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
