@@ -304,7 +304,7 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
-        logger.info(f"gateup_input: {gateup_input}")
+        logger.info(f"gateup_input: {gateup_input}, shape: {gateup_input.shape}, layer_id: {self.layer_id}")
         # Add detailed dispatch output tracers
         global_tracer.print(gateup_input, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(gateup_input, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")

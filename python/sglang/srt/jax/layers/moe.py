@@ -262,7 +262,7 @@ class Qwen3MoE(nnx.Module):
             x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
                 hidden_states, top_k_indices, top_k_weights
             )
-            jax.debug.print("permute_x={x}, sorted_selected_experts={sorted_selected_experts}, weights={weights}, group_sizes={group_sizes}, selected_experts={selected_experts}, layer_id={layer_id}", x=x, sorted_selected_experts=sorted_selected_experts, weights=weights, group_sizes=group_sizes, selected_experts=selected_experts, layer_id=self.layer_id)
+            jax.debug.print("permute_x={x}, permute_x_shape={shape}, layer_id={layer_id}", x=x, shape=x.shape, layer_id=self.layer_id)
             
             # ✅ Step 2: Expert Parallelism Dispatch
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
