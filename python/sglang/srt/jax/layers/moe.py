@@ -463,88 +463,60 @@ class Qwen3MoE(nnx.Module):
             return self._cpu_simple_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
     
     def _cpu_simple_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
+        """
+        ✅ 使用MaxText的is_offset=True逻辑：直接从sorted数据中筛选属于当前设备的tokens
+        这避免了复杂的切片计算，更加robust
+        """
         local_expert_size = self.experts_per_device
         
-        # 🔍 添加详细的调试日志
         jax.debug.print("dispatch_debug: expert_shard_id={expert_shard_id} local_expert_size={local_expert_size}", 
                        expert_shard_id=expert_shard_id, local_expert_size=local_expert_size)
         jax.debug.print("dispatch_debug: data.shape={data_shape} sorted_experts={sorted_experts}", 
                        data_shape=data.shape, sorted_experts=sorted_experts)
-        jax.debug.print("dispatch_debug: global_group_sizes={group_sizes}", group_sizes=global_group_sizes)
         
-        # ✅ 计算当前设备负责的专家范围和预期token数
-        start_expert = expert_shard_id * local_expert_size
-        end_expert = (expert_shard_id + 1) * local_expert_size
-        local_group_sizes = global_group_sizes[start_expert:end_expert]
-        expected_tokens = jnp.sum(local_group_sizes)
-        
-        jax.debug.print("dispatch_debug: start_expert={start} end_expert={end} expected_tokens={expected}", 
-                       start=start_expert, end=end_expert, expected=expected_tokens)
-        
-        # 🔍 添加专家范围调试
-        non_zero_experts_in_range = jnp.where(local_group_sizes > 0)[0] + start_expert
-        non_zero_counts_in_range = local_group_sizes[local_group_sizes > 0]
-        jax.debug.print("dispatch_debug: device_{dev_id} experts={experts} tokens={tokens}", 
-                       dev_id=expert_shard_id, experts=non_zero_experts_in_range, tokens=non_zero_counts_in_range)
-        
-        # ✅ 使用MaxText的local_permute逻辑（is_offset=True模式）
+        # ✅ MaxText is_offset=True 逻辑：计算每个token属于哪个expert shard
         divided_assignments = jnp.floor_divide(sorted_experts, local_expert_size)
-        expert_indices = jnp.where(
-            divided_assignments == expert_shard_id, 
-            jnp.mod(sorted_experts, local_expert_size), 
-            local_expert_size  # 不属于当前设备的标记为local_expert_size
+        
+        # ✅ 创建mask：只有属于当前shard的tokens才保留
+        belongs_to_this_shard = (divided_assignments == expert_shard_id)
+        
+        # ✅ 计算局部expert indices：global_expert_id % local_expert_size  
+        local_expert_indices = jnp.where(
+            belongs_to_this_shard,
+            jnp.mod(sorted_experts, local_expert_size),
+            local_expert_size  # 不属于当前设备的设为无效值
         )
         
-        jax.debug.print("dispatch_debug: divided_assignments={div_assign} expert_indices={exp_indices}", 
-                       div_assign=divided_assignments, exp_indices=expert_indices)
+        jax.debug.print("dispatch_debug: belongs_to_this_shard sum={sum}", 
+                       sum=jnp.sum(belongs_to_this_shard))
+        jax.debug.print("dispatch_debug: local_expert_indices={indices}", 
+                       indices=local_expert_indices)
         
-        # 只保留属于当前设备的数据
-        valid_mask = expert_indices < local_expert_size
-        valid_count = jnp.sum(valid_mask)
-        jax.debug.print("dispatch_debug: valid_mask_count={valid_count} total_tokens={total}", 
-                       valid_count=valid_count, total=expert_indices.shape[0])
+        # ✅ 只保留属于当前设备的tokens
+        valid_mask = belongs_to_this_shard
+        valid_indices = jnp.where(valid_mask, size=jnp.sum(valid_mask), fill_value=0)[0]
         
-        # 🛠️ 修复：验证expected_tokens vs valid_count的一致性
-        jax.debug.print("dispatch_debug: consistency_check dev_{dev_id}: expected_tokens={expected} vs valid_count={actual}", 
-                       dev_id=expert_shard_id, expected=expected_tokens, actual=valid_count)
-        
-        # 🛠️ 修复：使用valid_count而不是expected_tokens，因为valid_count是实际统计的
-        actual_tokens = valid_count
-        
-        # 🛠️ 修复：使用gather操作，避免动态切片
-        if actual_tokens == 0:
+        if valid_indices.shape[0] == 0:
             # 当前设备没有分配到任何token
             local_data = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
             local_experts = jnp.array([], dtype=jnp.int32)
-            jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens (empty assignment)", 
-                           dev_id=expert_shard_id)
+            local_group_sizes = jnp.zeros(local_expert_size, dtype=jnp.int32)
+            
+            jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens", dev_id=expert_shard_id)
         else:
-            # 🛠️ 使用gather操作收集属于当前设备的数据
-            # 首先找到所有有效的索引位置
-            valid_positions = jnp.where(valid_mask, size=actual_tokens, fill_value=0)[0]
+            # 提取有效的数据和expert indices
+            local_data = data[valid_indices]
+            local_experts = local_expert_indices[valid_indices]
             
-            # 使用gather收集数据
-            local_data = jnp.take(data, valid_positions, axis=0)
-            local_expert_indices = jnp.take(expert_indices, valid_positions, axis=0)
+            # ✅ 计算local_group_sizes：统计每个local expert的token数量
+            local_group_sizes = jnp.bincount(local_experts, length=local_expert_size)
             
-            # 验证提取的数据大小
-            jax.debug.print("dispatch_debug: extracted_data_shape={shape} expected_count={count}", 
-                           shape=local_data.shape, count=actual_tokens)
-            
-            # 排序：按expert_id排序
-            sorted_indices = jnp.argsort(local_expert_indices)
-            local_data = jnp.take(local_data, sorted_indices, axis=0)
-            local_experts = jnp.take(local_expert_indices, sorted_indices, axis=0)
-            
-            jax.debug.print("dispatch_debug: device_{dev_id} got {tokens} tokens, final_local_data.shape={shape}", 
-                           dev_id=expert_shard_id, tokens=actual_tokens, shape=local_data.shape)
+            jax.debug.print("dispatch_debug: device_{dev_id} extracted {num_tokens} tokens", 
+                           dev_id=expert_shard_id, num_tokens=valid_indices.shape[0])
+            jax.debug.print("dispatch_debug: local_experts={experts}", experts=local_experts)
         
-        # 🛠️ 修复：重新计算local_group_sizes基于实际提取的数据
-        if actual_tokens > 0:
-            actual_local_group_sizes = jnp.bincount(local_experts, length=local_expert_size)
-            jax.debug.print("dispatch_debug: recalculated_local_group_sizes={sizes} vs original={original}", 
-                           sizes=actual_local_group_sizes, original=local_group_sizes)
-            local_group_sizes = actual_local_group_sizes
+        jax.debug.print("dispatch_debug: device_{dev_id} final: data_shape={shape} group_sizes={sizes}", 
+                       dev_id=expert_shard_id, shape=local_data.shape, sizes=local_group_sizes)
         
         global_tracer.print(local_data, f"cpu_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"cpu_dispatch_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
