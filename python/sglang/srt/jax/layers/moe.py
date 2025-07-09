@@ -236,14 +236,23 @@ class Qwen3MoE(nnx.Module):
             jax.debug.print("moe_compute_layer_id_{layer_id}", layer_id=self.layer_id)
             jax.debug.print("expert_shard_id={expert_shard_id}", expert_shard_id=expert_shard_id)
             
-            global_tracer.print(hidden_states, f"shard_map_inputs", f"moe_compute_layer_id_{self.layer_id}")
+            jax.debug.print("w0_weights_shape={shape} dev{dev_id}", shape=w0_weights.shape, dev_id=expert_shard_id)
+            jax.debug.print("inputs_shape={shape}", shape=hidden_states.shape)
+            
+            # ✅ 检查权重是否正确加载
+            w0_min = jnp.min(w0_weights)
+            w0_max = jnp.max(w0_weights)
+            w0_mean = jnp.mean(w0_weights)
+            w0_std = jnp.std(w0_weights)
+            jax.debug.print("w0_weights_stats dev{dev_id}: min={min:.6f} max={max:.6f} mean={mean:.6f} std={std:.6f}", 
+                           dev_id=expert_shard_id, min=w0_min, max=w0_max, mean=w0_mean, std=w0_std)
             
             # 获取top-k专家
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
             
-            global_tracer.print(top_k_indices, f"shard_map_top_k_indices", f"moe_compute_layer_id_{self.layer_id}")
-            global_tracer.print(top_k_weights, f"shard_map_top_k_weights", f"moe_compute_layer_id_{self.layer_id}")
+            jax.debug.print("top_k_indices_shape={shape}", shape=top_k_indices.shape)
+            jax.debug.print("top_k_weights_shape={shape}", shape=top_k_weights.shape)
             
             # ✅ 修复：正确处理输入维度
             if hidden_states.ndim == 2:
@@ -255,19 +264,16 @@ class Qwen3MoE(nnx.Module):
                 batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
                 total_tokens = batch_size * seq_len
             
-            global_tracer.print(
-                jnp.array([total_tokens, batch_size, seq_len]), 
-                f"shard_map_computed_dimensions", 
-                f"moe_compute_layer_id_{self.layer_id}"
-            )
+            jax.debug.print("computed_dimensions: total={total} batch={batch} seq={seq}", 
+                           total=total_tokens, batch=batch_size, seq=seq_len)
             
             # ✅ Step 1: Permute - 按专家分组
             x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
                 hidden_states, top_k_indices, top_k_weights
             )
             
-            global_tracer.print(x, f"shard_map_permute_output", f"moe_compute_layer_id_{self.layer_id}")
-            global_tracer.print(group_sizes, f"shard_map_global_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+            jax.debug.print("permute_x_shape={shape}", shape=x.shape)
+            jax.debug.print("group_sizes={sizes}", sizes=group_sizes)
             
             # ✅ Step 2: Expert Parallelism Dispatch
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
@@ -278,37 +284,48 @@ class Qwen3MoE(nnx.Module):
             else:
                 local_group_sizes = group_sizes
             
-            global_tracer.print(x, f"shard_map_dispatch_output", f"moe_compute_layer_id_{self.layer_id}")
-            global_tracer.print(local_group_sizes, f"shard_map_local_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+            # ✅ 检查当前设备分配到的token数量
+            tokens_assigned = jnp.sum(local_group_sizes)
+            jax.debug.print("device_{dev_id} assigned {tokens} tokens", 
+                           dev_id=expert_shard_id, tokens=tokens_assigned)
+            
+            jax.debug.print("dispatch_x_shape={shape}", shape=x.shape)
+            jax.debug.print("local_group_sizes={sizes}", sizes=local_group_sizes)
             
             # ✅ Step 3: GMM计算 - 现在权重已经是分片的！
             intermediate_output = self._gmm_compute_with_sharded_weights(
                 x, local_group_sizes, selected_experts, w0_weights, w1_weights, wo_weights
             )
             
-            global_tracer.print(intermediate_output, f"shard_map_compute_output", f"moe_compute_layer_id_{self.layer_id}")
+            # ✅ 检查GMM计算结果
+            if intermediate_output.shape[0] > 0:
+                output_min = jnp.min(intermediate_output)
+                output_max = jnp.max(intermediate_output)
+                output_mean = jnp.mean(intermediate_output)
+                output_std = jnp.std(intermediate_output)
+                jax.debug.print("gmm_output_stats dev{dev_id}: min={min:.6f} max={max:.6f} mean={mean:.6f} std={std:.6f}",
+                               dev_id=expert_shard_id, min=output_min, max=output_max, mean=output_mean, std=output_std)
+            
+            jax.debug.print("compute_output_shape={shape}", shape=intermediate_output.shape)
             
             # ✅ Step 4: Expert Parallelism Collection
             if self.expert_parallelism > 1:
                 # ✅ 修复：正确计算original_size
                 original_size = total_tokens * self.num_experts_per_tok
-                global_tracer.print(
-                    jnp.array([original_size, total_tokens, self.num_experts_per_tok]), 
-                    f"shard_map_original_size_calculation", 
-                    f"moe_compute_layer_id_{self.layer_id}"
-                )
+                jax.debug.print("collection_sizes: original={orig} total_tokens={total} experts_per_tok={per_tok}",
+                               orig=original_size, total=total_tokens, per_tok=self.num_experts_per_tok)
                 intermediate_output = self._expert_all_to_all_collect(
                     intermediate_output, group_sizes, expert_shard_id, original_size
                 )
             
-            global_tracer.print(intermediate_output, f"shard_map_collection_output", f"moe_compute_layer_id_{self.layer_id}")
+            jax.debug.print("collection_output_shape={shape}", shape=intermediate_output.shape)
             
             # ✅ Step 5: Unpermute - 恢复原始顺序
             output = self._unpermute(
                 intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
             )
             
-            global_tracer.print(output, f"shard_map_unpermute_output", f"moe_compute_layer_id_{self.layer_id}")
+            jax.debug.print("final_output_shape={shape}", shape=output.shape)
             return output
         
         # ✅ 使用shard_map，权重作为参数传入
@@ -538,7 +555,7 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(
             jnp.array([can_use_ragged]), 
             f"collect_device_ragged_support", 
-            f"moe_combine_layer_id_{self.layer_id}"
+            f"moe_collect_layer_id_{self.layer_id}"
         )
         
         if can_use_ragged:
@@ -653,6 +670,9 @@ class Qwen3MoE(nnx.Module):
         expected_tokens = sorted_selected_experts.shape[0]
         actual_tokens = intermediate.shape[0]
         
+        jax.debug.print("unpermute_token_check: actual={actual} expected={expected}", 
+                       actual=actual_tokens, expected=expected_tokens)
+        
         global_tracer.print(
             jnp.array([actual_tokens, expected_tokens]), 
             f"unpermute_token_count_check", 
@@ -664,6 +684,8 @@ class Qwen3MoE(nnx.Module):
             if actual_tokens > expected_tokens:
                 # 截取前expected_tokens个
                 intermediate = intermediate[:expected_tokens]
+                jax.debug.print("unpermute_truncated: from {from_size} to {to_size}", 
+                               from_size=actual_tokens, to_size=expected_tokens)
                 global_tracer.print(
                     jnp.array([1, actual_tokens, expected_tokens]), 
                     f"unpermute_truncated", 
@@ -674,6 +696,8 @@ class Qwen3MoE(nnx.Module):
                 padding_size = expected_tokens - actual_tokens
                 padding = jnp.zeros((padding_size, intermediate.shape[1]), dtype=intermediate.dtype)
                 intermediate = jnp.concatenate([intermediate, padding], axis=0)
+                jax.debug.print("unpermute_padded: from {from_size} to {to_size} padding={pad}", 
+                               from_size=actual_tokens, to_size=expected_tokens, pad=padding_size)
                 global_tracer.print(
                     jnp.array([2, actual_tokens, expected_tokens, padding_size]), 
                     f"unpermute_padded", 
