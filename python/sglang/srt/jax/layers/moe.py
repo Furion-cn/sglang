@@ -102,7 +102,9 @@ class GateLogit(nnx.Module):
             
         return output
 
-class Qwen3MoE(nnx.Module):    
+class Qwen3MoE(nnx.Module):
+    """简化版MoE，完全模仿sparse_matmul逻辑"""
+    
     def __init__(self,
                  config,
                  num_experts: int,
@@ -211,67 +213,176 @@ class Qwen3MoE(nnx.Module):
         if router_logits.shape[0] != total_tokens:
             raise ValueError(f"router_logits shape {router_logits.shape} doesn't match inputs shape {inputs.shape}")
         
-        # 获取top-k专家
-        top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
-        top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-        
-        global_tracer.print(top_k_logits, f"top_k_logits", f"moe_sparse_layer_id_{self.layer_id}")
-        global_tracer.print(top_k_indices, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
-        global_tracer.print(top_k_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
-        
         if self.expert_parallelism == 1:
-            output = self._single_device_forward(inputs, top_k_indices, top_k_weights)
+            # 单设备模式：直接计算，无需shard_map
+            output = self._single_device_forward(inputs, router_logits)
         else:
-            output = self._expert_parallel_forward(inputs, top_k_indices, top_k_weights)
+            # ✅ 多设备模式：在MoE内部使用shard_map，权重作为参数传入
+            output = self._expert_parallel_forward_with_shard_map(inputs, router_logits)
         
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
     
-    def _expert_parallel_forward(self, inputs, top_k_indices, top_k_weights):
-        """Expert并行模式：完全模仿sparse_matmul"""
-        batch_size, seq_len = inputs.shape[0], inputs.shape[1] if inputs.ndim > 1 else 1
+    def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):
+        """✅ 新版本：在MoE内部使用shard_map，权重正确分片"""
         
-        # ✅ Step 1: Permute - 按专家分组（与MaxText完全一致）
-        x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
-            inputs, top_k_indices, top_k_weights
+        def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
+            """
+            ✅ 内部计算函数：权重作为参数传入，已经是分片的
+            在shard_map内部，w0_weights.shape = (16, 2048, 4096)
+            """
+            global_tracer.print(w0_weights, f"shard_map_w0_weights_shape", f"moe_compute_layer_id_{self.layer_id}")
+            global_tracer.print(hidden_states, f"shard_map_inputs", f"moe_compute_layer_id_{self.layer_id}")
+            
+            # 获取top-k专家
+            top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
+            top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+            
+            global_tracer.print(top_k_indices, f"shard_map_top_k_indices", f"moe_compute_layer_id_{self.layer_id}")
+            global_tracer.print(top_k_weights, f"shard_map_top_k_weights", f"moe_compute_layer_id_{self.layer_id}")
+            
+            batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1] if hidden_states.ndim > 1 else 1
+            
+            # ✅ Step 1: Permute - 按专家分组
+            x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
+                hidden_states, top_k_indices, top_k_weights
+            )
+            
+            global_tracer.print(x, f"shard_map_permute_output", f"moe_compute_layer_id_{self.layer_id}")
+            global_tracer.print(group_sizes, f"shard_map_global_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+            
+            # ✅ Step 2: Expert Parallelism Dispatch
+            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
+            if self.expert_parallelism > 1:
+                x, local_group_sizes, selected_experts = self._expert_all_to_all_dispatch(
+                    x, group_sizes, selected_experts, expert_shard_id
+                )
+            else:
+                local_group_sizes = group_sizes
+            
+            global_tracer.print(x, f"shard_map_dispatch_output", f"moe_compute_layer_id_{self.layer_id}")
+            global_tracer.print(local_group_sizes, f"shard_map_local_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+            
+            # ✅ Step 3: GMM计算 - 现在权重已经是分片的！
+            intermediate_output = self._gmm_compute_with_sharded_weights(
+                x, local_group_sizes, selected_experts, w0_weights, w1_weights, wo_weights
+            )
+            
+            global_tracer.print(intermediate_output, f"shard_map_compute_output", f"moe_compute_layer_id_{self.layer_id}")
+            
+            # ✅ Step 4: Expert Parallelism Collection
+            if self.expert_parallelism > 1:
+                original_size = batch_size * seq_len * self.num_experts_per_tok
+                intermediate_output = self._expert_all_to_all_collect(
+                    intermediate_output, group_sizes, expert_shard_id, original_size
+                )
+            
+            global_tracer.print(intermediate_output, f"shard_map_collection_output", f"moe_compute_layer_id_{self.layer_id}")
+            
+            # ✅ Step 5: Unpermute - 恢复原始顺序
+            output = self._unpermute(
+                intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
+            )
+            
+            global_tracer.print(output, f"shard_map_unpermute_output", f"moe_compute_layer_id_{self.layer_id}")
+            return output
+        
+        # ✅ 使用shard_map，权重作为参数传入
+        return shard_map(
+            _internal_moe_computation,
+            mesh=self.mesh,
+            in_specs=(
+                P(None),                     # hidden_states  
+                P(None),                     # router_logits
+                P(self.expert_axis_name, None, None),  # w0_weights - 在expert维度分片
+                P(self.expert_axis_name, None, None),  # w1_weights  
+                P(self.expert_axis_name, None, None),  # wo_weights
+            ),
+            out_specs=P(None),
+            check_rep=False,
+        )(inputs, router_logits, self.wi_0.value, self.wi_1.value, self.wo.value)
+    
+    def _gmm_compute_with_sharded_weights(self, x, local_group_sizes, selected_experts, w0_kernel, w1_kernel, wo_kernel):
+        """✅ 新版GMM计算：权重已经通过shard_map正确分片"""
+        global_tracer.print(x, f"gmm_sharded_input_x", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(w0_kernel, f"gmm_sharded_w0_kernel_shape", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(local_group_sizes, f"gmm_sharded_local_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
+        
+        # ✅ 现在权重已经是分片的，直接使用即可！
+        # w0_kernel.shape = (16, 2048, 4096) 而不是 (128, 2048, 4096)
+        
+        layer_w0 = jax.lax.ragged_dot(
+            lhs=x,
+            rhs=w0_kernel,
+            group_sizes=local_group_sizes,
+            preferred_element_type=self.dtype
         )
         
-        global_tracer.print(x, f"moe_permute_output", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(group_sizes, f"global_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
-        
-        # ✅ Step 2: Expert Parallelism Dispatch（根据设备选择通信方式）
-        expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-        if self.expert_parallelism > 1:
-            x, local_group_sizes, selected_experts = self._expert_all_to_all_dispatch(
-                x, group_sizes, selected_experts, expert_shard_id
-            )
-        else:
-            local_group_sizes = group_sizes
-        
-        global_tracer.print(x, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(local_group_sizes, f"local_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
-        
-        # ✅ Step 3: GMM计算（与MaxText完全一致）
-        intermediate_output = self._gmm_compute(x, local_group_sizes, selected_experts)
-        
-        global_tracer.print(intermediate_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
-        
-        # ✅ Step 4: Expert Parallelism Collection（根据设备选择通信方式）
-        if self.expert_parallelism > 1:
-            original_size = batch_size * seq_len * self.num_experts_per_tok
-            intermediate_output = self._expert_all_to_all_collect(
-                intermediate_output, group_sizes, expert_shard_id, original_size
-            )
-        
-        global_tracer.print(intermediate_output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
-        
-        # ✅ Step 5: Unpermute - 恢复原始顺序（与MaxText完全一致）
-        output = self._unpermute(
-            intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
+        layer_w1 = jax.lax.ragged_dot(
+            lhs=x,
+            rhs=w1_kernel,
+            group_sizes=local_group_sizes,
+            preferred_element_type=self.dtype
         )
         
-        global_tracer.print(output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-        return output
+        # 激活函数和合并
+        layer_act = jax.nn.silu(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+        
+        # 输出层
+        intermediate_output = jax.lax.ragged_dot(
+            lhs=intermediate_layer,
+            rhs=wo_kernel,
+            group_sizes=local_group_sizes,
+            preferred_element_type=self.dtype
+        )
+        
+        global_tracer.print(intermediate_output, f"gmm_sharded_final_output", f"moe_compute_layer_id_{self.layer_id}")
+        return intermediate_output
+    
+    def _single_device_forward(self, inputs, router_logits):
+        """单设备模式：简化处理"""
+        # 获取top-k专家
+        top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
+        top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+        
+        return self._single_device_forward_impl(inputs, top_k_indices, top_k_weights)
+    
+    def _single_device_forward_impl(self, inputs, top_k_indices, top_k_weights):
+        """单设备模式的具体实现"""
+        global_tracer.print(inputs, f"moe_local_input", f"moe_compute_layer_id_{self.layer_id}")
+        
+        num_tokens = inputs.shape[0] * (inputs.shape[1] if inputs.ndim > 1 else 1)
+        inputs_flat = inputs.reshape(num_tokens, -1)
+        
+        # 创建专家权重mask
+        expert_weights = jnp.zeros((num_tokens, self.num_experts), dtype=self.dtype)
+        token_indices = jnp.arange(num_tokens)[:, None]
+        
+        top_k_indices_flat = top_k_indices.reshape(num_tokens, -1)
+        top_k_weights_flat = top_k_weights.reshape(num_tokens, -1)
+        
+        expert_weights = expert_weights.at[token_indices, top_k_indices_flat].set(top_k_weights_flat)
+        
+        global_tracer.print(expert_weights, f"expert_weights_matrix", f"moe_compute_layer_id_{self.layer_id}")
+        
+        # 直接计算
+        all_wi_0 = self.wi_0.value
+        all_wi_1 = self.wi_1.value
+        all_wo = self.wo.value
+        
+        layer_w0 = jnp.einsum('th,ehd->ted', inputs_flat, all_wi_0)
+        layer_w1 = jnp.einsum('th,ehd->ted', inputs_flat, all_wi_1)
+        
+        global_tracer.print(layer_w0, f"layer_w0_output", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(layer_w1, f"layer_w1_output", f"moe_compute_layer_id_{self.layer_id}")
+        
+        activated = jax.nn.silu(layer_w0) * layer_w1
+        expert_outputs = jnp.einsum('ted,edh->teh', activated, all_wo)
+        final_output = jnp.einsum('te,teh->th', expert_weights, expert_outputs)
+        
+        global_tracer.print(final_output, f"moe_local_final_output", f"moe_compute_layer_id_{self.layer_id}")
+        return final_output.reshape(inputs.shape).astype(self.dtype)
     
     def _permute(self, inputs, top_k_indices, top_k_weights):
         """与MaxText的permute完全一致"""
@@ -399,44 +510,6 @@ class Qwen3MoE(nnx.Module):
         
         global_tracer.print(valid_data, f"regular_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         return valid_data, local_group_sizes, local_expert_ids
-    
-    def _gmm_compute(self, x, local_group_sizes, selected_experts):
-        """✅ 关键修正：极简GMM计算，直接使用local_group_sizes"""
-        global_tracer.print(x, f"gmm_input_x", f"moe_compute_layer_id_{self.layer_id}")
-        
-        w0_kernel = self.wi_0.value  # shape: (experts_per_device, hidden, intermediate)
-        w1_kernel = self.wi_1.value
-        wo_kernel = self.wo.value    # shape: (experts_per_device, intermediate, hidden)
-        
-        # ✅ 直接用ragged_dot，不需要复杂的group_sizes处理
-        layer_w0 = jax.lax.ragged_dot(
-            lhs=x,
-            rhs=w0_kernel,
-            group_sizes=local_group_sizes,
-            preferred_element_type=self.dtype
-        )
-        
-        layer_w1 = jax.lax.ragged_dot(
-            lhs=x,
-            rhs=w1_kernel,
-            group_sizes=local_group_sizes,
-            preferred_element_type=self.dtype
-        )
-        
-        # 激活函数和合并
-        layer_act = jax.nn.silu(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
-        
-        # 输出层
-        intermediate_output = jax.lax.ragged_dot(
-            lhs=intermediate_layer,
-            rhs=wo_kernel,
-            group_sizes=local_group_sizes,
-            preferred_element_type=self.dtype
-        )
-        
-        global_tracer.print(intermediate_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
-        return intermediate_output
     
     def _expert_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
         """根据设备类型选择collection方式"""
@@ -575,39 +648,3 @@ class Qwen3MoE(nnx.Module):
         
         global_tracer.print(output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
         return output.reshape(final_shape).astype(self.dtype)
-    
-    def _single_device_forward(self, inputs, top_k_indices, top_k_weights):
-        """单设备模式：简单的einsum实现"""
-        global_tracer.print(inputs, f"moe_local_input", f"moe_compute_layer_id_{self.layer_id}")
-        
-        num_tokens = inputs.shape[0] * (inputs.shape[1] if inputs.ndim > 1 else 1)
-        inputs_flat = inputs.reshape(num_tokens, -1)
-        
-        # 创建专家权重mask
-        expert_weights = jnp.zeros((num_tokens, self.num_experts), dtype=self.dtype)
-        token_indices = jnp.arange(num_tokens)[:, None]
-        
-        top_k_indices_flat = top_k_indices.reshape(num_tokens, -1)
-        top_k_weights_flat = top_k_weights.reshape(num_tokens, -1)
-        
-        expert_weights = expert_weights.at[token_indices, top_k_indices_flat].set(top_k_weights_flat)
-        
-        global_tracer.print(expert_weights, f"expert_weights_matrix", f"moe_compute_layer_id_{self.layer_id}")
-        
-        # 直接计算
-        all_wi_0 = self.wi_0.value
-        all_wi_1 = self.wi_1.value
-        all_wo = self.wo.value
-        
-        layer_w0 = jnp.einsum('th,ehd->ted', inputs_flat, all_wi_0)
-        layer_w1 = jnp.einsum('th,ehd->ted', inputs_flat, all_wi_1)
-        
-        global_tracer.print(layer_w0, f"layer_w0_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(layer_w1, f"layer_w1_output", f"moe_compute_layer_id_{self.layer_id}")
-        
-        activated = jax.nn.silu(layer_w0) * layer_w1
-        expert_outputs = jnp.einsum('ted,edh->teh', activated, all_wo)
-        final_output = jnp.einsum('te,teh->th', expert_weights, expert_outputs)
-        
-        global_tracer.print(final_output, f"moe_local_final_output", f"moe_compute_layer_id_{self.layer_id}")
-        return final_output.reshape(inputs.shape).astype(self.dtype)

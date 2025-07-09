@@ -221,18 +221,19 @@ class QWen3MoeDecoderLayer(nnx.Module):
             router_logits = self.moe_gate(hidden_states)            
             global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
-            def moe_computation(hidden_states, router_logits):
-                result = self.mlp(hidden_states, router_logits=router_logits)
-                return result
+            # def moe_computation(hidden_states, router_logits):
+            #     result = self.mlp(hidden_states, router_logits=router_logits)
+            #     return result
             
-            mlp_output = shard_map(
-                moe_computation,
-                mesh=self.mlp.mesh,
-                in_specs=(P(None), P(None)),
-                out_specs=P(None), 
-                check_rep=False, 
-            )(hidden_states, router_logits)
+            # mlp_output = shard_map(
+            #     moe_computation,
+            #     mesh=self.mlp.mesh,
+            #     in_specs=(P(None), P(None)),
+            #     out_specs=P(None), 
+            #     check_rep=False, 
+            # )(hidden_states, router_logits)
             
+            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
             global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
             
             print(f"[Layer {self.layer_id}] MLP output shape: {mlp_output.shape}")
