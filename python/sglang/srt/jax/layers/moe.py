@@ -489,9 +489,8 @@ class Qwen3MoE(nnx.Module):
         jax.debug.print("dispatch_debug: valid_mask_count={valid_count} total_tokens={total}", 
                        valid_count=valid_count, total=expert_indices.shape[0])
         
-        valid_indices = jnp.where(valid_mask, size=expert_indices.shape[0], fill_value=0)[0]
-        
-        if jnp.sum(valid_mask) == 0:
+        # 🛠️ 修复：使用更安全的数组索引方式
+        if valid_count == 0:
             # 当前设备没有分配到任何token
             local_data = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
             local_group_sizes = jnp.zeros(local_expert_size, dtype=jnp.int32)
@@ -499,9 +498,13 @@ class Qwen3MoE(nnx.Module):
             jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens (empty assignment)", 
                            dev_id=expert_shard_id)
         else:
-            # 提取属于当前设备的数据
-            local_data = data[valid_indices[:jnp.sum(valid_mask)]]
-            local_expert_indices = expert_indices[valid_indices[:jnp.sum(valid_mask)]]
+            # 🛠️ 修复：直接使用boolean mask提取数据，更安全
+            local_data = data[valid_mask]
+            local_expert_indices = expert_indices[valid_mask]
+            
+            # 验证提取的数据大小
+            jax.debug.print("dispatch_debug: extracted_data_shape={shape} expected_count={count}", 
+                           shape=local_data.shape, count=valid_count)
             
             # 计算local group sizes
             local_group_sizes = jnp.bincount(
@@ -513,8 +516,8 @@ class Qwen3MoE(nnx.Module):
             local_data = local_data[sorted_indices]
             local_experts = local_expert_indices[sorted_indices]
             
-            jax.debug.print("dispatch_debug: device_{dev_id} got {tokens} tokens, local_data.shape={shape}", 
-                           dev_id=expert_shard_id, tokens=jnp.sum(valid_mask), shape=local_data.shape)
+            jax.debug.print("dispatch_debug: device_{dev_id} got {tokens} tokens, final_local_data.shape={shape}", 
+                           dev_id=expert_shard_id, tokens=valid_count, shape=local_data.shape)
         
         global_tracer.print(local_data, f"cpu_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"cpu_dispatch_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
