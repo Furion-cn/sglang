@@ -241,7 +241,21 @@ class Qwen3MoE(nnx.Module):
             global_tracer.print(top_k_indices, f"shard_map_top_k_indices", f"moe_compute_layer_id_{self.layer_id}")
             global_tracer.print(top_k_weights, f"shard_map_top_k_weights", f"moe_compute_layer_id_{self.layer_id}")
             
-            batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1] if hidden_states.ndim > 1 else 1
+            # ✅ 修复：正确处理输入维度
+            if hidden_states.ndim == 2:
+                # 2D输入：(total_tokens, hidden_dim)
+                total_tokens = hidden_states.shape[0]
+                batch_size, seq_len = 1, total_tokens  # 假设batch_size=1
+            else:
+                # 3D输入：(batch_size, seq_len, hidden_dim)
+                batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+                total_tokens = batch_size * seq_len
+            
+            global_tracer.print(
+                jnp.array([total_tokens, batch_size, seq_len]), 
+                f"shard_map_computed_dimensions", 
+                f"moe_compute_layer_id_{self.layer_id}"
+            )
             
             # ✅ Step 1: Permute - 按专家分组
             x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
@@ -272,7 +286,13 @@ class Qwen3MoE(nnx.Module):
             
             # ✅ Step 4: Expert Parallelism Collection
             if self.expert_parallelism > 1:
-                original_size = batch_size * seq_len * self.num_experts_per_tok
+                # ✅ 修复：正确计算original_size
+                original_size = total_tokens * self.num_experts_per_tok
+                global_tracer.print(
+                    jnp.array([original_size, total_tokens, self.num_experts_per_tok]), 
+                    f"shard_map_original_size_calculation", 
+                    f"moe_compute_layer_id_{self.layer_id}"
+                )
                 intermediate_output = self._expert_all_to_all_collect(
                     intermediate_output, group_sizes, expert_shard_id, original_size
                 )
