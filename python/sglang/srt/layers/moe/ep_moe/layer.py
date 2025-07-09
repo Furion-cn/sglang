@@ -258,7 +258,7 @@ class EPMoE(torch.nn.Module):
                 layer_id=self.layer_id,
             ),
         )
-        
+        logger.info(f"topk_ids: {topk_ids}")
         global_tracer.print(topk_ids, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
 

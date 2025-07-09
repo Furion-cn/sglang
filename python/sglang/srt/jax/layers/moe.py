@@ -223,9 +223,7 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
     
-    def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):
-        """✅ 新版本：在MoE内部使用shard_map，权重正确分片"""
-        
+    def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):        
         def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
             """
             ✅ 内部计算函数：权重作为参数传入，已经是分片的
@@ -250,7 +248,7 @@ class Qwen3MoE(nnx.Module):
             # 获取top-k专家
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-            
+            jax.debug.print("top_k_indices={indices}", indices=top_k_indices)
             jax.debug.print("top_k_indices_shape={shape}", shape=top_k_indices.shape)
             jax.debug.print("top_k_weights_shape={shape}", shape=top_k_weights.shape)
             
@@ -358,13 +356,14 @@ class Qwen3MoE(nnx.Module):
             return empty_output
         
         # ✅ 正常情况：进行ragged_dot计算
+        # gate
         layer_w0 = jax.lax.ragged_dot(
             lhs=x,
             rhs=w0_kernel,
             group_sizes=local_group_sizes,
             preferred_element_type=self.dtype
         )
-        
+        # up
         layer_w1 = jax.lax.ragged_dot(
             lhs=x,
             rhs=w1_kernel,
@@ -373,6 +372,7 @@ class Qwen3MoE(nnx.Module):
         )
         
         # 激活函数和合并
+        # 
         layer_act = jax.nn.silu(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
         
