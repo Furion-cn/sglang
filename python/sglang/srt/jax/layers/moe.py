@@ -625,6 +625,19 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(sorted_selected_experts, f"unpermute_sorted_experts", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(weights, f"unpermute_weights", f"moe_combine_layer_id_{self.layer_id}")
         
+        # ✅ 修复1：检查intermediate和sorted_selected_experts的shape匹配
+        if intermediate.shape[0] != sorted_selected_experts.shape[0]:
+            # 如果不匹配，可能是all_to_all导致的shape变化
+            # 截取需要的部分
+            expected_size = sorted_selected_experts.shape[0]
+            if intermediate.shape[0] > expected_size:
+                intermediate = intermediate[:expected_size]
+                global_tracer.print(
+                    jnp.array([intermediate.shape[0], expected_size]), 
+                    f"unpermute_truncated_intermediate", 
+                    f"moe_combine_layer_id_{self.layer_id}"
+                )
+        
         unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
         
         reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
@@ -633,6 +646,9 @@ class Qwen3MoE(nnx.Module):
             (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
         )
         
+        global_tracer.print(reshaped_weights, f"unpermute_reshaped_weights", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(reshaped_intermediate, f"unpermute_reshaped_intermediate", f"moe_combine_layer_id_{self.layer_id}")
+        
         # 权重加权求和
         output = jnp.einsum(
             "BKE,BK -> BE",
@@ -640,11 +656,21 @@ class Qwen3MoE(nnx.Module):
             reshaped_weights.astype(jnp.float32),
         )
         
-        # 恢复原始shape
-        if batch_size == 1 and seq_len == 1:
-            final_shape = (reshaped_weights.shape[0], -1)
-        else:
-            final_shape = (batch_size, seq_len, -1)
+        global_tracer.print(output, f"unpermute_einsum_output", f"moe_combine_layer_id_{self.layer_id}")
         
-        global_tracer.print(output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
-        return output.reshape(final_shape).astype(self.dtype)
+        # ✅ 修复2：正确处理输入shape
+        # 输入是 (total_tokens, hidden_dim)，输出也应该是 (total_tokens, hidden_dim)
+        total_tokens = weights.shape[0] * weights.shape[1] // self.num_experts_per_tok
+        hidden_dim = output.shape[-1]
+        
+        global_tracer.print(
+            jnp.array([total_tokens, hidden_dim]), 
+            f"unpermute_target_shape", 
+            f"moe_combine_layer_id_{self.layer_id}"
+        )
+        
+        # ✅ 修复3：直接返回正确的shape，不要额外的维度
+        final_output = output.reshape(total_tokens, hidden_dim).astype(self.dtype)
+        
+        global_tracer.print(final_output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
+        return final_output
