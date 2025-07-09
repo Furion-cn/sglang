@@ -491,7 +491,7 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
         )
         
-        logger.info(f"moe_final_output: {output}")
+        logger.info(f"moe_final_output: {output}, min: {output.min()}, max: {output.max()}, mean: {output.mean()}, std: {output.std()}")
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return output
