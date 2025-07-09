@@ -231,7 +231,11 @@ class Qwen3MoE(nnx.Module):
             ✅ 内部计算函数：权重作为参数传入，已经是分片的
             在shard_map内部，w0_weights.shape = (16, 2048, 4096)
             """
-            global_tracer.print(w0_weights, f"shard_map_w0_weights_shape", f"moe_compute_layer_id_{self.layer_id}")
+            # ✅ 添加设备特定的日志验证
+            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
+            jax.debug.print(f"expert_shard_id: {expert_shard_id}")
+            jax.debug.print(f"moe_compute_layer_id_{self.layer_id}")
+            
             global_tracer.print(hidden_states, f"shard_map_inputs", f"moe_compute_layer_id_{self.layer_id}")
             
             # 获取top-k专家
@@ -323,14 +327,20 @@ class Qwen3MoE(nnx.Module):
         )(inputs, router_logits, self.wi_0.value, self.wi_1.value, self.wo.value)
     
     def _gmm_compute_with_sharded_weights(self, x, local_group_sizes, selected_experts, w0_kernel, w1_kernel, wo_kernel):
-        """✅ 新版GMM计算：权重已经通过shard_map正确分片"""
+        """✅ 新版GMM计算：权重已经通过shard_map正确分片，处理空输入情况"""
         global_tracer.print(x, f"gmm_sharded_input_x", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(w0_kernel, f"gmm_sharded_w0_kernel_shape", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"gmm_sharded_local_group_sizes", f"moe_compute_layer_id_{self.layer_id}")
         
-        # ✅ 现在权重已经是分片的，直接使用即可！
-        # w0_kernel.shape = (16, 2048, 4096) 而不是 (128, 2048, 4096)
+        # ✅ 处理空输入：当前设备没有分配到任何token
+        if x.shape[0] == 0:
+            # 返回空的输出，shape需要匹配wo的输出维度
+            # wo_kernel.shape = (16, 768, 2048)，输出维度应该是2048
+            empty_output = jnp.zeros((0, wo_kernel.shape[-1]), dtype=x.dtype)  # (0, hidden_dim)
+            global_tracer.print(empty_output, f"gmm_sharded_empty_output", f"moe_compute_layer_id_{self.layer_id}")
+            return empty_output
         
+        # ✅ 正常情况：进行ragged_dot计算
         layer_w0 = jax.lax.ragged_dot(
             lhs=x,
             rhs=w0_kernel,
