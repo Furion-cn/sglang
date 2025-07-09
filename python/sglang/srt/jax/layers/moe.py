@@ -102,7 +102,7 @@ class GateLogit(nnx.Module):
             
         return output
 
-class Qwen3MoE(nnx.Module):
+class Qwen3MoE(nnx.Module):    
     def __init__(self,
                  config,
                  num_experts: int,
@@ -123,21 +123,18 @@ class Qwen3MoE(nnx.Module):
         self.expert_axis_name = expert_axis_name
         self.layer_id = layer_id
         
+        # Mesh setup
         self.mesh = getattr(config, 'expert_mesh', None)
         if self.mesh is None:
-            raise ValueError("need to provide mesh with expert axis")
+            raise ValueError("Need expert_mesh in config")
         
-        self.has_expert_parallelism = expert_axis_name in self.mesh.axis_names
-        if not self.has_expert_parallelism:
-            raise ValueError(f"{expert_axis_name} axis is not in mesh")
-            
-        self.expert_parallel_size = self.mesh.shape[expert_axis_name]
+        self.expert_parallelism = self.mesh.shape.get(expert_axis_name, 1)
+        if num_experts % self.expert_parallelism != 0:
+            raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallelism({self.expert_parallelism})")
         
-        if num_experts % self.expert_parallel_size != 0:
-            raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallel_size({self.expert_parallel_size})")
+        self.experts_per_device = num_experts // self.expert_parallelism
         
-        self.experts_per_device = num_experts // self.expert_parallel_size
-        
+        # Expert权重：每个设备只存储负责的专家
         expert_kernel_axes = (expert_axis_name, None, None)
         
         self.wi_0 = nnx.Param(
@@ -173,10 +170,32 @@ class Qwen3MoE(nnx.Module):
             )
         )
         
+        # 应用分片约束
         state = nnx.state(self)
         pspecs = nnx.get_partition_spec(state)
         sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
         nnx.update(self, sharded_state)
+
+    def _detect_device_capabilities(self):
+        """检测设备类型和ragged_all_to_all支持情况"""
+        try:
+            devices = jax.devices()
+            is_cpu_only = all(device.platform == 'cpu' for device in devices)
+            can_use_ragged = not is_cpu_only and hasattr(jax.lax, 'ragged_all_to_all')
+            
+            device_types = [device.platform for device in devices]
+            primary_device = device_types[0] if device_types else 'unknown'
+            
+            global_tracer.print(
+                jnp.array([is_cpu_only, can_use_ragged]), 
+                f"device_capabilities_cpu_ragged", 
+                f"moe_device_layer_id_{self.layer_id}"
+            )
+            
+            return can_use_ragged, primary_device
+        except Exception as e:
+            # 回退到CPU模式
+            return False, 'cpu'
 
     @trace_function(stage="MOE_SPARSE_FORWARD", include_args=False, include_output=True)
     def __call__(self, inputs, router_logits=None):
@@ -192,8 +211,7 @@ class Qwen3MoE(nnx.Module):
         if router_logits.shape[0] != total_tokens:
             raise ValueError(f"router_logits shape {router_logits.shape} doesn't match inputs shape {inputs.shape}")
         
-        print(f"MoE processing {total_tokens} tokens with {self.num_experts} experts")
-        
+        # 获取top-k专家
         top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
         top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         
@@ -201,254 +219,161 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(top_k_indices, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(top_k_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
         
-        if self.expert_parallel_size == 1:
-            print("Using local forward mode")
-            output = self._local_forward(inputs, top_k_indices, top_k_weights)
+        if self.expert_parallelism == 1:
+            output = self._single_device_forward(inputs, top_k_indices, top_k_weights)
         else:
-            print(f"Using expert parallel mode with {self.expert_parallel_size} devices")
             output = self._expert_parallel_forward(inputs, top_k_indices, top_k_weights)
         
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
-        
         return output
     
-    def _expert_parallel_forward(self, tokens, top_k_indices, top_k_weights):        
-        print(f"[DEBUG] _expert_parallel_forward: Starting MoE forward")
-        print(f"[DEBUG] _expert_parallel_forward: tokens.shape={tokens.shape}")
-        print(f"[DEBUG] _expert_parallel_forward: top_k_indices.shape={top_k_indices.shape}")
-        print(f"[DEBUG] _expert_parallel_forward: top_k_weights.shape={top_k_weights.shape}")
-        print(f"[DEBUG] _expert_parallel_forward: num_experts={self.num_experts}, num_experts_per_tok={self.num_experts_per_tok}")
-        print(f"[DEBUG] _expert_parallel_forward: expert_parallel_size={self.expert_parallel_size}, experts_per_device={self.experts_per_device}")
+    def _expert_parallel_forward(self, inputs, top_k_indices, top_k_weights):
+        """Expert并行模式：完全模仿sparse_matmul"""
+        batch_size, seq_len = inputs.shape[0], inputs.shape[1] if inputs.ndim > 1 else 1
         
-        print("Step 1: Permuting tokens by expert assignment")
-        # Step 1: permute - global sorting and grouping
-        sorted_inputs, sorted_selected_experts, weights, global_group_sizes, sorted_experts = self._permute_exact(
-            tokens, top_k_indices, top_k_weights
+        # ✅ Step 1: Permute - 按专家分组（与MaxText完全一致）
+        x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
+            inputs, top_k_indices, top_k_weights
         )
         
-        global_tracer.print(sorted_inputs, f"moe_permute_output", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(global_group_sizes, f"global_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(x, f"moe_permute_output", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(group_sizes, f"global_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
         
-        print("Step 2: Dispatching tokens to expert devices")
-        # Step 2: Expert parallel dispatch 
+        # ✅ Step 2: Expert Parallelism Dispatch（根据设备选择通信方式）
         expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-        local_expert_size = self.experts_per_device
-        
-        print(f"[DEBUG] _expert_parallel_forward: current expert_shard_id={expert_shard_id}, local_expert_size={local_expert_size}")
-        
-        if self.expert_parallel_size > 1:
-            x, local_sorted_indices, local_group_sizes, selected_experts = self._expert_dispatch(
-                sorted_inputs, global_group_sizes, sorted_experts, expert_shard_id, local_expert_size
+        if self.expert_parallelism > 1:
+            x, local_group_sizes, selected_experts = self._expert_all_to_all_dispatch(
+                x, group_sizes, selected_experts, expert_shard_id
             )
         else:
-            # Single device mode
-            print(f"[DEBUG] _expert_parallel_forward: using single device mode")
-            x = sorted_inputs
-            local_group_sizes = global_group_sizes
-            selected_experts = sorted_experts
-            local_sorted_indices = jnp.arange(len(sorted_inputs))
-        
-        print(f"[DEBUG] _expert_parallel_forward: after dispatch - x.shape={x.shape}")
-        print(f"[DEBUG] _expert_parallel_forward: local_group_sizes={local_group_sizes}")
+            local_group_sizes = group_sizes
         
         global_tracer.print(x, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"local_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
         
-        print("Step 3: Computing expert outputs")
-        # Step 3: GMM computation
-        intermediate_output = self._gmm_compute_exact(x, local_group_sizes, selected_experts)
+        # ✅ Step 3: GMM计算（与MaxText完全一致）
+        intermediate_output = self._gmm_compute(x, local_group_sizes, selected_experts)
         
-        print(f"[DEBUG] _expert_parallel_forward: after GMM - intermediate_output.shape={intermediate_output.shape}")
         global_tracer.print(intermediate_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         
-        print("Step 4: Collecting results from expert devices")
-        # Step 4: Result collection
-        if self.expert_parallel_size > 1:
-            intermediate_output = self._result_collection(
-                intermediate_output, local_sorted_indices, global_group_sizes, 
-                expert_shard_id, local_expert_size, tokens.shape[0] * self.num_experts_per_tok
+        # ✅ Step 4: Expert Parallelism Collection（根据设备选择通信方式）
+        if self.expert_parallelism > 1:
+            original_size = batch_size * seq_len * self.num_experts_per_tok
+            intermediate_output = self._expert_all_to_all_collect(
+                intermediate_output, group_sizes, expert_shard_id, original_size
             )
-        else:
-            print(f"[DEBUG] _expert_parallel_forward: skipping collection in single device mode")
         
-        print(f"[DEBUG] _expert_parallel_forward: after collection - intermediate_output.shape={intermediate_output.shape}")
         global_tracer.print(intermediate_output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
         
-        print("Step 5: Restoring original token order")
-        # Step 5: Unpermute - restore original order
-        final_output = self._unpermute_exact(
-            intermediate_output, sorted_selected_experts, weights, 
-            tokens.shape[0], tokens.shape[1]
+        # ✅ Step 5: Unpermute - 恢复原始顺序（与MaxText完全一致）
+        output = self._unpermute(
+            intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
         )
         
-        print(f"[DEBUG] _expert_parallel_forward: final_output.shape={final_output.shape}")
-        global_tracer.print(final_output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-        
-        print("MoE forward completed")
-        return final_output
+        global_tracer.print(output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
+        return output
     
-    def _permute_exact(self, inputs, top_k_indices, top_k_weights):
+    def _permute(self, inputs, top_k_indices, top_k_weights):
+        """与MaxText的permute完全一致"""
         inputs_shape = inputs.shape
         
-        print(f"[DEBUG] _permute_exact: inputs.shape={inputs_shape}")
-        print(f"[DEBUG] _permute_exact: top_k_indices.shape={top_k_indices.shape}")
-        print(f"[DEBUG] _permute_exact: top_k_weights.shape={top_k_weights.shape}")
-        
-        # Fix reshape logic: input is already (seq_len, hidden_dim)
+        # 处理输入维度
         if len(inputs_shape) == 2:
-            # Input is already 2D: (seq_len, hidden_dim)
             inputs_2d = inputs
             bsz_times_seq_len = inputs_shape[0]
         else:
-            # Input is 3D: (batch, seq_len, hidden_dim) -> (batch*seq_len, hidden_dim)
             bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
             inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[-1]))
         
-        print(f"[DEBUG] _permute_exact: inputs_2d.shape={inputs_2d.shape}, bsz_times_seq_len={bsz_times_seq_len}")
-        
+        # 按专家ID排序
         flatten_selected_experts = jnp.ravel(top_k_indices)
-        print(f"[DEBUG] _permute_exact: flatten_selected_experts.shape={flatten_selected_experts.shape}")
-        
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-        print(f"[DEBUG] _permute_exact: sorted_selected_experts.shape={sorted_selected_experts.shape}")
-        
         sorted_indices = sorted_selected_experts // self.num_experts_per_tok
-        print(f"[DEBUG] _permute_exact: sorted_indices.shape={sorted_indices.shape}")
         
-        # Sort inputs by expert
         sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
-        print(f"[DEBUG] _permute_exact: sorted_inputs.shape={sorted_inputs.shape}")
         
-        # Compute global group_sizes (number of tokens per expert)
+        # 计算每个专家的token数量
         group_sizes = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-        print(f"[DEBUG] _permute_exact: group_sizes.shape={group_sizes.shape}")
         
-        # 🛠️ FIX: 使用JAX兼容的方式显示非零专家信息
-        non_zero_mask = group_sizes > 0
-        non_zero_count = jnp.sum(non_zero_mask)
-        print(f"[DEBUG] _permute_exact: number of non-zero experts: {non_zero_count}")
-        print(f"[DEBUG] _permute_exact: total tokens distributed: {jnp.sum(group_sizes)}")
-        
-        # Generate sorted_experts
+        # 生成排序后的expert ID
         expert_indices = jnp.arange(self.num_experts)
-        sorted_experts = jnp.repeat(expert_indices, repeats=group_sizes, total_repeat_length=flatten_selected_experts.shape[0])
-        print(f"[DEBUG] _permute_exact: sorted_experts.shape={sorted_experts.shape}")
-        
-        print(f"[DEBUG] _permute_exact: returning - sorted_inputs.shape={sorted_inputs.shape}, group_sizes.shape={group_sizes.shape}")
+        sorted_experts = jnp.repeat(
+            expert_indices, repeats=group_sizes, total_repeat_length=flatten_selected_experts.shape[0]
+        )
         
         return sorted_inputs, sorted_selected_experts, top_k_weights, group_sizes, sorted_experts
     
-    def _expert_dispatch(self, sorted_inputs, global_group_sizes, sorted_experts, expert_shard_id, local_expert_size):
-        # Add detailed tracer for dispatch input
-        global_tracer.print(sorted_inputs, f"dispatch_input_sorted", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(global_group_sizes, f"dispatch_global_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
+    def _expert_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
+        """根据设备类型选择dispatch方式：CPU用all_to_all+padding，TPU/GPU用ragged_all_to_all"""
+        can_use_ragged, device_type = self._detect_device_capabilities()
         
-        # global_group_sizes: (num_experts,) -> reshaped: (num_expert_parallelism,)
-        reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1)
-        
-        global_tracer.print(reshaped_group_sizes, f"dispatch_reshaped_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
-        
-        # Unified communication abstraction
-        x, local_sorted_indices, local_group_sizes, selected_experts = self._unified_expert_communication(
-            sorted_inputs, global_group_sizes, sorted_experts, expert_shard_id, 
-            local_expert_size, reshaped_group_sizes, is_dispatch=True
+        global_tracer.print(
+            jnp.array([can_use_ragged]), 
+            f"dispatch_device_ragged_support", 
+            f"moe_dispatch_layer_id_{self.layer_id}"
         )
-        
-        # Add detailed tracer for dispatch output
-        global_tracer.print(x, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(local_group_sizes, f"dispatch_local_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(selected_experts, f"dispatch_selected_experts", f"moe_dispatch_layer_id_{self.layer_id}")
-        
-        return x, local_sorted_indices, local_group_sizes, selected_experts
-    
-    def _unified_expert_communication(self, data, global_group_sizes, sorted_experts, expert_shard_id, 
-                                     local_expert_size, reshaped_group_sizes, is_dispatch=True):
-        try:
-            devices = jax.devices()
-            is_cpu_only = all(device.platform == 'cpu' for device in devices)
-            can_use_ragged = not is_cpu_only and hasattr(jax.lax, 'ragged_all_to_all')
-        except:
-            is_cpu_only = True
-            can_use_ragged = False
-        
-        mode = "ragged_all_to_all" if can_use_ragged else "regular_all_to_all"
-        action = "dispatching" if is_dispatch else "collecting"
-        
-        stage_name = "dispatch" if is_dispatch else "collection"
-        global_tracer.print(data, f"comm_{stage_name}_input", f"moe_{stage_name}_layer_id_{self.layer_id}")
         
         if can_use_ragged:
-            # GPU/TPU: use ragged_all_to_all
-            result = self._ragged_communication(
-                data, global_group_sizes, sorted_experts, expert_shard_id, 
-                local_expert_size, reshaped_group_sizes, is_dispatch
-            )
+            return self._ragged_all_to_all_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
         else:
-            # CPU: use regular all_to_all
-            result = self._regular_communication(
-                data, global_group_sizes, sorted_experts, expert_shard_id, 
-                local_expert_size, reshaped_group_sizes, is_dispatch
-            )
-        
-        if is_dispatch:
-            global_tracer.print(result[0], f"comm_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
-        else:
-            global_tracer.print(result, f"comm_collection_output", f"moe_combine_layer_id_{self.layer_id}")
-        
-        return result
+            return self._regular_all_to_all_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
     
-    def _ragged_communication(self, data, global_group_sizes, sorted_experts, expert_shard_id, 
-                             local_expert_size, reshaped_group_sizes, is_dispatch):        
-        input_offsets, send_sizes, output_offsets, recv_sizes = self._get_all_to_all_params(
-            reshaped_group_sizes[None, :], expert_shard_id, self.expert_parallel_size, is_batch_sharded=False
+    def _ragged_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
+        """TPU/GPU: 使用ragged_all_to_all进行dispatch"""
+        local_expert_size = self.experts_per_device
+        reshaped_group_sizes = jnp.sum(
+            global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
         )
         
-        if is_dispatch:
-            buffer_size = int(self.expert_parallel_size * data.shape[0])
-            output_shape = jnp.zeros((buffer_size, data.shape[1]), dtype=data.dtype)
-            
-            x = jax.lax.ragged_all_to_all(
-                data, output_shape, input_offsets, send_sizes,
-                output_offsets, recv_sizes, axis_name=self.expert_axis_name,
-            )
-            
-            x, local_sorted_indices, local_group_sizes, selected_experts = self._local_permute_exact(
-                x, global_group_sizes[None, :], local_expert_size, expert_shard_id
-            )
-            
-            return x, local_sorted_indices, local_group_sizes, selected_experts
-        else:
-            original_inputs_first_dim = recv_sizes.shape[0] if len(recv_sizes.shape) > 0 else data.shape[0]
-            output_shape = jnp.zeros((original_inputs_first_dim, data.shape[1]), dtype=data.dtype)
-            
-            result = jax.lax.ragged_all_to_all(
-                data, output_shape, input_offsets, send_sizes,
-                output_offsets, recv_sizes, axis_name=self.expert_axis_name,
-            )
-            
-            return result
-    
-    def _regular_communication(self, data, global_group_sizes, sorted_experts, expert_shard_id, 
-                              local_expert_size, reshaped_group_sizes, is_dispatch):
-        print(f"[DEBUG] _regular_communication: {'dispatch' if is_dispatch else 'collection'} mode, data.shape={data.shape}")
-        
-        total_data = data.shape[0]
-        remainder = total_data % self.expert_parallel_size
-        padding_needed = (self.expert_parallel_size - remainder) % self.expert_parallel_size
-        target_size = total_data + padding_needed
-        
-        if padding_needed > 0:
-            padding_shape = (padding_needed, data.shape[1])
-            padding_data = jnp.zeros(padding_shape, dtype=data.dtype)
-            padded_data = jnp.concatenate([data, padding_data], axis=0)
-        else:
-            padded_data = data
-        
-        tokens_per_device = target_size // self.expert_parallel_size
-        reshaped_data = padded_data.reshape(
-            self.expert_parallel_size, tokens_per_device, data.shape[1]
+        # 计算ragged_all_to_all的参数
+        input_offsets, send_sizes, output_offsets, recv_sizes = self._get_ragged_all_to_all_params(
+            reshaped_group_sizes, expert_shard_id
         )
         
+        # 创建输出buffer
+        buffer_size = int(self.expert_parallelism * data.shape[0])
+        output_shape = jnp.zeros((buffer_size, data.shape[1]), dtype=data.dtype)
+        
+        # 执行ragged_all_to_all
+        communicated_data = jax.lax.ragged_all_to_all(
+            data, output_shape, input_offsets, send_sizes,
+            output_offsets, recv_sizes, axis_name=self.expert_axis_name,
+        )
+        
+        # 本地重排列
+        x, local_group_sizes, selected_experts = self._local_permute_for_ragged(
+            communicated_data, global_group_sizes, local_expert_size, expert_shard_id
+        )
+        
+        global_tracer.print(x, f"ragged_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
+        return x, local_group_sizes, selected_experts
+    
+    def _regular_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
+        """CPU: 使用普通all_to_all+padding进行dispatch"""
+        # 计算每个设备需要处理的数据量
+        local_expert_size = self.experts_per_device
+        reshaped_group_sizes = jnp.sum(
+            global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
+        )
+        
+        my_receive_size = reshaped_group_sizes[expert_shard_id]
+        
+        # 简化all_to_all逻辑
+        total_tokens = data.shape[0]
+        max_tokens_per_device = jnp.max(reshaped_group_sizes)
+        
+        # Pad数据到统一大小
+        if total_tokens < max_tokens_per_device * self.expert_parallelism:
+            padding_size = max_tokens_per_device * self.expert_parallelism - total_tokens
+            padding = jnp.zeros((padding_size, data.shape[1]), dtype=data.dtype)
+            padded_data = jnp.concatenate([data, padding], axis=0)
+        else:
+            padded_data = data[:max_tokens_per_device * self.expert_parallelism]
+        
+        # Reshape并执行all_to_all
+        reshaped_data = padded_data.reshape(self.expert_parallelism, max_tokens_per_device, data.shape[1])
+        
+        # All-to-all通信
         communicated_data = jax.lax.all_to_all(
             reshaped_data,
             axis_name=self.expert_axis_name,
@@ -456,298 +381,233 @@ class Qwen3MoE(nnx.Module):
             concat_axis=1
         )
         
+        # 取出当前设备需要的数据
         flattened_data = communicated_data.reshape(-1, data.shape[1])
+        valid_data = flattened_data[:my_receive_size]
         
-        if is_dispatch:
-            # 🛠️ FIX: 更精确的本地数据提取逻辑
-            all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
-                global_group_sizes[None, :], expert_shard_id * local_expert_size, local_expert_size, axis=1
-            )
-            local_group_sizes = jnp.sum(all_shard_local_sizes, axis=0)  # tokens per local expert
-            num_valid_tokens = jnp.sum(local_group_sizes)
-            
-            # 计算当前设备应该接收的数据范围
-            my_start_idx = expert_shard_id * tokens_per_device
-            my_end_idx = (expert_shard_id + 1) * tokens_per_device
-            
-            # 从all_to_all结果中提取当前设备的数据
-            if flattened_data.shape[0] >= my_end_idx:
-                device_data = flattened_data[my_start_idx:my_end_idx]
-            else:
-                device_data = flattened_data
-            
-            # 进一步截取到实际需要的token数量
-            if device_data.shape[0] >= num_valid_tokens:
-                valid_data = device_data[:num_valid_tokens]
-            else:
-                padding_size = int(num_valid_tokens) - device_data.shape[0]
-                padding = jnp.zeros((padding_size, device_data.shape[1]), dtype=device_data.dtype)
-                valid_data = jnp.concatenate([device_data, padding], axis=0)
-            
-            expert_ids = jnp.arange(local_expert_size)
-            sorted_experts_ids = jnp.repeat(expert_ids, local_group_sizes, total_repeat_length=num_valid_tokens)
-            local_sorted_indices = jnp.arange(num_valid_tokens)
-            
-            print(f"[DEBUG] _regular_communication: final valid_data.shape={valid_data.shape}")
-            
-            return valid_data, local_sorted_indices, local_group_sizes, sorted_experts_ids
-        else:
-            print(f"[DEBUG] _regular_communication: collection mode, returning flattened_data.shape={flattened_data.shape}")
-            return flattened_data
-    
-    def _local_permute_exact(self, inputs, global_group_sizes, local_expert_size, shard_index, is_offset=False, global_sorted_experts=None):
-        print(f"[DEBUG] _local_permute_exact: inputs.shape={inputs.shape}")
+        # 简化local expert ID分配
+        local_group_sizes = global_group_sizes[
+            expert_shard_id * local_expert_size:(expert_shard_id + 1) * local_expert_size
+        ]
         
-        all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
-            global_group_sizes, shard_index * local_expert_size, local_expert_size, axis=1
+        # 生成local expert IDs
+        local_expert_ids = jnp.repeat(
+            jnp.arange(local_expert_size),
+            local_group_sizes,
+            total_repeat_length=my_receive_size
         )
-        local_sizes = all_shard_local_sizes.reshape(-1)
-        local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
         
-        if is_offset:
-            divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
-            expert_indices = jnp.where(
-                divided_assignments == shard_index, 
-                jnp.mod(global_sorted_experts, local_expert_size), 
-                local_expert_size
-            )
+        global_tracer.print(valid_data, f"regular_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
+        return valid_data, local_group_sizes, local_expert_ids
+    
+    def _gmm_compute(self, x, local_group_sizes, selected_experts):
+        """✅ 关键修正：极简GMM计算，直接使用local_group_sizes"""
+        global_tracer.print(x, f"gmm_input_x", f"moe_compute_layer_id_{self.layer_id}")
+        
+        w0_kernel = self.wi_0.value  # shape: (experts_per_device, hidden, intermediate)
+        w1_kernel = self.wi_1.value
+        wo_kernel = self.wo.value    # shape: (experts_per_device, intermediate, hidden)
+        
+        # ✅ 直接用ragged_dot，不需要复杂的group_sizes处理
+        layer_w0 = jax.lax.ragged_dot(
+            lhs=x,
+            rhs=w0_kernel,
+            group_sizes=local_group_sizes,
+            preferred_element_type=self.dtype
+        )
+        
+        layer_w1 = jax.lax.ragged_dot(
+            lhs=x,
+            rhs=w1_kernel,
+            group_sizes=local_group_sizes,
+            preferred_element_type=self.dtype
+        )
+        
+        # 激活函数和合并
+        layer_act = jax.nn.silu(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+        
+        # 输出层
+        intermediate_output = jax.lax.ragged_dot(
+            lhs=intermediate_layer,
+            rhs=wo_kernel,
+            group_sizes=local_group_sizes,
+            preferred_element_type=self.dtype
+        )
+        
+        global_tracer.print(intermediate_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
+        return intermediate_output
+    
+    def _expert_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
+        """根据设备类型选择collection方式"""
+        can_use_ragged, device_type = self._detect_device_capabilities()
+        
+        global_tracer.print(
+            jnp.array([can_use_ragged]), 
+            f"collect_device_ragged_support", 
+            f"moe_combine_layer_id_{self.layer_id}"
+        )
+        
+        if can_use_ragged:
+            return self._ragged_all_to_all_collect(data, global_group_sizes, expert_shard_id, target_size)
         else:
-            # 🛠️ FIX: 正确的expert索引分配逻辑 - 需要在host上执行
-            local_sizes_host = jax.device_get(local_sizes)
-            expert_indices_list = []
-            for i, size in enumerate(local_sizes_host):
-                expert_indices_list.extend([i] * int(size))
-            
-            if len(expert_indices_list) != inputs.shape[0]:
-                if len(expert_indices_list) > inputs.shape[0]:
-                    expert_indices_list = expert_indices_list[:inputs.shape[0]]
-                else:
-                    last_expert_id = len(local_sizes_host) - 1
-                    expert_indices_list.extend([last_expert_id] * (inputs.shape[0] - len(expert_indices_list)))
-            
-            expert_indices = jnp.array(expert_indices_list)
+            return self._regular_all_to_all_collect(data, global_group_sizes, expert_shard_id, target_size)
+    
+    def _ragged_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
+        """TPU/GPU: 使用ragged_all_to_all进行collection"""
+        local_expert_size = self.experts_per_device
+        reshaped_group_sizes = jnp.sum(
+            global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
+        )
         
-        # Sort by local expert ID
+        # 计算ragged_all_to_all的参数（transpose版本用于collection）
+        input_offsets, send_sizes, output_offsets, recv_sizes = self._get_ragged_all_to_all_params(
+            reshaped_group_sizes.T, expert_shard_id  # 注意这里需要转置
+        )
+        
+        # 创建输出buffer
+        output_shape = jnp.zeros((target_size, data.shape[1]), dtype=data.dtype)
+        
+        # 执行ragged_all_to_all
+        result = jax.lax.ragged_all_to_all(
+            data, output_shape, input_offsets, send_sizes,
+            output_offsets, recv_sizes, axis_name=self.expert_axis_name,
+        )
+        
+        global_tracer.print(result, f"ragged_collect_output", f"moe_combine_layer_id_{self.layer_id}")
+        return result
+    
+    def _regular_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
+        """CPU: 使用普通all_to_all+padding进行collection"""
+        local_expert_size = self.experts_per_device
+        reshaped_group_sizes = jnp.sum(
+            global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
+        )
+        
+        max_size = jnp.max(reshaped_group_sizes)
+        
+        # Pad当前设备的数据到统一大小
+        if data.shape[0] < max_size:
+            padding_size = max_size - data.shape[0]
+            padding = jnp.zeros((padding_size, data.shape[1]), dtype=data.dtype)
+            padded_data = jnp.concatenate([data, padding], axis=0)
+        else:
+            padded_data = data[:max_size]
+        
+        # Reshape并执行all_to_all收集
+        reshaped_data = padded_data[None, :, :]  # (1, max_size, hidden)
+        
+        collected_data = jax.lax.all_to_all(
+            reshaped_data,
+            axis_name=self.expert_axis_name,
+            split_axis=1,
+            concat_axis=1
+        )
+        
+        flattened_result = collected_data.reshape(-1, data.shape[1])
+        
+        # 截取到目标大小
+        result = flattened_result[:target_size]
+        
+        global_tracer.print(result, f"regular_collect_output", f"moe_combine_layer_id_{self.layer_id}")
+        return result
+    
+    def _get_ragged_all_to_all_params(self, group_sizes, shard_id):
+        """计算ragged_all_to_all所需的参数"""
+        # 简化版本，适用于expert并行
+        input_offsets = jnp.zeros(self.expert_parallelism, dtype=jnp.int32)
+        send_sizes = jnp.repeat(group_sizes[shard_id], self.expert_parallelism)
+        
+        output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(group_sizes[:-1])))[shard_id]
+        output_offsets = jnp.repeat(output_offset, self.expert_parallelism)
+        
+        recv_sizes = group_sizes
+        
+        return input_offsets, send_sizes, output_offsets, recv_sizes
+    
+    def _local_permute_for_ragged(self, inputs, global_group_sizes, local_expert_size, shard_index):
+        """为ragged_all_to_all结果进行本地重排列"""
+        # 计算本地group sizes
+        local_group_sizes = global_group_sizes[
+            shard_index * local_expert_size:(shard_index + 1) * local_expert_size
+        ]
+        
+        # 生成expert indices
+        expert_indices = jnp.repeat(
+            jnp.arange(local_expert_size),
+            local_group_sizes,
+            total_repeat_length=jnp.sum(local_group_sizes)
+        )
+        
+        # 按expert ID排序
         sorted_indices = jnp.argsort(expert_indices)
         sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
         sorted_experts_ids = expert_indices[sorted_indices]
         
-        print(f"[DEBUG] _local_permute_exact: output shapes - sorted_inputs={sorted_inputs.shape}")
-        
-        return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
+        return sorted_inputs, local_group_sizes, sorted_experts_ids
     
-    def _gmm_compute_exact(self, x, local_group_sizes, selected_experts):
-        # 只保留关键的输入输出tracer，移除内部详细tracer
-        global_tracer.print(x, f"gmm_input_x", f"moe_compute_layer_id_{self.layer_id}")
-        
-        # 简化调试日志
-        print(f"[DEBUG] _gmm_compute_exact: x.shape={x.shape}, processing GMM computation...")
-        
-        def gmm_layer(inputs, kernel, group_sizes, expert_assignments, layer_name):
-            # 移除内部详细tracer，只保留计算
-            result = jax.lax.ragged_dot(
-                lhs=inputs,
-                rhs=kernel,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype
-            )
-            return result
-        
-        w0_kernel = self.wi_0.value
-        w1_kernel = self.wi_1.value
-        wo_kernel = self.wo.value
-        
-        print(f"[DEBUG] _gmm_compute_exact: weight shapes - w0={w0_kernel.shape}, w1={w1_kernel.shape}, wo={wo_kernel.shape}")
-        
-        # 🛠️ FIX: 更安全的group_sizes处理逻辑（简化版）
-        expected_global_experts = w0_kernel.shape[0]
-        local_expert_count = len(local_group_sizes)
-        
-        if local_expert_count != expected_global_experts:
-            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-            experts_per_device = self.experts_per_device
-            local_expert_start = expert_shard_id * experts_per_device
-            local_expert_end = (expert_shard_id + 1) * experts_per_device
-            
-            if expected_global_experts == self.num_experts:
-                # 权重是全局的，创建mask
-                expanded_group_sizes = jnp.zeros(expected_global_experts, dtype=local_group_sizes.dtype)
-                expanded_group_sizes = expanded_group_sizes.at[local_expert_start:local_expert_end].set(local_group_sizes)
-                final_group_sizes = expanded_group_sizes
-            else:
-                # 权重是本地的，直接使用local_group_sizes
-                final_group_sizes = local_group_sizes
-        else:
-            final_group_sizes = local_group_sizes
-        
-        print(f"[DEBUG] _gmm_compute_exact: GMM computing with {jnp.sum(final_group_sizes)} tokens")
-        
-        # 快速GMM计算，不使用过多tracer
-        layer_w0 = gmm_layer(x, w0_kernel, final_group_sizes, selected_experts, "wi_0")
-        layer_w1 = gmm_layer(x, w1_kernel, final_group_sizes, selected_experts, "wi_1")
-        layer_act = jax.nn.silu(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
-        intermediate_output = gmm_layer(intermediate_layer, wo_kernel, final_group_sizes, selected_experts, "wo")
-        
-        # 只保留最终输出tracer
-        global_tracer.print(intermediate_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
-        
-        print(f"[DEBUG] _gmm_compute_exact: completed, output.shape={intermediate_output.shape}")
-        
-        return intermediate_output
-    
-    def _result_collection(self, intermediate_output, local_sorted_indices, global_group_sizes, 
-                                   expert_shard_id, local_expert_size, original_inputs_first_dim):        
-        print(f"[DEBUG] _result_collection: intermediate_output.shape={intermediate_output.shape}")
-        
-        global_tracer.print(intermediate_output, f"collection_input", f"moe_combine_layer_id_{self.layer_id}")
-        
-        if len(intermediate_output) == 0:
-            print(f"[DEBUG] _result_collection: empty intermediate_output, creating zeros")
-            empty_result = jnp.zeros((original_inputs_first_dim, intermediate_output.shape[-1]), dtype=self.dtype)
-            return empty_result
-        
-        # 🛠️ FIX: 更安全的本地排序恢复
-        if len(local_sorted_indices) > 0 and len(intermediate_output) > 0:
-            # 确保索引范围有效
-            max_idx = len(intermediate_output) - 1
-            valid_indices = jnp.clip(jnp.argsort(local_sorted_indices), 0, max_idx)
-            local_output = jnp.take(intermediate_output, indices=valid_indices, axis=0)
-        else:
-            local_output = intermediate_output
-        
-        reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1)
-        
-        result = self._unified_expert_communication(
-            local_output, global_group_sizes, None, expert_shard_id,
-            local_expert_size, reshaped_group_sizes, is_dispatch=False
-        )
-        
-        # 🛠️ FIX: 更安全的尺寸对齐逻辑
-        expected_size = original_inputs_first_dim
-        actual_size = result.shape[0]
-        
-        if actual_size > expected_size:
-            result = result[:expected_size]
-        elif actual_size < expected_size:
-            padding_size = expected_size - actual_size
-            padding = jnp.zeros((padding_size, result.shape[1]), dtype=result.dtype)
-            result = jnp.concatenate([result, padding], axis=0)
-        
-        print(f"[DEBUG] _result_collection: final result.shape={result.shape}")
-        global_tracer.print(result, f"collection_final_result", f"moe_combine_layer_id_{self.layer_id}")
-        
-        return result
-
-    def _unpermute_exact(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):        
-        # Add unpermute input tracers
+    def _unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, seq_len):
+        """与MaxText的unpermute完全一致"""
         global_tracer.print(intermediate, f"unpermute_input", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(sorted_selected_experts, f"unpermute_sorted_experts", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(weights, f"unpermute_weights", f"moe_combine_layer_id_{self.layer_id}")
         
         unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
         
-        global_tracer.print(unsort_intermediate, f"unpermute_unsorted", f"moe_combine_layer_id_{self.layer_id}")
-        
         reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
-        
-        global_tracer.print(reshaped_weights, f"unpermute_reshaped_weights", f"moe_combine_layer_id_{self.layer_id}")
-        
         reshaped_intermediate = jnp.reshape(
             unsort_intermediate,
             (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
         )
         
-        global_tracer.print(reshaped_intermediate, f"unpermute_reshaped_intermediate", f"moe_combine_layer_id_{self.layer_id}")
-        
-        # Add einsum input tracers
-        intermediate_f32 = reshaped_intermediate.astype(jnp.float32)
-        weights_f32 = reshaped_weights.astype(jnp.float32)
-        global_tracer.print(intermediate_f32, f"unpermute_intermediate_f32", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(weights_f32, f"unpermute_weights_f32", f"moe_combine_layer_id_{self.layer_id}")
-        
+        # 权重加权求和
         output = jnp.einsum(
             "BKE,BK -> BE",
-            intermediate_f32,
-            weights_f32,
-            precision=jax.lax.Precision.DEFAULT,
+            reshaped_intermediate.astype(jnp.float32),
+            reshaped_weights.astype(jnp.float32),
         )
         
-        global_tracer.print(output, f"unpermute_einsum_output", f"moe_combine_layer_id_{self.layer_id}")
+        # 恢复原始shape
+        if batch_size == 1 and seq_len == 1:
+            final_shape = (reshaped_weights.shape[0], -1)
+        else:
+            final_shape = (batch_size, seq_len, -1)
         
-        final_output = output.astype(self.dtype)
+        global_tracer.print(output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
+        return output.reshape(final_shape).astype(self.dtype)
+    
+    def _single_device_forward(self, inputs, top_k_indices, top_k_weights):
+        """单设备模式：简单的einsum实现"""
+        global_tracer.print(inputs, f"moe_local_input", f"moe_compute_layer_id_{self.layer_id}")
         
+        num_tokens = inputs.shape[0] * (inputs.shape[1] if inputs.ndim > 1 else 1)
+        inputs_flat = inputs.reshape(num_tokens, -1)
         
-        global_tracer.print(final_output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
-        
-        return final_output
-
-    def _local_forward(self, tokens, top_k_indices, top_k_weights):
-        num_tokens, hidden_dim = tokens.shape
-        
-        global_tracer.print(tokens, f"moe_local_input", f"moe_compute_layer_id_{self.layer_id}")
-        
+        # 创建专家权重mask
         expert_weights = jnp.zeros((num_tokens, self.num_experts), dtype=self.dtype)
+        token_indices = jnp.arange(num_tokens)[:, None]
         
-        token_indices = jnp.arange(num_tokens)[:, None]  # (num_tokens, 1)
-        expert_weights = expert_weights.at[token_indices, top_k_indices].set(top_k_weights)
+        top_k_indices_flat = top_k_indices.reshape(num_tokens, -1)
+        top_k_weights_flat = top_k_weights.reshape(num_tokens, -1)
+        
+        expert_weights = expert_weights.at[token_indices, top_k_indices_flat].set(top_k_weights_flat)
         
         global_tracer.print(expert_weights, f"expert_weights_matrix", f"moe_compute_layer_id_{self.layer_id}")
         
-        all_wi_0 = self.wi_0.value  # (experts_per_device, hidden_dim, intermediate_dim)
-        all_wi_1 = self.wi_1.value  # (experts_per_device, hidden_dim, intermediate_dim)
-        all_wo = self.wo.value      # (experts_per_device, intermediate_dim, hidden_dim)
+        # 直接计算
+        all_wi_0 = self.wi_0.value
+        all_wi_1 = self.wi_1.value
+        all_wo = self.wo.value
         
-        layer_w0 = jnp.einsum('th,ehd->ted', tokens, all_wi_0)  # (num_tokens, experts_per_device, intermediate_dim)
-        layer_w1 = jnp.einsum('th,ehd->ted', tokens, all_wi_1)  # (num_tokens, experts_per_device, intermediate_dim)
+        layer_w0 = jnp.einsum('th,ehd->ted', inputs_flat, all_wi_0)
+        layer_w1 = jnp.einsum('th,ehd->ted', inputs_flat, all_wi_1)
         
         global_tracer.print(layer_w0, f"layer_w0_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(layer_w1, f"layer_w1_output", f"moe_compute_layer_id_{self.layer_id}")
         
-        activated = jax.nn.silu(layer_w0) * layer_w1  # (num_tokens, experts_per_device, intermediate_dim)
-        
-        global_tracer.print(activated, f"activated_intermediate", f"moe_compute_layer_id_{self.layer_id}")
-        
-        expert_outputs = jnp.einsum('ted,edh->teh', activated, all_wo)  # (num_tokens, experts_per_device, hidden_dim)
-        
-        global_tracer.print(expert_outputs, f"expert_outputs", f"moe_compute_layer_id_{self.layer_id}")
-        
-        final_output = jnp.einsum('te,teh->th', expert_weights, expert_outputs)  # (num_tokens, hidden_dim)
+        activated = jax.nn.silu(layer_w0) * layer_w1
+        expert_outputs = jnp.einsum('ted,edh->teh', activated, all_wo)
+        final_output = jnp.einsum('te,teh->th', expert_weights, expert_outputs)
         
         global_tracer.print(final_output, f"moe_local_final_output", f"moe_compute_layer_id_{self.layer_id}")
-        
-        return final_output
-
-    def _get_all_to_all_params(self, all_shards_group_sizes, shard_id, num_expert_parallelism, is_batch_sharded=True):        
-        def transform_array(input_array, shard_id, strategy, is_batch_sharded):
-            if is_batch_sharded:
-                if strategy == "INPUT_OFFSET":
-                    local_array = input_array[shard_id]
-                    return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
-                elif strategy == "SEND_SIZE":
-                    return input_array[shard_id]
-                elif strategy == "OUTPUT_OFFSET":
-                    zero_row = jnp.zeros((1,) + input_array.shape[1:], dtype=input_array.dtype)
-                    array_with_zeros = jnp.concatenate((zero_row, input_array), axis=0)
-                    cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
-                    return cumulated_array[shard_id]
-                elif strategy == "RECV_SIZE":
-                    return input_array[:, shard_id]
-            else:
-                if strategy == "INPUT_OFFSET":
-                    return jnp.zeros(num_expert_parallelism, dtype=input_array.dtype)
-                elif strategy == "SEND_SIZE":
-                    return jnp.repeat(input_array[shard_id], num_expert_parallelism)
-                elif strategy == "OUTPUT_OFFSET":
-                    output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(input_array[:-1])))[shard_id]
-                    return jnp.repeat(output_offset, num_expert_parallelism)
-                elif strategy == "RECV_SIZE":
-                    return input_array
-            raise ValueError(f"Unknown transform strategy: {strategy}")
-        
-        input_offsets = transform_array(all_shards_group_sizes, shard_id, "INPUT_OFFSET", is_batch_sharded)
-        send_sizes = transform_array(all_shards_group_sizes, shard_id, "SEND_SIZE", is_batch_sharded)
-        output_offsets = transform_array(all_shards_group_sizes, shard_id, "OUTPUT_OFFSET", is_batch_sharded)
-        recv_sizes = transform_array(all_shards_group_sizes, shard_id, "RECV_SIZE", is_batch_sharded)
-        
-        return input_offsets, send_sizes, output_offsets, recv_sizes
+        return final_output.reshape(inputs.shape).astype(self.dtype)
