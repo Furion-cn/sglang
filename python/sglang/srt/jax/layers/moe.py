@@ -465,6 +465,13 @@ class Qwen3MoE(nnx.Module):
     def _cpu_simple_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
         local_expert_size = self.experts_per_device
         
+        # 🔍 添加详细的调试日志
+        jax.debug.print("dispatch_debug: expert_shard_id={expert_shard_id} local_expert_size={local_expert_size}", 
+                       expert_shard_id=expert_shard_id, local_expert_size=local_expert_size)
+        jax.debug.print("dispatch_debug: data.shape={data_shape} sorted_experts={sorted_experts}", 
+                       data_shape=data.shape, sorted_experts=sorted_experts)
+        jax.debug.print("dispatch_debug: global_group_sizes={group_sizes}", group_sizes=global_group_sizes)
+        
         # ✅ 使用MaxText的local_permute逻辑（is_offset=True模式）
         divided_assignments = jnp.floor_divide(sorted_experts, local_expert_size)
         expert_indices = jnp.where(
@@ -473,8 +480,15 @@ class Qwen3MoE(nnx.Module):
             local_expert_size  # 不属于当前设备的标记为local_expert_size
         )
         
+        jax.debug.print("dispatch_debug: divided_assignments={div_assign} expert_indices={exp_indices}", 
+                       div_assign=divided_assignments, exp_indices=expert_indices)
+        
         # 只保留属于当前设备的数据
         valid_mask = expert_indices < local_expert_size
+        valid_count = jnp.sum(valid_mask)
+        jax.debug.print("dispatch_debug: valid_mask_count={valid_count} total_tokens={total}", 
+                       valid_count=valid_count, total=expert_indices.shape[0])
+        
         valid_indices = jnp.where(valid_mask, size=expert_indices.shape[0], fill_value=0)[0]
         
         if jnp.sum(valid_mask) == 0:
@@ -482,6 +496,8 @@ class Qwen3MoE(nnx.Module):
             local_data = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
             local_group_sizes = jnp.zeros(local_expert_size, dtype=jnp.int32)
             local_experts = jnp.array([], dtype=jnp.int32)
+            jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens (empty assignment)", 
+                           dev_id=expert_shard_id)
         else:
             # 提取属于当前设备的数据
             local_data = data[valid_indices[:jnp.sum(valid_mask)]]
@@ -496,6 +512,9 @@ class Qwen3MoE(nnx.Module):
             sorted_indices = jnp.argsort(local_expert_indices)
             local_data = local_data[sorted_indices]
             local_experts = local_expert_indices[sorted_indices]
+            
+            jax.debug.print("dispatch_debug: device_{dev_id} got {tokens} tokens, local_data.shape={shape}", 
+                           dev_id=expert_shard_id, tokens=jnp.sum(valid_mask), shape=local_data.shape)
         
         global_tracer.print(local_data, f"cpu_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"cpu_dispatch_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
