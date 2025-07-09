@@ -244,7 +244,7 @@ class Qwen3MoE(nnx.Module):
             w0_max = jnp.max(w0_weights)
             w0_mean = jnp.mean(w0_weights)
             w0_std = jnp.std(w0_weights)
-            jax.debug.print("w0_weights_stats dev{dev_id}: min={min:.6f} max={max:.6f} mean={mean:.6f} std={std:.6f}", 
+            jax.debug.print("w0_weights_stats dev{dev_id}: min={min} max={max} mean={mean} std={std}", 
                            dev_id=expert_shard_id, min=w0_min, max=w0_max, mean=w0_mean, std=w0_std)
             
             # 获取top-k专家
@@ -303,7 +303,7 @@ class Qwen3MoE(nnx.Module):
                 output_max = jnp.max(intermediate_output)
                 output_mean = jnp.mean(intermediate_output)
                 output_std = jnp.std(intermediate_output)
-                jax.debug.print("gmm_output_stats dev{dev_id}: min={min:.6f} max={max:.6f} mean={mean:.6f} std={std:.6f}",
+                jax.debug.print("gmm_output_stats dev{dev_id}: min={min} max={max} mean={mean} std={std}",
                                dev_id=expert_shard_id, min=output_min, max=output_max, mean=output_mean, std=output_std)
             
             jax.debug.print("compute_output_shape={shape}", shape=intermediate_output.shape)
