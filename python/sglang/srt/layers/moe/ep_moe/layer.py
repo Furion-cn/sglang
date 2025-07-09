@@ -258,20 +258,10 @@ class EPMoE(torch.nn.Module):
                 layer_id=self.layer_id,
             ),
         )
-        logger.info(f"topk_weights: {topk_weights}, layer_id: {self.layer_id}")
-
+        logger.info(f"hidden_states: {hidden_states}")
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
-        
-        # Add detailed dispatch tracers to align with JAX
-        global_tracer.print(hidden_states, f"dispatch_input_sorted", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(topk_ids, f"dispatch_topk_ids", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(seg_indptr, f"dispatch_seg_indptr", f"moe_dispatch_layer_id_{self.layer_id}")
-        
-        global_tracer.print(reorder_topk_ids, f"reorder_topk_ids", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(src2dst, f"src2dst", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(seg_indptr, f"seg_indptr", f"moe_dispatch_layer_id_{self.layer_id}")
 
         # Simulate permute output for JAX alignment - using hidden_states before preprocessing 
         global_tracer.print(hidden_states, f"moe_permute_output", f"moe_dispatch_layer_id_{self.layer_id}")
