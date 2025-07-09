@@ -199,6 +199,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            logger.info(f"layer_id: {self.layer_id}, ============tp_size==============: {self.tp_size}, ==============moe_after_all_reduce============: {final_hidden_states}, min: {final_hidden_states.min()}, max: {final_hidden_states.max()}, mean: {final_hidden_states.mean()}, std: {final_hidden_states.std()}")
             global_tracer.print(final_hidden_states, f"moe_after_all_reduce", f"moe_combine_layer_id_{self.layer_id}")
 
         logger.info(f"layer_id: {self.layer_id}, ==========moe_final_output===========: {final_hidden_states}, min: {final_hidden_states.min()}, max: {final_hidden_states.max()}, mean: {final_hidden_states.mean()}, std: {final_hidden_states.std()}")        
