@@ -432,10 +432,8 @@ class Qwen3MoE(nnx.Module):
         return final_output.reshape(inputs.shape).astype(self.dtype)
     
     def _permute(self, inputs, top_k_indices, top_k_weights):
-        """与MaxText的permute完全一致"""
         inputs_shape = inputs.shape
         
-        # 处理输入维度
         if len(inputs_shape) == 2:
             inputs_2d = inputs
             bsz_times_seq_len = inputs_shape[0]
@@ -443,17 +441,14 @@ class Qwen3MoE(nnx.Module):
             bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
             inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[-1]))
         
-        # 按专家ID排序
         flatten_selected_experts = jnp.ravel(top_k_indices)
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
         sorted_indices = sorted_selected_experts // self.num_experts_per_tok
         
         sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
         
-        # 计算每个专家的token数量
         group_sizes = jnp.bincount(flatten_selected_experts, length=self.num_experts)
         
-        # 生成排序后的expert ID
         expert_indices = jnp.arange(self.num_experts)
         sorted_experts = jnp.repeat(
             expert_indices, repeats=group_sizes, total_repeat_length=flatten_selected_experts.shape[0]
@@ -462,7 +457,6 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, sorted_selected_experts, top_k_weights, group_sizes, sorted_experts
     
     def _expert_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
-        """根据设备类型选择dispatch方式：CPU用简化逻辑，TPU/GPU用ragged_all_to_all"""
         can_use_ragged, device_type = self._detect_device_capabilities()
         
         global_tracer.print(
@@ -478,7 +472,6 @@ class Qwen3MoE(nnx.Module):
             return self._cpu_simple_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
     
     def _cpu_simple_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
-        """✅ CPU模式：简化的dispatch，直接使用local_permute逻辑"""
         local_expert_size = self.experts_per_device
         
         # ✅ 使用MaxText的local_permute逻辑（is_offset=True模式）
@@ -519,7 +512,6 @@ class Qwen3MoE(nnx.Module):
         return local_data, local_group_sizes, local_experts
     
     def _ragged_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
-        """TPU/GPU: 使用ragged_all_to_all进行dispatch"""
         local_expert_size = self.experts_per_device
         reshaped_group_sizes = jnp.sum(
             global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
@@ -530,7 +522,6 @@ class Qwen3MoE(nnx.Module):
             reshaped_group_sizes, expert_shard_id
         )
         
-        # 创建输出buffer
         buffer_size = int(self.expert_parallelism * data.shape[0])
         output_shape = jnp.zeros((buffer_size, data.shape[1]), dtype=data.dtype)
         
@@ -540,7 +531,6 @@ class Qwen3MoE(nnx.Module):
             output_offsets, recv_sizes, axis_name=self.expert_axis_name,
         )
         
-        # 本地重排列
         x, local_group_sizes, selected_experts = self._local_permute_for_ragged(
             communicated_data, global_group_sizes, local_expert_size, expert_shard_id
         )
@@ -549,7 +539,6 @@ class Qwen3MoE(nnx.Module):
         return x, local_group_sizes, selected_experts
     
     def _expert_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
-        """根据设备类型选择collection方式"""
         can_use_ragged, device_type = self._detect_device_capabilities()
         
         global_tracer.print(
@@ -561,24 +550,15 @@ class Qwen3MoE(nnx.Module):
         if can_use_ragged:
             return self._ragged_all_to_all_collect(data, global_group_sizes, expert_shard_id, target_size)
         else:
-            # ✅ CPU模式：简化collect，使用all_gather收集所有设备数据
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
-    def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
-        """✅ CPU模式：简化的JAX兼容collect逻辑"""
-        # ✅ 简化策略：直接使用all_gather，然后简单拼接
-        # 避免复杂的boolean indexing和动态切片
-        
+    def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
         local_size = data.shape[0]
         
-        # Step 1: All_gather收集所有设备的数据
         all_data = jax.lax.all_gather(data, axis_name=self.expert_axis_name)
-        # all_data.shape = (num_devices, local_size, hidden_dim)
         
         global_tracer.print(all_data, f"cpu_collect_all_data_simple", f"moe_combine_layer_id_{self.layer_id}")
         
-        # Step 2: 简单地将所有设备的数据拼接起来
-        # 注意：这里可能会有一些padding数据，但在unpermute阶段会被正确处理
         result = all_data.reshape(-1, data.shape[1])
         
         global_tracer.print(result, f"cpu_collect_flattened_result", f"moe_combine_layer_id_{self.layer_id}")
@@ -627,8 +607,6 @@ class Qwen3MoE(nnx.Module):
         return result
     
     def _get_ragged_all_to_all_params(self, group_sizes, shard_id):
-        """计算ragged_all_to_all所需的参数"""
-        # 简化版本，适用于expert并行
         input_offsets = jnp.zeros(self.expert_parallelism, dtype=jnp.int32)
         send_sizes = jnp.repeat(group_sizes[shard_id], self.expert_parallelism)
         
@@ -640,20 +618,16 @@ class Qwen3MoE(nnx.Module):
         return input_offsets, send_sizes, output_offsets, recv_sizes
     
     def _local_permute_for_ragged(self, inputs, global_group_sizes, local_expert_size, shard_index):
-        """为ragged_all_to_all结果进行本地重排列"""
-        # 计算本地group sizes
         local_group_sizes = global_group_sizes[
             shard_index * local_expert_size:(shard_index + 1) * local_expert_size
         ]
         
-        # 生成expert indices
         expert_indices = jnp.repeat(
             jnp.arange(local_expert_size),
             local_group_sizes,
             total_repeat_length=jnp.sum(local_group_sizes)
         )
         
-        # 按expert ID排序
         sorted_indices = jnp.argsort(expert_indices)
         sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
         sorted_experts_ids = expert_indices[sorted_indices]
@@ -661,12 +635,10 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, local_group_sizes, sorted_experts_ids
     
     def _unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, seq_len):
-        """✅ 修复版unpermute：确保数据维度匹配，参考MaxText原版"""
         global_tracer.print(intermediate, f"unpermute_input", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(sorted_selected_experts, f"unpermute_sorted_experts", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(weights, f"unpermute_weights", f"moe_combine_layer_id_{self.layer_id}")
         
-        # ✅ 关键检查：确保intermediate和sorted_selected_experts长度匹配
         expected_tokens = sorted_selected_experts.shape[0]
         actual_tokens = intermediate.shape[0]
         
@@ -680,9 +652,7 @@ class Qwen3MoE(nnx.Module):
         )
         
         if actual_tokens != expected_tokens:
-            # 如果长度不匹配，需要调整
             if actual_tokens > expected_tokens:
-                # 截取前expected_tokens个
                 intermediate = intermediate[:expected_tokens]
                 jax.debug.print("unpermute_truncated: from {from_size} to {to_size}", 
                                from_size=actual_tokens, to_size=expected_tokens)
@@ -692,7 +662,6 @@ class Qwen3MoE(nnx.Module):
                     f"moe_combine_layer_id_{self.layer_id}"
                 )
             else:
-                # 如果不够，用零填充
                 padding_size = expected_tokens - actual_tokens
                 padding = jnp.zeros((padding_size, intermediate.shape[1]), dtype=intermediate.dtype)
                 intermediate = jnp.concatenate([intermediate, padding], axis=0)
@@ -704,10 +673,8 @@ class Qwen3MoE(nnx.Module):
                     f"moe_combine_layer_id_{self.layer_id}"
                 )
         
-        # ✅ 按照原始顺序重新排列
         unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
         
-        # ✅ 计算正确的reshape尺寸
         total_tokens = weights.shape[0] * weights.shape[1] // self.num_experts_per_tok
         
         reshaped_weights = jnp.reshape(weights, (total_tokens, self.num_experts_per_tok))
@@ -719,7 +686,6 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(reshaped_weights, f"unpermute_reshaped_weights", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(reshaped_intermediate, f"unpermute_reshaped_intermediate", f"moe_combine_layer_id_{self.layer_id}")
         
-        # ✅ 权重加权求和 - 参考MaxText原版
         output = jnp.einsum(
             "BKE,BK -> BE",
             reshaped_intermediate.astype(jnp.float32),
@@ -728,12 +694,9 @@ class Qwen3MoE(nnx.Module):
         
         global_tracer.print(output, f"unpermute_einsum_output", f"moe_combine_layer_id_{self.layer_id}")
         
-        # ✅ 恢复到原始输入shape - 参考MaxText: batch_size, sequence_length, -1
         if len(weights.shape) == 2:
-            # 输入是2D，输出也应该是2D
             final_output = output.astype(self.dtype)
         else:
-            # 恢复到3D
             final_output = output.reshape(batch_size, seq_len, -1).astype(self.dtype)
         
         global_tracer.print(final_output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
