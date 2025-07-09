@@ -233,8 +233,8 @@ class Qwen3MoE(nnx.Module):
             """
             # ✅ 添加设备特定的日志验证
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-            jax.debug.print(f"expert_shard_id: {expert_shard_id}")
-            jax.debug.print(f"moe_compute_layer_id_{self.layer_id}")
+            jax.debug.print("moe_compute_layer_id_{layer_id}", layer_id=self.layer_id)
+            jax.debug.print("expert_shard_id={expert_shard_id}", expert_shard_id=expert_shard_id)
             
             global_tracer.print(hidden_states, f"shard_map_inputs", f"moe_compute_layer_id_{self.layer_id}")
             
