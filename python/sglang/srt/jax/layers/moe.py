@@ -472,6 +472,15 @@ class Qwen3MoE(nnx.Module):
                        data_shape=data.shape, sorted_experts=sorted_experts)
         jax.debug.print("dispatch_debug: global_group_sizes={group_sizes}", group_sizes=global_group_sizes)
         
+        # ✅ 计算当前设备负责的专家范围和预期token数
+        start_expert = expert_shard_id * local_expert_size
+        end_expert = (expert_shard_id + 1) * local_expert_size
+        local_group_sizes = global_group_sizes[start_expert:end_expert]
+        expected_tokens = jnp.sum(local_group_sizes)
+        
+        jax.debug.print("dispatch_debug: start_expert={start} end_expert={end} expected_tokens={expected}", 
+                       start=start_expert, end=end_expert, expected=expected_tokens)
+        
         # ✅ 使用MaxText的local_permute逻辑（is_offset=True模式）
         divided_assignments = jnp.floor_divide(sorted_experts, local_expert_size)
         expert_indices = jnp.where(
@@ -489,39 +498,33 @@ class Qwen3MoE(nnx.Module):
         jax.debug.print("dispatch_debug: valid_mask_count={valid_count} total_tokens={total}", 
                        valid_count=valid_count, total=expert_indices.shape[0])
         
-        # 🛠️ 修复：使用JAX兼容的索引方式，避免TracerArrayConversionError
-        if valid_count == 0:
+        # 🛠️ 修复：使用gather操作，避免动态切片
+        if expected_tokens == 0:
             # 当前设备没有分配到任何token
             local_data = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
-            local_group_sizes = jnp.zeros(local_expert_size, dtype=jnp.int32)
             local_experts = jnp.array([], dtype=jnp.int32)
             jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens (empty assignment)", 
                            dev_id=expert_shard_id)
         else:
-            # 🛠️ 修复：使用jnp.where获取有效索引，然后用jnp.take提取数据
-            valid_indices = jnp.where(valid_mask, size=data.shape[0], fill_value=0)[0]
-            valid_size = jnp.sum(valid_mask.astype(jnp.int32))
+            # 🛠️ 使用gather操作收集属于当前设备的数据
+            # 首先找到所有有效的索引位置
+            valid_positions = jnp.where(valid_mask, size=expected_tokens, fill_value=0)[0]
             
-            # 只取前valid_size个有效索引
-            local_data = jnp.take(data, valid_indices[:valid_size], axis=0)
-            local_expert_indices = jnp.take(expert_indices, valid_indices[:valid_size], axis=0)
+            # 使用gather收集数据
+            local_data = jnp.take(data, valid_positions, axis=0)
+            local_expert_indices = jnp.take(expert_indices, valid_positions, axis=0)
             
             # 验证提取的数据大小
             jax.debug.print("dispatch_debug: extracted_data_shape={shape} expected_count={count}", 
-                           shape=local_data.shape, count=valid_count)
+                           shape=local_data.shape, count=expected_tokens)
             
-            # 计算local group sizes
-            local_group_sizes = jnp.bincount(
-                local_expert_indices, length=local_expert_size
-            )
-            
-            # 排序
+            # 排序：按expert_id排序
             sorted_indices = jnp.argsort(local_expert_indices)
             local_data = jnp.take(local_data, sorted_indices, axis=0)
             local_experts = jnp.take(local_expert_indices, sorted_indices, axis=0)
             
             jax.debug.print("dispatch_debug: device_{dev_id} got {tokens} tokens, final_local_data.shape={shape}", 
-                           dev_id=expert_shard_id, tokens=valid_count, shape=local_data.shape)
+                           dev_id=expert_shard_id, tokens=expected_tokens, shape=local_data.shape)
         
         global_tracer.print(local_data, f"cpu_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"cpu_dispatch_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
