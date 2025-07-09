@@ -518,7 +518,7 @@ class Qwen3MoE(nnx.Module):
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
-        """✅ CPU模式：简化collect逻辑，确保数据完整性"""
+        """✅ CPU模式：JAX兼容的collect逻辑，确保数据完整性"""
         # Step 1: 收集所有设备的数据长度
         local_size = data.shape[0]
         all_sizes = jax.lax.all_gather(
@@ -527,46 +527,63 @@ class Qwen3MoE(nnx.Module):
         
         global_tracer.print(all_sizes, f"cpu_collect_all_sizes", f"moe_combine_layer_id_{self.layer_id}")
         
-        # Step 2: 计算最大长度并pad
-        max_size = jnp.max(all_sizes)
-        if local_size < max_size:
-            padding = jnp.zeros((max_size - local_size, data.shape[1]), dtype=data.dtype)
+        # ✅ JAX兼容：展平并获取最大大小
+        all_sizes_flat = all_sizes.flatten()  # shape: (num_devices,)
+        max_size = jnp.max(all_sizes_flat)
+        
+        global_tracer.print(all_sizes_flat, f"cpu_collect_sizes_flat", f"moe_combine_layer_id_{self.layer_id}")
+        global_tracer.print(max_size, f"cpu_collect_max_size", f"moe_combine_layer_id_{self.layer_id}")
+        
+        # Step 2: Pad当前设备数据到最大长度
+        padding_needed = max_size - local_size
+        if padding_needed > 0:
+            padding = jnp.zeros((padding_needed, data.shape[1]), dtype=data.dtype)
             padded_data = jnp.concatenate([data, padding], axis=0)
         else:
-            padded_data = data
+            padded_data = data[:max_size]  # 截取到max_size
         
-        # Step 3: all_gather收集所有设备的数据
+        # Step 3: All_gather收集所有设备数据
         all_data = jax.lax.all_gather(padded_data, axis_name=self.expert_axis_name)
         # all_data.shape = (num_devices, max_size, hidden_dim)
         
-        # Step 4: 按照expert_shard_id顺序重新排列并截取有效数据
+        global_tracer.print(all_data, f"cpu_collect_all_data_gathered", f"moe_combine_layer_id_{self.layer_id}")
+        
+        # Step 4: ✅ JAX兼容的数据提取方式
+        num_devices = all_data.shape[0]
+        
+        # 创建mask来标识每个设备的有效数据
+        device_indices = jnp.arange(num_devices)
+        size_indices = jnp.arange(max_size)
+        
+        # 为每个设备创建有效数据的mask
+        # valid_mask[i, j] = True if j < all_sizes_flat[i]
+        valid_mask = size_indices[None, :] < all_sizes_flat[:, None]
+        
+        global_tracer.print(valid_mask, f"cpu_collect_valid_mask", f"moe_combine_layer_id_{self.layer_id}")
+        
+        # 使用mask提取有效数据
+        # 将all_data reshape为 (num_devices * max_size, hidden_dim)
         flattened_data = all_data.reshape(-1, data.shape[1])
+        flattened_mask = valid_mask.flatten()
         
-        # 只保留有效数据（去除padding）
-        valid_data_list = []
-        offset = 0
-        for i, size in enumerate(all_sizes):
-            device_data = flattened_data[offset:offset + size]
-            valid_data_list.append(device_data)
-            offset += max_size
+        # 只保留有效的数据行
+        valid_data = flattened_data[flattened_mask]
         
-        # 拼接所有有效数据
-        if valid_data_list:
-            result = jnp.concatenate(valid_data_list, axis=0)
-        else:
-            result = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
+        global_tracer.print(valid_data, f"cpu_collect_valid_data_extracted", f"moe_combine_layer_id_{self.layer_id}")
         
         # Step 5: 确保输出大小正确
-        if result.shape[0] > target_size:
-            result = result[:target_size]
-        elif result.shape[0] < target_size:
-            # 如果不够，用零填充（这种情况理论上不应该发生）
-            padding = jnp.zeros((target_size - result.shape[0], result.shape[1]), dtype=result.dtype)
-            result = jnp.concatenate([result, padding], axis=0)
+        actual_size = valid_data.shape[0]
+        if actual_size >= target_size:
+            result = valid_data[:target_size]
+        else:
+            # 如果不够，用零填充
+            padding_size = target_size - actual_size
+            padding = jnp.zeros((padding_size, valid_data.shape[1]), dtype=valid_data.dtype)
+            result = jnp.concatenate([valid_data, padding], axis=0)
         
         global_tracer.print(result, f"cpu_collect_final_output", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(
-            jnp.array([result.shape[0], target_size]), 
+            jnp.array([result.shape[0], target_size, actual_size]), 
             f"cpu_collect_size_check", 
             f"moe_combine_layer_id_{self.layer_id}"
         )
