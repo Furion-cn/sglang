@@ -491,15 +491,7 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
         )
         
-        # Add detailed collection output tracers
-        global_tracer.print(output, f"collection_local_output", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(output, f"collection_after_comm", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(output, f"collection_final_result", f"moe_combine_layer_id_{self.layer_id}")
-        
-        # Simulate collection output for JAX alignment
-        global_tracer.print(output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-        
+        logger.info(f"moe_final_output: {output}")
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
         return output
@@ -1372,13 +1364,6 @@ class DeepEPMoE(EPMoE):
             expected_m,
             recipe=(1, 128, 128) if deep_gemm_wrapper.DEEPGEMM_V202506 else None,
         )
-
-        global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"moe_collection_output", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"moe_unpermute_output", f"moe_combine_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
-        
         return down_output
 
 
