@@ -464,8 +464,7 @@ class Qwen3MoE(nnx.Module):
     
     def _cpu_simple_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
         """
-        ✅ 使用MaxText的is_offset=True逻辑：直接从sorted数据中筛选属于当前设备的tokens
-        这避免了复杂的切片计算，更加robust
+        ✅ JIT安全的dispatch：使用固定size方法
         """
         local_expert_size = self.experts_per_device
         
@@ -480,48 +479,39 @@ class Qwen3MoE(nnx.Module):
         # ✅ 创建mask：只有属于当前shard的tokens才保留
         belongs_to_this_shard = (divided_assignments == expert_shard_id)
         
-        # ✅ 计算局部expert indices：global_expert_id % local_expert_size  
-        local_expert_indices = jnp.where(
+        # ✅ 计算局部expert indices（保持原始shape）
+        local_experts = jnp.where(
             belongs_to_this_shard,
             jnp.mod(sorted_experts, local_expert_size),
-            local_expert_size  # 不属于当前设备的设为无效值
+            local_expert_size  # 无效tokens标记为local_expert_size（超出范围）
         )
         
-        jax.debug.print("dispatch_debug: belongs_to_this_shard sum={sum}", 
-                       sum=jnp.sum(belongs_to_this_shard))
-        jax.debug.print("dispatch_debug: local_expert_indices={indices}", 
-                       indices=local_expert_indices)
+        # ✅ JIT安全：使用fixed size的nonzero
+        valid_indices = jnp.nonzero(belongs_to_this_shard, size=data.shape[0])[0]
+        num_valid_tokens = jnp.sum(belongs_to_this_shard)
         
-        # ✅ 只保留属于当前设备的tokens
-        valid_mask = belongs_to_this_shard
-        valid_indices = jnp.where(valid_mask, size=jnp.sum(valid_mask), fill_value=0)[0]
+        # ✅ 提取有效数据（使用fixed-size索引）
+        local_data = data[valid_indices]
+        local_experts_extracted = local_experts[valid_indices]
         
-        if valid_indices.shape[0] == 0:
-            # 当前设备没有分配到任何token
-            local_data = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
-            local_experts = jnp.array([], dtype=jnp.int32)
-            local_group_sizes = jnp.zeros(local_expert_size, dtype=jnp.int32)
-            
-            jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens", dev_id=expert_shard_id)
-        else:
-            # 提取有效的数据和expert indices
-            local_data = data[valid_indices]
-            local_experts = local_expert_indices[valid_indices]
-            
-            # ✅ 计算local_group_sizes：统计每个local expert的token数量
-            local_group_sizes = jnp.bincount(local_experts, length=local_expert_size)
-            
-            jax.debug.print("dispatch_debug: device_{dev_id} extracted {num_tokens} tokens", 
-                           dev_id=expert_shard_id, num_tokens=valid_indices.shape[0])
-            jax.debug.print("dispatch_debug: local_experts={experts}", experts=local_experts)
+        # ✅ 计算local_group_sizes：只统计有效范围内的experts
+        # 创建一个mask来只统计valid tokens
+        valid_expert_mask = jnp.arange(data.shape[0]) < num_valid_tokens
+        valid_experts_for_bincount = jnp.where(
+            valid_expert_mask,
+            local_experts_extracted,
+            local_expert_size  # 无效位置设为超出范围的值
+        )
+        local_group_sizes = jnp.bincount(valid_experts_for_bincount, length=local_expert_size)
         
-        jax.debug.print("dispatch_debug: device_{dev_id} final: data_shape={shape} group_sizes={sizes}", 
-                       dev_id=expert_shard_id, shape=local_data.shape, sizes=local_group_sizes)
+        jax.debug.print("dispatch_debug: device_{dev_id} has {num_tokens} valid tokens", 
+                       dev_id=expert_shard_id, num_tokens=num_valid_tokens)
+        jax.debug.print("dispatch_debug: local_group_sizes={sizes}", sizes=local_group_sizes)
         
         global_tracer.print(local_data, f"cpu_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
         global_tracer.print(local_group_sizes, f"cpu_dispatch_group_sizes", f"moe_dispatch_layer_id_{self.layer_id}")
         
-        return local_data, local_group_sizes, local_experts
+        return local_data, local_group_sizes, local_experts_extracted
     
     def _ragged_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
         local_expert_size = self.experts_per_device
