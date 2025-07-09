@@ -489,7 +489,7 @@ class Qwen3MoE(nnx.Module):
         jax.debug.print("dispatch_debug: valid_mask_count={valid_count} total_tokens={total}", 
                        valid_count=valid_count, total=expert_indices.shape[0])
         
-        # 🛠️ 修复：使用更安全的数组索引方式
+        # 🛠️ 修复：使用JAX兼容的索引方式，避免TracerArrayConversionError
         if valid_count == 0:
             # 当前设备没有分配到任何token
             local_data = jnp.zeros((0, data.shape[1]), dtype=data.dtype)
@@ -498,9 +498,13 @@ class Qwen3MoE(nnx.Module):
             jax.debug.print("dispatch_debug: device_{dev_id} got 0 tokens (empty assignment)", 
                            dev_id=expert_shard_id)
         else:
-            # 🛠️ 修复：直接使用boolean mask提取数据，更安全
-            local_data = data[valid_mask]
-            local_expert_indices = expert_indices[valid_mask]
+            # 🛠️ 修复：使用jnp.where获取有效索引，然后用jnp.take提取数据
+            valid_indices = jnp.where(valid_mask, size=data.shape[0], fill_value=0)[0]
+            valid_size = jnp.sum(valid_mask.astype(jnp.int32))
+            
+            # 只取前valid_size个有效索引
+            local_data = jnp.take(data, valid_indices[:valid_size], axis=0)
+            local_expert_indices = jnp.take(expert_indices, valid_indices[:valid_size], axis=0)
             
             # 验证提取的数据大小
             jax.debug.print("dispatch_debug: extracted_data_shape={shape} expected_count={count}", 
@@ -513,8 +517,8 @@ class Qwen3MoE(nnx.Module):
             
             # 排序
             sorted_indices = jnp.argsort(local_expert_indices)
-            local_data = local_data[sorted_indices]
-            local_experts = local_expert_indices[sorted_indices]
+            local_data = jnp.take(local_data, sorted_indices, axis=0)
+            local_experts = jnp.take(local_expert_indices, sorted_indices, axis=0)
             
             jax.debug.print("dispatch_debug: device_{dev_id} got {tokens} tokens, final_local_data.shape={shape}", 
                            dev_id=expert_shard_id, tokens=valid_count, shape=local_data.shape)
