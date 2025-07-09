@@ -460,6 +460,8 @@ class Qwen2MoeModel(nn.Module):
         else:
             for i in range(self.start_layer, self.end_layer):
                 with get_global_expert_distribution_recorder().with_current_layer(i):
+                    if i > 0:
+                        break
                     layer = self.layers[i]
                     hidden_states, residual = layer(
                         positions, hidden_states, forward_batch, residual

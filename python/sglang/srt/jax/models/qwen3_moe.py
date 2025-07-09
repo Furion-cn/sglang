@@ -267,12 +267,11 @@ class QWen3MoeModel(nnx.Module):
         residual = None
         
         for layer in self.layers:
+            if layer.layer_id > 0:
+                break
             hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
         
-        if residual is not None:
-            hidden_states, residual = self.norm(hidden_states, residual)
-        else:
-            hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm(hidden_states, residual)
         
         return hidden_states
 
