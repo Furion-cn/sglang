@@ -248,9 +248,7 @@ class Qwen3MoE(nnx.Module):
             # 获取top-k专家
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-            jax.debug.print("top_k_indices={indices}, layer_id={layer_id}", indices=top_k_indices, layer_id=self.layer_id)
-            jax.debug.print("top_k_indices_shape={shape}", shape=top_k_indices.shape)
-            jax.debug.print("top_k_weights_shape={shape}", shape=top_k_weights.shape)
+            jax.debug.print("topk_weights={logits}, layer_id={layer_id}", logits=top_k_logits, layer_id=self.layer_id)
             
             # ✅ 修复：正确处理输入维度
             if hidden_states.ndim == 2:

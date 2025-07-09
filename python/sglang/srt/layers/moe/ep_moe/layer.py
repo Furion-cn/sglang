@@ -258,9 +258,7 @@ class EPMoE(torch.nn.Module):
                 layer_id=self.layer_id,
             ),
         )
-        logger.info(f"topk_ids: {topk_ids}, layer_id: {self.layer_id}")
-        global_tracer.print(topk_ids, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
-        global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
+        logger.info(f"topk_weights: {topk_weights}, layer_id: {self.layer_id}")
 
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
