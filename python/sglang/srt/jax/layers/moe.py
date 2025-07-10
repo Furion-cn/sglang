@@ -264,6 +264,12 @@ class Qwen3MoE(nnx.Module):
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.bfloat16), axis=-1).astype(self.dtype)
             
+            # ✅ 添加权重归一化，匹配PyTorch版本的renormalize=True行为
+            top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
+            
+            jax.debug.print("🔍 Top-k weights after renormalization: sum={sum}, min={min}, max={max}", 
+                           sum=jnp.sum(top_k_weights, axis=-1), min=top_k_weights.min(), max=top_k_weights.max())
+            
             # ✅ 修复：正确处理输入维度
             if hidden_states.ndim == 2:
                 # 2D输入：(total_tokens, hidden_dim)
@@ -398,6 +404,9 @@ class Qwen3MoE(nnx.Module):
         # 获取top-k专家
         top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
         top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+        
+        # ✅ 添加权重归一化，匹配PyTorch版本的renormalize=True行为
+        top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
         
         return self._single_device_forward_impl(inputs, top_k_indices, top_k_weights)
     
