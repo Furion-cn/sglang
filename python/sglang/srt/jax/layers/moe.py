@@ -617,18 +617,43 @@ class Qwen3MoE(nnx.Module):
         
         # 3. Create a zero buffer and scatter the local `data` into its correct slot.
         # This is a more robust alternative to jnp.pad for JIT compilation.
+        # We must mask out padding tokens from `data` before scattering.
         local_result_buffer = jnp.zeros((target_size, data.shape[1]), dtype=data.dtype)
+        
+        # Calculate the number of valid tokens for this device
+        num_local_tokens = all_local_sizes[expert_shard_id]
+        
+        # Create a mask to zero out the padded portion of `data`.
+        mask = jnp.arange(data.shape[0]) < num_local_tokens
+        
+        # DEBUG: Check if masking actually changes anything
+        jax.debug.print("dev_{dev_id} before_mask: data_sum={data_sum} nonzero_count={nonzero}", 
+                       dev_id=expert_shard_id, 
+                       data_sum=jnp.sum(data), 
+                       nonzero=jnp.sum(jnp.abs(data) > 1e-6))
+        
+        masked_data = jnp.where(mask[:, None], data, 0)
+        
+        # DEBUG: Check if masking actually changes anything
+        jax.debug.print("dev_{dev_id} after_mask: masked_sum={masked_sum} nonzero_count={nonzero} num_local={num_local}", 
+                       dev_id=expert_shard_id, 
+                       masked_sum=jnp.sum(masked_data), 
+                       nonzero=jnp.sum(jnp.abs(masked_data) > 1e-6),
+                       num_local=num_local_tokens)
+        
         # Create the indices where this device's data should be placed.
         indices = jnp.arange(my_start_index, my_start_index + data.shape[0])
-        local_result_buffer = local_result_buffer.at[indices].set(data)
+        jax.debug.print("dev_{dev_id} indices={indices}", dev_id=expert_shard_id, indices=indices)
+        local_result_buffer = local_result_buffer.at[indices].set(masked_data)
         
         # DEBUG: Print buffer info on each device BEFORE the psum
         jax.debug.print("dev_{dev_id} pre_psum_buffer: "
-                       "data_shape={d_shape}, start_idx={start}, "
-                       "buffer_sum={b_sum}, buffer_shape={b_shape}, mean={mean}",
+                       "d_shape={d_shape}, start={start}, num_local_tokens={num_local}, "
+                       "b_sum={b_sum}, b_shape={b_shape}, mean={mean}",
                        dev_id=expert_shard_id,
                        d_shape=data.shape,
                        start=my_start_index,
+                       num_local=num_local_tokens,
                        b_sum=jnp.sum(local_result_buffer),
                        b_shape=local_result_buffer.shape,
                        mean=jnp.mean(local_result_buffer, axis=1))
