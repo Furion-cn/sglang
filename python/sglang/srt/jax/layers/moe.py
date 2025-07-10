@@ -283,6 +283,22 @@ class Qwen3MoE(nnx.Module):
 
             global_tracer.print(x, f"moe_dispatch_x", f"moe_compute_layer_id_{self.layer_id}_rank_{expert_shard_id}")
             
+            # DEBUG: Print statistics for the input tensor 'x' on each shard.
+            # We check the size to prevent errors on shards that receive no tokens.
+            if x.shape[0] > 0:
+                # DEBUG: Print statistics for the input tensor 'x' on each shard.
+                # Here, we first compute stats along axis=0 (across tokens) to get a vector per stat,
+                # then we take the mean of that vector to get a single representative value for printing.
+                jax.debug.print("dev_{dev_id} input_x_stats: shape={shape} "
+                               "mean_of_min(axis0)={mom}, mean_of_max(axis0)={mxm}, "
+                               "mean_of_mean(axis0)={mnm}, mean_of_std(axis0)={msm}",
+                               dev_id=expert_shard_id,
+                               shape=x.shape,
+                               mom=jnp.mean(jnp.min(x, axis=0)),
+                               mxm=jnp.mean(jnp.max(x, axis=0)),
+                               mnm=jnp.mean(jnp.mean(x, axis=0)),
+                               msm=jnp.mean(jnp.std(x, axis=0)))
+            
             # ✅ Step 3: GMM计算 - 现在权重已经是分片的！
             intermediate_output = self._gmm_compute_with_sharded_weights(
                 x, local_group_sizes, selected_experts, w0_weights, w1_weights, wo_weights, expert_shard_id
@@ -290,12 +306,16 @@ class Qwen3MoE(nnx.Module):
             
             # ✅ 检查GMM计算结果
             if intermediate_output.shape[0] > 0:
-                output_min = jnp.min(intermediate_output)
-                output_max = jnp.max(intermediate_output)
-                output_mean = jnp.mean(intermediate_output)
-                output_std = jnp.std(intermediate_output)
-                jax.debug.print("gmm_output_stats dev{dev_id}: min={min} max={max} mean={mean} std={std}",
-                               dev_id=expert_shard_id, min=output_min, max=output_max, mean=output_mean, std=output_std)
+                # DEBUG: Print statistics for the output tensor on each shard for comparison.
+                jax.debug.print("dev_{dev_id} output_intermediate_stats: shape={shape} "
+                               "mean_of_min(axis0)={mom}, mean_of_max(axis0)={mxm}, "
+                               "mean_of_mean(axis0)={mnm}, mean_of_std(axis0)={msm}",
+                               dev_id=expert_shard_id,
+                               shape=intermediate_output.shape,
+                               mom=jnp.mean(jnp.min(intermediate_output, axis=0)),
+                               mxm=jnp.mean(jnp.max(intermediate_output, axis=0)),
+                               mnm=jnp.mean(jnp.mean(intermediate_output, axis=0)),
+                               msm=jnp.mean(jnp.std(intermediate_output, axis=0)))
             
             jax.debug.print("compute_output_shape={shape}", shape=intermediate_output.shape)
             
@@ -379,7 +399,7 @@ class Qwen3MoE(nnx.Module):
             preferred_element_type=self.dtype
         )
         
-        global_tracer.print(intermediate_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}_rank_{expert_shard_id}")
+        global_tracer.print(intermediate_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         return intermediate_output
     
     def _single_device_forward(self, inputs, router_logits):

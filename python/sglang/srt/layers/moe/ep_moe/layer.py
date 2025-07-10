@@ -306,7 +306,16 @@ class EPMoE(torch.nn.Module):
         )
         # Add detailed dispatch output tracers
         global_tracer.print(gateup_input, f"moe_dispatch_x", f"moe_compute_layer_id_{self.layer_id}_rank_{self.tp_rank}")
-        
+        # DEBUG: Print statistics to compare with JAX version.
+        if gateup_input.shape[0] > 0:
+            print(
+                f"dev_{self.tp_rank} input_x_stats: shape={gateup_input.shape} "
+                f"mean_of_min(axis0)={torch.mean(torch.min(gateup_input.float(), dim=0).values)}, "
+                f"mean_of_max(axis0)={torch.mean(torch.max(gateup_input.float(), dim=0).values)}, "
+                f"mean_of_mean(axis0)={torch.mean(torch.mean(gateup_input.float(), dim=0))}, "
+                f"mean_of_std(axis0)={torch.mean(torch.std(gateup_input.float(), dim=0))}"
+            )
+
         dispose_tensor(hidden_states)
 
         if (
@@ -459,7 +468,15 @@ class EPMoE(torch.nn.Module):
             block_shape=self.block_shape,
         )
         # Simulate compute output for JAX alignment
-        global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}_rank_{self.tp_rank}")
+        global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
+        if down_output.shape[0] > 0:
+            print(
+                    f"dev_{self.tp_rank} output_x_stats: shape={down_output.shape} "
+                    f"mean_of_min(axis0)={torch.mean(torch.min(down_output.float(), dim=0).values)}, "
+                    f"mean_of_max(axis0)={torch.mean(torch.max(down_output.float(), dim=0).values)}, "
+                    f"mean_of_mean(axis0)={torch.mean(torch.mean(down_output.float(), dim=0))}, "
+                    f"mean_of_std(axis0)={torch.mean(torch.std(down_output.float(), dim=0))}"
+                )
 
         # PostReorder
         # Add detailed collection input tracers
