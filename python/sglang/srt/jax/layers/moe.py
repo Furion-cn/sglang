@@ -254,6 +254,9 @@ class Qwen3MoE(nnx.Module):
             top_k_weights = top_k_weights / top_k_weights.sum(axis=-1, keepdims=True)
             top_k_weights = top_k_weights.astype(self.dtype)
             
+            jax.debug.print("top_k_weights_stats dev{dev_id}: weights={weights}", 
+                           dev_id=expert_shard_id, weights=top_k_weights)
+            
             # ✅ 修复：正确处理输入维度
             if hidden_states.ndim == 2:
                 # 2D输入：(total_tokens, hidden_dim)
@@ -596,30 +599,46 @@ class Qwen3MoE(nnx.Module):
         else:
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
-    def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
-        local_size = data.shape[0]
+    def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
+        """
+        Gathers variable-sized data from all expert devices into a single, correctly
+        ordered tensor. This implementation is designed to be JIT-compatible and avoids
+        the issues of implicit padding in `jax.lax.all_gather`.
+        """
+        # 1. Calculate the number of tokens on *each* device from `global_group_sizes`.
+        # This avoids an `all_gather` communication call, as `global_group_sizes` is replicated.
+        reshaped_group_sizes = global_group_sizes.reshape(
+            self.expert_parallelism, self.experts_per_device
+        )
+        all_local_sizes = jnp.sum(reshaped_group_sizes, axis=1)
+
+        jax.debug.print("dev_{dev_id} cpu_collect_all_local_sizes={sizes}", 
+                       dev_id=expert_shard_id, sizes=all_local_sizes)
+
+        # 2. Compute the starting index for this device's data in the final global tensor.
+        start_indices = jnp.concatenate([jnp.array([0], dtype=all_local_sizes.dtype), jnp.cumsum(all_local_sizes[:-1])])
+        my_start_index = start_indices[expert_shard_id]
         
-        all_data = jax.lax.all_gather(data, axis_name=self.expert_axis_name)
+        # 3. Create a buffer of the full target size, initialized to zeros.
+        # `target_size` is the static, expected size of the combined tensor.
+        local_result_buffer = jnp.zeros((target_size, data.shape[1]), dtype=data.dtype)
+
+        # 4. Write this device's local `data` into its correct, non-overlapping slot.
+        local_result_buffer = jax.lax.dynamic_update_slice(
+            local_result_buffer, data, (my_start_index, 0)
+        )
         
-        global_tracer.print(all_data, f"cpu_collect_all_data_simple", f"moe_combine_layer_id_{self.layer_id}")
-        
-        result = all_data.reshape(-1, data.shape[1])
-        
-        global_tracer.print(result, f"cpu_collect_flattened_result", f"moe_combine_layer_id_{self.layer_id}")
-        
-        # Step 3: 确保不超过目标大小
-        actual_size = result.shape[0]
-        if actual_size >= target_size:
-            result = result[:target_size]
-        else:
-            # 如果不够，用零填充
-            padding_size = target_size - actual_size
-            padding = jnp.zeros((padding_size, result.shape[1]), dtype=result.dtype)
-            result = jnp.concatenate([result, padding], axis=0)
+        # 5. Use an all-reduce sum to combine the buffers from all devices.
+        # Since each device wrote to a unique slice of its zeroed buffer, summing them
+        # up is equivalent to a concatenation of the original data pieces.
+        # The result `result` will be replicated on all devices.
+        result = jax.lax.all_reduce(
+            local_result_buffer, axis_name=self.expert_axis_name, op=jax.lax.psum
+        )
         
         global_tracer.print(result, f"cpu_collect_final_simple", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(
-            jnp.array([result.shape[0], target_size, actual_size]), 
+            jnp.array([result.shape[0], target_size]), 
             f"cpu_collect_size_check_simple", 
             f"moe_combine_layer_id_{self.layer_id}"
         )
