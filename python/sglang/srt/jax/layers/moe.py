@@ -246,19 +246,6 @@ class Qwen3MoE(nnx.Module):
             """
             # ✅ 添加设备特定的日志验证
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-            jax.debug.print("moe_compute_layer_id_{layer_id}", layer_id=self.layer_id)
-            jax.debug.print("expert_shard_id={expert_shard_id}", expert_shard_id=expert_shard_id)
-            
-            jax.debug.print("w0_weights_shape={shape} dev{dev_id}", shape=w0_weights.shape, dev_id=expert_shard_id)
-            jax.debug.print("inputs_shape={shape}", shape=hidden_states.shape)
-            
-            # ✅ 检查权重是否正确加载
-            w0_min = jnp.min(w0_weights)
-            w0_max = jnp.max(w0_weights)
-            w0_mean = jnp.mean(w0_weights)
-            w0_std = jnp.std(w0_weights)
-            jax.debug.print("w0_weights_stats dev{dev_id}: min={min} max={max} mean={mean} std={std}", 
-                           dev_id=expert_shard_id, min=w0_min, max=w0_max, mean=w0_mean, std=w0_std)
             
             # 获取top-k专家
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
@@ -266,9 +253,6 @@ class Qwen3MoE(nnx.Module):
             
             # ✅ 添加权重归一化，匹配PyTorch版本的renormalize=True行为
             top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
-            
-            jax.debug.print("🔍 Top-k weights after renormalization: sum={sum}, min={min}, max={max}", 
-                           sum=jnp.sum(top_k_weights, axis=-1), min=top_k_weights.min(), max=top_k_weights.max())
             
             # ✅ 修复：正确处理输入维度
             if hidden_states.ndim == 2:
@@ -283,7 +267,6 @@ class Qwen3MoE(nnx.Module):
             x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
                 hidden_states, top_k_indices, top_k_weights
             )
-            jax.debug.print("permute_x={x}, permute_x_shape={shape}, layer_id={layer_id}", x=x, shape=x.shape, layer_id=self.layer_id)
             
             # ✅ Step 2: Expert Parallelism Dispatch
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
@@ -293,49 +276,27 @@ class Qwen3MoE(nnx.Module):
                 )
             else:
                 local_group_sizes = group_sizes
-            
-            # ✅ 检查当前设备分配到的token数量
-            tokens_assigned = jnp.sum(local_group_sizes)
-            jax.debug.print("device_{dev_id} assigned {tokens} tokens", 
-                           dev_id=expert_shard_id, tokens=tokens_assigned)
-            
-            jax.debug.print("dispatch_x_shape={shape}", shape=x.shape)
-            jax.debug.print("local_group_sizes={sizes}", sizes=local_group_sizes)
-            
+                        
             # ✅ Step 3: GMM计算 - 现在权重已经是分片的！
             intermediate_output = self._gmm_compute_with_sharded_weights(
                 x, local_group_sizes, selected_experts, w0_weights, w1_weights, wo_weights
             )
             
-            # ✅ 检查GMM计算结果
-            if intermediate_output.shape[0] > 0:
-                output_min = jnp.min(intermediate_output)
-                output_max = jnp.max(intermediate_output)
-                output_mean = jnp.mean(intermediate_output)
-                output_std = jnp.std(intermediate_output)
-                jax.debug.print("gmm_output_stats dev{dev_id}: min={min} max={max} mean={mean} std={std}",
-                               dev_id=expert_shard_id, min=output_min, max=output_max, mean=output_mean, std=output_std)
-            
-            jax.debug.print("compute_output_shape={shape}", shape=intermediate_output.shape)
-            
             # ✅ Step 4: Expert Parallelism Collection
             if self.expert_parallelism > 1:
                 # ✅ 修复：正确计算original_size
                 original_size = total_tokens * self.num_experts_per_tok
-                jax.debug.print("collection_sizes: original={orig} total_tokens={total} experts_per_tok={per_tok}",
-                               orig=original_size, total=total_tokens, per_tok=self.num_experts_per_tok)
                 intermediate_output = self._expert_all_to_all_collect(
                     intermediate_output, group_sizes, expert_shard_id, original_size
                 )
-            
-            jax.debug.print("collection_output_shape={shape}", shape=intermediate_output.shape)
             
             # ✅ Step 5: Unpermute - 恢复原始顺序
             output = self._unpermute(
                 intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
             )
+
+            jax.debug.print("layer_id={layer_id}, jax_moe_final_output={output}, min={min}, max={max}, mean={mean}, std={std}", layer_id=self.layer_id, output=output, min=output.min(), max=output.max(), mean=output.mean(), std=output.std())
             
-            jax.debug.print("final_output_shape={shape}", shape=output.shape)
             return output
         
         # ✅ 使用shard_map，权重作为参数传入
@@ -395,6 +356,13 @@ class Qwen3MoE(nnx.Module):
             group_sizes=local_group_sizes,
             preferred_element_type=self.dtype
         )
+        
+        # ✅ 关键：GMM计算完成后的统计信息
+        expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
+        jax.debug.print("🔍 [Layer {layer_id}] GMM output dev{dev_id}: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+                       layer_id=self.layer_id, dev_id=expert_shard_id, 
+                       min=intermediate_output.min(), max=intermediate_output.max(), 
+                       mean=intermediate_output.mean(), std=intermediate_output.std())
         
         global_tracer.print(intermediate_output, f"gmm_sharded_final_output", f"moe_compute_layer_id_{self.layer_id}")
         return intermediate_output
@@ -593,21 +561,19 @@ class Qwen3MoE(nnx.Module):
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
-        # ✅ 在all-reduce前添加设备特定的调试
-        jax.debug.print("🔍 Before all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
-                       dev_id=expert_shard_id, min=data.min(), max=data.max(), 
-                       mean=data.mean(), std=data.std())
-        jax.debug.print("🔍 Before all-reduce dev{dev_id}: shape={shape}, non_zero={nz}", 
-                       dev_id=expert_shard_id, shape=data.shape, nz=jnp.sum(data != 0))
+        # ✅ All-reduce前的统计
+        jax.debug.print("🔍 [Layer {layer_id}] Before all-reduce dev{dev_id}: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+                       layer_id=self.layer_id, dev_id=expert_shard_id, 
+                       min=data.min(), max=data.max(), mean=data.mean(), std=data.std())
         
         # ✅ 关键修复：使用psum进行all-reduce求和，而不是all_gather
         # 这匹配PyTorch版本的tensor_model_parallel_all_reduce行为
         summed_data = jax.lax.psum(data, axis_name=self.expert_axis_name)
         
-        # ✅ 在all-reduce后添加调试
-        jax.debug.print("🔍 After all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
-                       dev_id=expert_shard_id, min=summed_data.min(), max=summed_data.max(), 
-                       mean=summed_data.mean(), std=summed_data.std())
+        # ✅ All-reduce后的统计
+        jax.debug.print("🔍 [Layer {layer_id}] After all-reduce dev{dev_id}: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+                       layer_id=self.layer_id, dev_id=expert_shard_id, 
+                       min=summed_data.min(), max=summed_data.max(), mean=summed_data.mean(), std=summed_data.std())
         
         global_tracer.print(summed_data, f"cpu_collect_psum_data", f"moe_combine_layer_id_{self.layer_id}")
         
@@ -683,11 +649,10 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, local_group_sizes, sorted_experts_ids
     
     def _unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, seq_len):
-        # ✅ 添加unpermute调试
-        jax.debug.print("🔍 Unpermute Input Stats: min={min}, max={max}, mean={mean}", 
-                        min=intermediate.min(), max=intermediate.max(), mean=intermediate.mean())
-        jax.debug.print("🔍 Unpermute Input Shape: {shape}, non_zero_count: {nz}", 
-                        shape=intermediate.shape, nz=jnp.sum(intermediate != 0))
+        # ✅ Unpermute输入统计
+        jax.debug.print("🔍 [Layer {layer_id}] Unpermute input: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+                        layer_id=self.layer_id, min=intermediate.min(), max=intermediate.max(), 
+                        mean=intermediate.mean(), std=intermediate.std())
         
         global_tracer.print(intermediate, f"unpermute_input", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(sorted_selected_experts, f"unpermute_sorted_experts", f"moe_combine_layer_id_{self.layer_id}")
@@ -695,9 +660,6 @@ class Qwen3MoE(nnx.Module):
         
         expected_tokens = sorted_selected_experts.shape[0]
         actual_tokens = intermediate.shape[0]
-        
-        jax.debug.print("unpermute_token_check: actual={actual} expected={expected}", 
-                       actual=actual_tokens, expected=expected_tokens)
         
         global_tracer.print(
             jnp.array([actual_tokens, expected_tokens]), 
@@ -708,8 +670,6 @@ class Qwen3MoE(nnx.Module):
         if actual_tokens != expected_tokens:
             if actual_tokens > expected_tokens:
                 intermediate = intermediate[:expected_tokens]
-                jax.debug.print("unpermute_truncated: from {from_size} to {to_size}", 
-                               from_size=actual_tokens, to_size=expected_tokens)
                 global_tracer.print(
                     jnp.array([1, actual_tokens, expected_tokens]), 
                     f"unpermute_truncated", 
@@ -719,15 +679,14 @@ class Qwen3MoE(nnx.Module):
                 padding_size = expected_tokens - actual_tokens
                 padding = jnp.zeros((padding_size, intermediate.shape[1]), dtype=intermediate.dtype)
                 intermediate = jnp.concatenate([intermediate, padding], axis=0)
-                jax.debug.print("unpermute_padded: from {from_size} to {to_size} padding={pad}", 
-                               from_size=actual_tokens, to_size=expected_tokens, pad=padding_size)
                 global_tracer.print(
                     jnp.array([2, actual_tokens, expected_tokens, padding_size]), 
                     f"unpermute_padded", 
                     f"moe_combine_layer_id_{self.layer_id}"
                 )
         
-        unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
+        argsort_indices = jnp.argsort(sorted_selected_experts)
+        unsort_intermediate = jnp.take(intermediate, indices=argsort_indices, axis=0)
         
         total_tokens = weights.shape[0] * weights.shape[1] // self.num_experts_per_tok
         
@@ -740,15 +699,24 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(reshaped_weights, f"unpermute_reshaped_weights", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(reshaped_intermediate, f"unpermute_reshaped_intermediate", f"moe_combine_layer_id_{self.layer_id}")
         
+        # ✅ Einsum前的统计
+        intermediate_fp32 = reshaped_intermediate.astype(jnp.float32)
+        weights_fp32 = reshaped_weights.astype(jnp.float32)
+        
+        jax.debug.print("🔍 [Layer {layer_id}] Before einsum: intermediate min={i_min:.6f}, max={i_max:.6f}, weights min={w_min:.6f}, max={w_max:.6f}", 
+                        layer_id=self.layer_id, i_min=intermediate_fp32.min(), i_max=intermediate_fp32.max(), 
+                        w_min=weights_fp32.min(), w_max=weights_fp32.max())
+        
         output = jnp.einsum(
             "BKE,BK -> BE",
-            reshaped_intermediate.astype(jnp.float32),
-            reshaped_weights.astype(jnp.float32),
+            intermediate_fp32,
+            weights_fp32,
         )
         
-        # ✅ 添加einsum后的调试
-        jax.debug.print("🔍 After Einsum Stats: min={min}, max={max}, mean={mean}, non_zero: {nz}", 
-                        min=output.min(), max=output.max(), mean=output.mean(), nz=jnp.sum(output != 0))
+        # ✅ Einsum后的统计
+        jax.debug.print("🔍 [Layer {layer_id}] After einsum: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+                        layer_id=self.layer_id, min=output.min(), max=output.max(), 
+                        mean=output.mean(), std=output.std())
         
         global_tracer.print(output, f"unpermute_einsum_output", f"moe_combine_layer_id_{self.layer_id}")
         
@@ -756,6 +724,11 @@ class Qwen3MoE(nnx.Module):
             final_output = output.astype(self.dtype)
         else:
             final_output = output.reshape(batch_size, seq_len, -1).astype(self.dtype)
+        
+        # ✅ 最终输出统计
+        jax.debug.print("🔍 [Layer {layer_id}] Final output: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+                        layer_id=self.layer_id, min=final_output.min(), max=final_output.max(), 
+                        mean=final_output.mean(), std=final_output.std())
         
         global_tracer.print(final_output, f"unpermute_final_output", f"moe_combine_layer_id_{self.layer_id}")
         return final_output

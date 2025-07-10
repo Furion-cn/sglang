@@ -460,6 +460,9 @@ class EPMoE(torch.nn.Module):
             block_shape=self.block_shape,
         )
         
+        # ✅ 关键：GMM计算完成后的统计信息
+        logger.info(f"🔍 [Layer {self.layer_id}] EP MoE GMM output: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.8f}, std={down_output.std():.6f}")
+        
         # Add detailed GMM output tracers
         global_tracer.print(down_output, f"gmm_wo_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
@@ -490,7 +493,8 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
         )
         
-        logger.info(f"layer_id: {self.layer_id}, ==============ep_moe_final_output============: {output}, min: {output.min()}, max: {output.max()}, mean: {output.mean()}, std: {output.std()}")
+        # ✅ 最终输出统计
+        logger.info(f"🔍 [Layer {self.layer_id}] EP MoE final output: min={output.min():.6f}, max={output.max():.6f}, mean={output.mean():.8f}, std={output.std():.6f}")
         
         return output
 
@@ -1133,6 +1137,10 @@ class DeepEPMoE(EPMoE):
                 ),
                 block_shape=self.block_shape,
             )
+        
+        # ✅ 关键：GMM计算完成后的统计信息
+        if down_output.shape[0] > 0:
+            logger.info(f"🔍 [Layer {self.layer_id}] DeepEP MoE GMM output: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.8f}, std={down_output.std():.6f}")
             
         global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
@@ -1253,6 +1261,10 @@ class DeepEPMoE(EPMoE):
             m_indices,
         )
 
+        # ✅ 关键：GMM计算完成后的统计信息
+        if down_output.shape[0] > 0:
+            logger.info(f"🔍 [Layer {self.layer_id}] DeepEP MoE deepgemm_contiguous GMM output: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.8f}, std={down_output.std():.6f}")
+
         global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
 
         gather_out = torch.empty(
@@ -1262,6 +1274,9 @@ class DeepEPMoE(EPMoE):
         )
         
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
+        
+        # ✅ 最终输出统计
+        logger.info(f"🔍 [Layer {self.layer_id}] DeepEP MoE deepgemm_contiguous final output: min={gather_out.min():.6f}, max={gather_out.max():.6f}, mean={gather_out.mean():.8f}, std={gather_out.std():.6f}")
         
         return gather_out
 
@@ -1355,6 +1370,11 @@ class DeepEPMoE(EPMoE):
             expected_m,
             recipe=(1, 128, 128) if deep_gemm_wrapper.DEEPGEMM_V202506 else None,
         )
+        
+        # ✅ 关键：GMM计算完成后的统计信息
+        if down_output.shape[0] > 0:
+            logger.info(f"🔍 [Layer {self.layer_id}] DeepEP MoE deepgemm_masked GMM output: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.8f}, std={down_output.std():.6f}")
+        
         return down_output
 
 

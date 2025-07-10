@@ -193,16 +193,25 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        logger.info(f"layer_id: {self.layer_id}, ==========moe_compute_output===========: {final_hidden_states}, min: {final_hidden_states.min()}, max: {final_hidden_states.max()}, mean: {final_hidden_states.mean()}, std: {final_hidden_states.std()}")
+        # ✅ 关键：GMM计算完成后的统计信息（在all-reduce前）
+        logger.info(f"🔍 [Layer {self.layer_id}] PyTorch GMM output before all-reduce: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
         
         global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         
         if self.tp_size > 1:
+            # ✅ All-reduce前的统计
+            logger.info(f"🔍 [Layer {self.layer_id}] PyTorch before all-reduce: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+            
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-            logger.info(f"layer_id: {self.layer_id}, ============tp_size==============: {self.tp_size}, ==============moe_after_all_reduce============: {final_hidden_states}, min: {final_hidden_states.min()}, max: {final_hidden_states.max()}, mean: {final_hidden_states.mean()}, std: {final_hidden_states.std()}")
+            
+            # ✅ All-reduce后的统计
+            logger.info(f"🔍 [Layer {self.layer_id}] PyTorch after all-reduce: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+            
             global_tracer.print(final_hidden_states, f"moe_after_all_reduce", f"moe_combine_layer_id_{self.layer_id}")
 
-        logger.info(f"layer_id: {self.layer_id}, ==========moe_final_output===========: {final_hidden_states}, min: {final_hidden_states.min()}, max: {final_hidden_states.max()}, mean: {final_hidden_states.mean()}, std: {final_hidden_states.std()}")        
+        # ✅ 最终输出统计
+        logger.info(f"🔍 [Layer {self.layer_id}] PyTorch final output: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+        
         global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
 
         return final_hidden_states.view(num_tokens, hidden_dim)
