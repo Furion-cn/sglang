@@ -24,6 +24,7 @@ from flax.nnx.nn import dtypes
 from flax.nnx.nn.linear import default_embed_init
 from flax.typing import PromoteDtypeFn
 from typing import Any
+from sglang.debug_tracer import global_tracer, trace_function
 
 @struct.dataclass
 class EmbedCls:
@@ -181,6 +182,7 @@ class RotaryEmbedding(nnx.Module):
 
         self.cos_sin_cache = self._compute_cos_sin_cache().astype(dtype=dtype)
 
+    #@trace_function(stage="ROTARYEMBEDDING", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -259,6 +261,7 @@ def rotary_embedding_forward(
 
 
 #@partial(jax.jit, static_argnames=["is_neox_style"])
+##@trace_function(stage="APPLY_ROTARY_EMB", include_args=True, include_output=True)
 def _apply_rotary_emb(
     x: jax.Array,
     cos: jax.Array,

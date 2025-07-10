@@ -79,7 +79,7 @@ class QWenMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
-    @trace_function(stage="MLP", include_args=False, include_output=True)
+    #@trace_function(stage="MLP", include_args=False, include_output=True)
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
@@ -143,7 +143,7 @@ class QWenAttention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
-    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
+    #@trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -193,7 +193,7 @@ class QWenBlock(nn.Module):
             prefix=add_prefix("mlp", prefix),
         )
 
-    @trace_function(stage="BLOCK", include_args=False, include_output=True)
+    #@trace_function(stage="BLOCK", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -256,7 +256,7 @@ class QWenModel(nn.Module):
         )
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
+    #@trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
     def forward(
         self,
         input_ids: torch.Tensor,
