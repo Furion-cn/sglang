@@ -359,7 +359,7 @@ class Qwen3MoE(nnx.Module):
         
         # ✅ 关键：GMM计算完成后的统计信息
         expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-        jax.debug.print("🔍 [Layer {layer_id}] GMM output dev{dev_id}: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] GMM output dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
                        layer_id=self.layer_id, dev_id=expert_shard_id, 
                        min=intermediate_output.min(), max=intermediate_output.max(), 
                        mean=intermediate_output.mean(), std=intermediate_output.std())
