@@ -632,8 +632,8 @@ class Qwen3MoE(nnx.Module):
         # Since each device wrote to a unique slice of its zeroed buffer, summing them
         # up is equivalent to a concatenation of the original data pieces.
         # The result `result` will be replicated on all devices.
-        result = jax.lax.all_reduce(
-            local_result_buffer, axis_name=self.expert_axis_name, op=jax.lax.psum
+        result = jax.lax.psum(
+            local_result_buffer, axis_name=self.expert_axis_name
         )
         
         global_tracer.print(result, f"cpu_collect_final_simple", f"moe_combine_layer_id_{self.layer_id}")
