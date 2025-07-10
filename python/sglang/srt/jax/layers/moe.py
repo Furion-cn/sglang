@@ -560,40 +560,90 @@ class Qwen3MoE(nnx.Module):
         else:
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
-    def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
-        # ✅ All-reduce前的统计
-        jax.debug.print("🔍 [Layer {layer_id}] Before all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
-                       layer_id=self.layer_id, dev_id=expert_shard_id, 
-                       min=data.min(), max=data.max(), mean=data.mean(), std=data.std())
-        
-        # ✅ 关键修复：使用psum进行all-reduce求和，而不是all_gather
-        # 这匹配PyTorch版本的tensor_model_parallel_all_reduce行为
-        summed_data = jax.lax.psum(data, axis_name=self.expert_axis_name)
-        
-        # ✅ All-reduce后的统计
-        jax.debug.print("🔍 [Layer {layer_id}] After all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
-                       layer_id=self.layer_id, dev_id=expert_shard_id, 
-                       min=summed_data.min(), max=summed_data.max(), mean=summed_data.mean(), std=summed_data.std())
-        
-        global_tracer.print(summed_data, f"cpu_collect_psum_data", f"moe_combine_layer_id_{self.layer_id}")
-        
-        result = summed_data
-        
+    def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
+        """
+        Gathers variable-sized data from all expert devices into a single, correctly
+        ordered tensor. This implementation uses a robust scatter-update and psum pattern
+        to be JIT-compatible and avoid issues with dynamic shapes.
+        """
+        # 1. Calculate the number of tokens on *each* device from `global_group_sizes`.
+        reshaped_group_sizes = global_group_sizes.reshape(
+            self.expert_parallelism, self.experts_per_device
+        )
+        jax.debug.print("dev_{dev_id} reshaped_group_sizes={sizes}", 
+                       dev_id=expert_shard_id, sizes=reshaped_group_sizes)
+
+        # Calculate tokens per device by summing across experts
+        all_local_sizes = jnp.sum(reshaped_group_sizes, axis=1)
+        jax.debug.print("dev_{dev_id} all_local_sizes={sizes}", 
+                       dev_id=expert_shard_id, sizes=all_local_sizes)
+
+        # 2. Compute the starting index for this device's data in the final global tensor.
+        # Fix: Properly compute prefix sum array by first getting cumsum of all elements
+        # and then prepending 0 to get [0, cumsum_1, cumsum_2, ..., total_sum]
+        cumsum = jnp.cumsum(all_local_sizes)
+        start_indices = jnp.concatenate([jnp.array([0], dtype=all_local_sizes.dtype), cumsum])
+
+        my_start_index = start_indices[expert_shard_id]
+        my_end_index = start_indices[expert_shard_id + 1]
+        num_local_tokens = my_end_index - my_start_index  # Fix: Calculate num_local_tokens from start and end indices
+
+        jax.debug.print("dev_{dev_id} start_indices={indices} my_start={start} my_end={end} num_local={local}", 
+                       dev_id=expert_shard_id, indices=start_indices, 
+                       start=my_start_index, end=my_end_index, local=num_local_tokens)
+
+        # 3. Create a zero buffer and move the valid data to its correct position.
+        # This implementation avoids creating intermediate tensors with dynamic shapes,
+        # which can be problematic under JIT compilation.
+
+        # Create an index grid for the full-sized output buffer.
+        output_indices = jnp.arange(target_size)
+
+        # For each position in the output buffer, calculate which row to read from the source `data`.
+        # This creates a mapping: output_row -> source_row.
+        source_indices = output_indices - my_start_index
+
+        # Create a mask to identify the valid region in the output buffer for this device.
+        mask = (output_indices >= my_start_index) & (output_indices < my_end_index)
+
+        # To avoid out-of-bounds access when gathering from `data`, replace invalid source indices with 0.
+        # This is safe because these values will be discarded by the mask anyway.
+        safe_source_indices = jnp.where(mask, source_indices, 0)
+
+        # Gather data from the source `data` array according to the calculated indices.
+        # The result `data_to_scatter` has the same full size as `local_result_buffer`.
+        data_to_scatter = data[safe_source_indices]
+
+        # Use the mask to place the gathered data into the correct slice of the buffer.
+        # Where the mask is True, we take the value from `data_to_scatter`.
+        # Where it's False, we take the value from a zero buffer (i.e., keep it zero).
+        local_result_buffer = jnp.where(mask[:, None], data_to_scatter, 0.0)
+
+        # DEBUG: Verify the data movement
+        result_slice = jax.lax.dynamic_slice(
+            local_result_buffer, (my_start_index, 0), (num_local_tokens, data.shape[1])
+        )
+        jax.debug.print("dev_{dev_id} moved_data_shape={m_shape} start={start} end={end}, result_slice_mean={mean}", 
+                       dev_id=expert_shard_id,
+                       m_shape=result_slice.shape,
+                       start=my_start_index,
+                       end=my_end_index,
+                       mean=jnp.mean(result_slice, axis=1))
+
+        # 4. Use an all-reduce sum to combine the buffers from all devices.
+        # Since each device's buffer only has non-zero values in its unique slice,
+        # summing them up is equivalent to a concatenation.
+        result = jax.lax.psum(
+            local_result_buffer, axis_name=self.expert_axis_name
+        )
+
         global_tracer.print(result, f"cpu_collect_final_simple", f"moe_combine_layer_id_{self.layer_id}")
-        
-        actual_size = result.shape[0] 
-        if actual_size != target_size:
-            raise ValueError(
-                f"Collection output size mismatch: actual={actual_size}, expected={target_size}. "
-                f"This suggests an issue with the dispatch/collect logic."
-            )
-        
         global_tracer.print(
             jnp.array([result.shape[0], target_size]), 
-            f"cpu_collect_size_verified", 
+            f"cpu_collect_size_check_simple", 
             f"moe_combine_layer_id_{self.layer_id}"
         )
-        
+
         return result
     
     def _ragged_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
