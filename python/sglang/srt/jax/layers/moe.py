@@ -602,36 +602,32 @@ class Qwen3MoE(nnx.Module):
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
         """
         Gathers variable-sized data from all expert devices into a single, correctly
-        ordered tensor. This implementation is designed to be JIT-compatible and avoids
-        the issues of implicit padding in `jax.lax.all_gather`.
+        ordered tensor. This implementation uses a robust padding and psum pattern
+        to be JIT-compatible and avoid issues with dynamic shapes.
         """
         # 1. Calculate the number of tokens on *each* device from `global_group_sizes`.
-        # This avoids an `all_gather` communication call, as `global_group_sizes` is replicated.
         reshaped_group_sizes = global_group_sizes.reshape(
             self.expert_parallelism, self.experts_per_device
         )
         all_local_sizes = jnp.sum(reshaped_group_sizes, axis=1)
 
-        jax.debug.print("dev_{dev_id} cpu_collect_all_local_sizes={sizes}", 
-                       dev_id=expert_shard_id, sizes=all_local_sizes)
-
         # 2. Compute the starting index for this device's data in the final global tensor.
         start_indices = jnp.concatenate([jnp.array([0], dtype=all_local_sizes.dtype), jnp.cumsum(all_local_sizes[:-1])])
         my_start_index = start_indices[expert_shard_id]
         
-        # 3. Create a buffer of the full target size, initialized to zeros.
-        # `target_size` is the static, expected size of the combined tensor.
-        local_result_buffer = jnp.zeros((target_size, data.shape[1]), dtype=data.dtype)
-
-        # 4. Write this device's local `data` into its correct, non-overlapping slot.
-        local_result_buffer = jax.lax.dynamic_update_slice(
-            local_result_buffer, data, (my_start_index, 0)
-        )
+        # 3. Manually pad the local `data` to the full `target_size`.
+        # The data is placed at `my_start_index`, and the rest is zeros.
+        # This creates a non-overlapping buffer on each device.
+        pad_before = my_start_index
+        pad_after = target_size - (my_start_index + data.shape[0])
         
-        # 5. Use an all-reduce sum to combine the buffers from all devices.
-        # Since each device wrote to a unique slice of its zeroed buffer, summing them
-        # up is equivalent to a concatenation of the original data pieces.
-        # The result `result` will be replicated on all devices.
+        # JIT-safe padding: ((before, after), (before, after)) for each dimension
+        paddings = ((pad_before, pad_after), (0, 0))
+        local_result_buffer = jnp.pad(data, pad_width=paddings, mode='constant', constant_values=0)
+
+        # 4. Use an all-reduce sum to combine the buffers from all devices.
+        # Since each device's buffer only has non-zero values in its unique slice,
+        # summing them up is equivalent to a concatenation.
         result = jax.lax.psum(
             local_result_buffer, axis_name=self.expert_axis_name
         )
