@@ -305,8 +305,7 @@ class EPMoE(torch.nn.Module):
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
         # Add detailed dispatch output tracers
-        global_tracer.print(gateup_input, f"dispatch_communicated_x", f"moe_dispatch_layer_id_{self.layer_id}")
-        global_tracer.print(gateup_input, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
+        global_tracer.print(gateup_input, f"moe_dispatch_x", f"moe_compute_layer_id_{self.layer_id}_rank_{self.tp_rank}")
         
         dispose_tensor(hidden_states)
 
@@ -459,14 +458,8 @@ class EPMoE(torch.nn.Module):
             ),
             block_shape=self.block_shape,
         )
-        
-        # Add detailed GMM output tracers
-        global_tracer.print(down_output, f"gmm_wo_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
-        
         # Simulate compute output for JAX alignment
-        global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}_rank_{self.tp_rank}")
 
         # PostReorder
         # Add detailed collection input tracers

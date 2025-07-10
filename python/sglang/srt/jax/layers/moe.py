@@ -280,10 +280,12 @@ class Qwen3MoE(nnx.Module):
             
             jax.debug.print("dispatch_x_shape={shape}", shape=x.shape)
             jax.debug.print("local_group_sizes={sizes}", sizes=local_group_sizes)
+
+            global_tracer.print(x, f"moe_dispatch_x", f"moe_compute_layer_id_{self.layer_id}_rank_{expert_shard_id}")
             
             # ✅ Step 3: GMM计算 - 现在权重已经是分片的！
             intermediate_output = self._gmm_compute_with_sharded_weights(
-                x, local_group_sizes, selected_experts, w0_weights, w1_weights, wo_weights
+                x, local_group_sizes, selected_experts, w0_weights, w1_weights, wo_weights, expert_shard_id
             )
             
             # ✅ 检查GMM计算结果
@@ -308,6 +310,8 @@ class Qwen3MoE(nnx.Module):
                 )
             
             jax.debug.print("collection_output_shape={shape}", shape=intermediate_output.shape)
+
+            global_tracer.print(intermediate_output, f"moe_intermediate_output", f"moe_compute_layer_id_{self.layer_id}")
             
             # ✅ Step 5: Unpermute - 恢复原始顺序
             output = self._unpermute(
@@ -332,7 +336,7 @@ class Qwen3MoE(nnx.Module):
             check_rep=False,
         )(inputs, router_logits, self.wi_0.value, self.wi_1.value, self.wo.value)
     
-    def _gmm_compute_with_sharded_weights(self, x, local_group_sizes, selected_experts, w0_kernel, w1_kernel, wo_kernel):
+    def _gmm_compute_with_sharded_weights(self, x, local_group_sizes, selected_experts, w0_kernel, w1_kernel, wo_kernel, expert_shard_id):
         """✅ 新版GMM计算：权重已经通过shard_map正确分片，处理空输入情况"""
         global_tracer.print(x, f"gmm_sharded_input_x", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(w0_kernel, f"gmm_sharded_w0_kernel_shape", f"moe_compute_layer_id_{self.layer_id}")
@@ -375,7 +379,7 @@ class Qwen3MoE(nnx.Module):
             preferred_element_type=self.dtype
         )
         
-        global_tracer.print(intermediate_output, f"gmm_sharded_final_output", f"moe_compute_layer_id_{self.layer_id}")
+        global_tracer.print(intermediate_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}_rank_{expert_shard_id}")
         return intermediate_output
     
     def _single_device_forward(self, inputs, router_logits):
