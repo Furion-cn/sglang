@@ -248,6 +248,11 @@ class Qwen3MoE(nnx.Module):
             # 获取top-k专家
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.bfloat16), axis=-1).astype(self.dtype)
+
+            # top_k_weights 是softmax后的概率值，需要转换为概率值
+            top_k_weights = top_k_weights.astype(jnp.float32)
+            top_k_weights = top_k_weights / top_k_weights.sum(axis=-1, keepdims=True)
+            top_k_weights = top_k_weights.astype(self.dtype)
             
             # ✅ 修复：正确处理输入维度
             if hidden_states.ndim == 2:
@@ -259,7 +264,7 @@ class Qwen3MoE(nnx.Module):
                 batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
                 total_tokens = batch_size * seq_len
             
-            x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
+            x, sorted_selected_experts, top_k_weights, group_sizes, selected_experts = self._permute(
                 hidden_states, top_k_indices, top_k_weights
             )
             jax.debug.print("permute_x={x}, permute_x_shape={shape}, layer_id={layer_id}", x=x, shape=x.shape, layer_id=self.layer_id)
@@ -331,12 +336,24 @@ class Qwen3MoE(nnx.Module):
                 )
             
             jax.debug.print("collection_output_shape={shape}", shape=intermediate_output.shape)
+            if intermediate_output.shape[0] > 0:
+                # 只输出两个值验证是否一致
+                if expert_shard_id == 0 or expert_shard_id == 1:
+                    jax.debug.print("dev_{dev_id} collection_output_stats: shape={shape} "
+                                "min_vec(axis1)={min_v}, max_vec(axis1)={max_v}, "
+                                "mean_vec(axis1)={mean_v}, std_vec(axis1)={std_v}",
+                                dev_id=expert_shard_id,
+                                shape=intermediate_output.shape,
+                                min_v=jnp.min(intermediate_output, axis=1),
+                                max_v=jnp.max(intermediate_output, axis=1),
+                                mean_v=jnp.mean(intermediate_output, axis=1),
+                                std_v=jnp.std(intermediate_output, axis=1))
 
             global_tracer.print(intermediate_output, f"moe_intermediate_output", f"moe_compute_layer_id_{self.layer_id}")
             
             # ✅ Step 5: Unpermute - 恢复原始顺序
             output = self._unpermute(
-                intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
+                intermediate_output, sorted_selected_experts, top_k_weights, batch_size, seq_len
             )
             
             jax.debug.print("final_output_shape={shape}", shape=output.shape)
