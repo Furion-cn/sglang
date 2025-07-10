@@ -562,7 +562,7 @@ class Qwen3MoE(nnx.Module):
     
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
         # ✅ All-reduce前的统计
-        jax.debug.print("🔍 [Layer {layer_id}] Before all-reduce dev{dev_id}: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] Before all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
                        layer_id=self.layer_id, dev_id=expert_shard_id, 
                        min=data.min(), max=data.max(), mean=data.mean(), std=data.std())
         
@@ -571,7 +571,7 @@ class Qwen3MoE(nnx.Module):
         summed_data = jax.lax.psum(data, axis_name=self.expert_axis_name)
         
         # ✅ All-reduce后的统计
-        jax.debug.print("🔍 [Layer {layer_id}] After all-reduce dev{dev_id}: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] After all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
                        layer_id=self.layer_id, dev_id=expert_shard_id, 
                        min=summed_data.min(), max=summed_data.max(), mean=summed_data.mean(), std=summed_data.std())
         
@@ -650,7 +650,7 @@ class Qwen3MoE(nnx.Module):
     
     def _unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, seq_len):
         # ✅ Unpermute输入统计
-        jax.debug.print("🔍 [Layer {layer_id}] Unpermute input: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] Unpermute input: min={min}, max={max}, mean={mean}, std={std}", 
                         layer_id=self.layer_id, min=intermediate.min(), max=intermediate.max(), 
                         mean=intermediate.mean(), std=intermediate.std())
         
@@ -703,7 +703,7 @@ class Qwen3MoE(nnx.Module):
         intermediate_fp32 = reshaped_intermediate.astype(jnp.float32)
         weights_fp32 = reshaped_weights.astype(jnp.float32)
         
-        jax.debug.print("🔍 [Layer {layer_id}] Before einsum: intermediate min={i_min:.6f}, max={i_max:.6f}, weights min={w_min:.6f}, max={w_max:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] Before einsum: intermediate min={i_min}, max={i_max}, weights min={w_min}, max={w_max}", 
                         layer_id=self.layer_id, i_min=intermediate_fp32.min(), i_max=intermediate_fp32.max(), 
                         w_min=weights_fp32.min(), w_max=weights_fp32.max())
         
@@ -714,7 +714,7 @@ class Qwen3MoE(nnx.Module):
         )
         
         # ✅ Einsum后的统计
-        jax.debug.print("🔍 [Layer {layer_id}] After einsum: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] After einsum: min={min}, max={max}, mean={mean}, std={std}", 
                         layer_id=self.layer_id, min=output.min(), max=output.max(), 
                         mean=output.mean(), std=output.std())
         
@@ -726,7 +726,7 @@ class Qwen3MoE(nnx.Module):
             final_output = output.reshape(batch_size, seq_len, -1).astype(self.dtype)
         
         # ✅ 最终输出统计
-        jax.debug.print("🔍 [Layer {layer_id}] Final output: min={min:.6f}, max={max:.6f}, mean={mean:.8f}, std={std:.6f}", 
+        jax.debug.print("🔍 [Layer {layer_id}] Final output: min={min}, max={max}, mean={mean}, std={std}", 
                         layer_id=self.layer_id, min=final_output.min(), max=final_output.max(), 
                         mean=final_output.mean(), std=final_output.std())
         
