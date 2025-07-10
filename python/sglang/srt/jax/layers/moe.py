@@ -584,7 +584,22 @@ class Qwen3MoE(nnx.Module):
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
+        # ✅ 在all-reduce前添加设备特定的调试
+        jax.debug.print("🔍 Before all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
+                       dev_id=expert_shard_id, min=data.min(), max=data.max(), 
+                       mean=data.mean(), std=data.std())
+        jax.debug.print("🔍 Before all-reduce dev{dev_id}: shape={shape}, non_zero={nz}", 
+                       dev_id=expert_shard_id, shape=data.shape, nz=jnp.sum(data != 0))
+        
+        # ✅ 关键修复：使用psum进行all-reduce求和，而不是all_gather
+        # 这匹配PyTorch版本的tensor_model_parallel_all_reduce行为
         summed_data = jax.lax.psum(data, axis_name=self.expert_axis_name)
+        
+        # ✅ 在all-reduce后添加调试
+        jax.debug.print("🔍 After all-reduce dev{dev_id}: min={min}, max={max}, mean={mean}, std={std}", 
+                       dev_id=expert_shard_id, min=summed_data.min(), max=summed_data.max(), 
+                       mean=summed_data.mean(), std=summed_data.std())
+        
         global_tracer.print(summed_data, f"cpu_collect_psum_data", f"moe_combine_layer_id_{self.layer_id}")
         
         result = summed_data
