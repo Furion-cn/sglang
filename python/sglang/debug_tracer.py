@@ -515,7 +515,8 @@ class UnifiedDebugTracer:
                 'std': std_val,
                 'has_nan': bool(jnp.any(jnp.isnan(tensor)).item()),
                 'has_inf': bool(jnp.any(jnp.isinf(tensor)).item()),
-                'extra_info': extra_info
+                'extra_info': extra_info,
+                'value':tensor[:10],
             }
             
             # 改进的layer_id提取逻辑
@@ -599,7 +600,7 @@ class UnifiedDebugTracer:
             
             print(f"{step_info}[{framework}][{stats['stage']}] {stats['name']}: shape={stats['shape']}, "
                   f"min={stats['min']:.6f}, max={stats['max']:.6f}, "
-                  f"mean={stats['mean']:.6f}, std={stats['std']:.6f}{nan_inf}{extra}")
+                  f"mean={stats['mean']:.6f}, std={stats['std']:.6f}{nan_inf}{extra}, value={stats['value']}")
     
     def get_records(self, key: str = None) -> Union[Dict[str, List], List]:
         with self.lock:

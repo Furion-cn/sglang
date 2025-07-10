@@ -17,10 +17,21 @@ def create_forward_batch(seq_lengths, input_ids=None, model_config=None):
     """Create a real ForwardBatch for testing."""
     batch_size = len(seq_lengths)
     total_tokens = sum(seq_lengths)
+    head_dim=128
+    layer_num=1
+    max_seq_len=128
+    max_batch_size=20
+    num_kv_heads=32
+    if model_config is not None:
+        head_dim=model_config['head_dim']
+        layer_num=model_config['num_hidden_layers']
+        num_kv_heads=model_config['num_kv_heads']
 
     # Create dummy input_ids if not provided
     if input_ids is None:
-        input_ids = jnp.arange(total_tokens, dtype=jnp.int32)
+        valid_input_ids = jnp.arange(total_tokens, dtype=jnp.int32)
+        invalid_input_ids = jnp.array([jnp.iinfo(jnp.int32).min]*int(max_seq_len*max_batch_size-valid_input_ids.size))
+        input_ids=jnp.concat([valid_input_ids,invalid_input_ids],axis=0)
 
     # Create sequence lengths array
     seq_lens = jnp.array(seq_lengths, dtype=jnp.int32)
@@ -31,26 +42,48 @@ def create_forward_batch(seq_lengths, input_ids=None, model_config=None):
     # Create extend_start_loc (start position of each sequence)
     extend_start_loc = jnp.array([sum(seq_lengths[:i])
                                  for i in range(batch_size)], dtype=jnp.int32)
+    
+    k_cache,v_cache = _create_kv_cache(head_dim,max_batch_size,num_kv_heads,head_dim,layer_num=layer_num)
 
-    current_kv_cache = [ReqToHashKVCachePool(
-            seq_len=seq_len,
-            head_num=model_config["num_kv_heads"],
-            head_dim=model_config["head_dim"],
-            layer_num=model_config["num_hidden_layers"],
-            dtype=jnp.bfloat16 if model_config["bf16"] else jnp.float32
-        ) for seq_len in seq_lens]
+    valid_cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
+    invalid_cache_loc=jnp.array([jnp.iinfo(jnp.int32).min]*int(max_seq_len*max_batch_size-valid_cache_loc.size))
+    cache_loc =jnp.concat([valid_cache_loc,invalid_cache_loc],axis=0)
+
     # TODO: aolemila
     return ForwardBatch(
         batch_size=batch_size,
         input_ids=input_ids,
         seq_lens=seq_lens,
+        cache_loc=cache_loc,
+        out_cache_loc=None,
         positions=positions,
         extend_start_loc=extend_start_loc,
-        current_kv_cache=current_kv_cache,
-        total_tokens=total_tokens
+        k_cache=k_cache,
+        v_cache=v_cache,
     )
 
 
+
+def _create_kv_cache(
+    max_seq_len,
+    max_batch_size,
+    head_num,
+    head_dim,
+    layer_num,
+    dtype=jnp.bfloat16,
+    ):
+    max_tokens = max_seq_len * max_batch_size
+    hidden_dim = head_num * head_dim
+
+    k_cache = jnp.zeros(
+        (layer_num, max_tokens, hidden_dim),
+        dtype=dtype
+    )
+    v_cache = jnp.zeros(
+        (layer_num, max_tokens, hidden_dim),
+        dtype=dtype
+    )
+    return k_cache, v_cache
 class TestAttention(CustomTestCase):
     """Test cases for the Attention layer."""
 

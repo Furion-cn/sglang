@@ -65,7 +65,7 @@ class QWenMLP(nnx.Module):
 
         self.act_func = jax.nn.silu
 
-    @trace_function(stage="MLP", include_args=False, include_output=True)
+    #@trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
         return _mlp_forward(hidden_states, self.w1.weight.value, self.w2.weight.value, self.c_proj.weight.value)
 
@@ -126,7 +126,7 @@ class QWenAttention(nnx.Module):
             rngs=rngs
         )
 
-    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
+    #@trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -182,7 +182,7 @@ class QWenBlock(nnx.Module):
             rngs=rngs,
         )
 
-    @trace_function(stage="BLOCK", include_args=False, include_output=True)
+    #@trace_function(stage="BLOCK", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -249,7 +249,7 @@ class QWenModel(nnx.Module):
             rngs=rngs
         )
 
-    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
+    #@trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
