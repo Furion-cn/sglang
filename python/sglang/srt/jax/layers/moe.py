@@ -609,7 +609,13 @@ class Qwen3MoE(nnx.Module):
         reshaped_group_sizes = global_group_sizes.reshape(
             self.expert_parallelism, self.experts_per_device
         )
+        jax.debug.print("dev_{dev_id} reshaped_group_sizes={sizes}", 
+                       dev_id=expert_shard_id, sizes=reshaped_group_sizes)
+        
+        # Calculate tokens per device by summing across experts
         all_local_sizes = jnp.sum(reshaped_group_sizes, axis=1)
+        jax.debug.print("dev_{dev_id} all_local_sizes={sizes}", 
+                       dev_id=expert_shard_id, sizes=all_local_sizes)
         
         # 2. Compute the starting index for this device's data in the final global tensor.
         # Fix: Properly compute prefix sum array by first getting cumsum of all elements
@@ -619,7 +625,7 @@ class Qwen3MoE(nnx.Module):
         
         my_start_index = start_indices[expert_shard_id]
         my_end_index = start_indices[expert_shard_id + 1]
-        num_local_tokens = all_local_sizes[expert_shard_id]
+        num_local_tokens = my_end_index - my_start_index  # Fix: Calculate num_local_tokens from start and end indices
         
         jax.debug.print("dev_{dev_id} start_indices={indices} my_start={start} my_end={end} num_local={local}", 
                        dev_id=expert_shard_id, indices=start_indices, 
@@ -631,12 +637,24 @@ class Qwen3MoE(nnx.Module):
         # Only take the valid portion of data (first num_local_tokens elements)
         valid_data = data[:num_local_tokens]
         
+        # DEBUG: Print shapes and values for verification
+        jax.debug.print("dev_{dev_id} data_shape={d_shape} valid_shape={v_shape} num_tokens={n_tok}", 
+                       dev_id=expert_shard_id, 
+                       d_shape=data.shape,
+                       v_shape=valid_data.shape,
+                       n_tok=num_local_tokens)
+        
         # Move the valid data to its correct position in the buffer
         local_result_buffer = local_result_buffer.at[my_start_index:my_end_index].set(valid_data)
         
-        jax.debug.print("dev_{dev_id} data_shape={d_shape} valid_shape={v_shape} start={start} end={end}", 
-                       dev_id=expert_shard_id, d_shape=data.shape, 
-                       v_shape=valid_data.shape, start=my_start_index, end=my_end_index)
+        # DEBUG: Verify the data movement
+        result_slice = local_result_buffer[my_start_index:my_end_index]
+        jax.debug.print("dev_{dev_id} moved_data_shape={m_shape} start={start} end={end}, result_slice={result_slice}", 
+                       dev_id=expert_shard_id,
+                       m_shape=result_slice.shape,
+                       start=my_start_index,
+                       end=my_end_index,
+                       result_slice=jnp.mean(result_slice, axis=1))
         
         # DEBUG: Print buffer info on each device BEFORE the psum
         jax.debug.print("dev_{dev_id} pre_psum_buffer: "
