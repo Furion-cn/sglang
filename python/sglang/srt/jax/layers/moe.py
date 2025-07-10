@@ -610,10 +610,18 @@ class Qwen3MoE(nnx.Module):
             self.expert_parallelism, self.experts_per_device
         )
         all_local_sizes = jnp.sum(reshaped_group_sizes, axis=1)
-
+        
         # 2. Compute the starting index for this device's data in the final global tensor.
-        start_indices = jnp.concatenate([jnp.array([0], dtype=all_local_sizes.dtype), jnp.cumsum(all_local_sizes[:-1])])
+        # Fix: Properly compute prefix sum array by first getting cumsum of all elements
+        # and then prepending 0 to get [0, cumsum_1, cumsum_2, ..., total_sum]
+        cumsum = jnp.cumsum(all_local_sizes)
+        start_indices = jnp.concatenate([jnp.array([0], dtype=all_local_sizes.dtype), cumsum])
+        
         my_start_index = start_indices[expert_shard_id]
+        my_end_index = start_indices[expert_shard_id + 1]
+        
+        jax.debug.print("dev_{dev_id} start_indices={indices} my_start={start} my_end={end}", 
+                       dev_id=expert_shard_id, indices=start_indices, start=my_start_index, end=my_end_index)
         
         # 3. Create a zero buffer and scatter the local `data` into its correct slot.
         # This is a more robust alternative to jnp.pad for JIT compilation.
@@ -642,7 +650,7 @@ class Qwen3MoE(nnx.Module):
                        num_local=num_local_tokens)
         
         # Create the indices where this device's data should be placed.
-        indices = jnp.arange(my_start_index, my_start_index + data.shape[0])
+        indices = jnp.arange(my_start_index, my_end_index)
         jax.debug.print("dev_{dev_id} indices={indices}", dev_id=expert_shard_id, indices=indices)
         local_result_buffer = local_result_buffer.at[indices].set(masked_data)
         
