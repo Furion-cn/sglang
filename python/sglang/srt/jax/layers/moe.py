@@ -287,17 +287,17 @@ class Qwen3MoE(nnx.Module):
             # We check the size to prevent errors on shards that receive no tokens.
             if x.shape[0] > 0:
                 # DEBUG: Print statistics for the input tensor 'x' on each shard.
-                # Here, we first compute stats along axis=0 (across tokens) to get a vector per stat,
-                # then we take the mean of that vector to get a single representative value for printing.
+                # Here, we compute stats along axis=1 (across hidden dims) to get a vector per stat.
+                # NOTE: The output vector will be truncated in the log output.
                 jax.debug.print("dev_{dev_id} input_x_stats: shape={shape} "
-                               "mean_of_min(axis0)={mom}, mean_of_max(axis0)={mxm}, "
-                               "mean_of_mean(axis0)={mnm}, mean_of_std(axis0)={msm}",
+                               "min_vec(axis1)={min_v}, max_vec(axis1)={max_v}, "
+                               "mean_vec(axis1)={mean_v}, std_vec(axis1)={std_v}",
                                dev_id=expert_shard_id,
                                shape=x.shape,
-                               mom=jnp.mean(jnp.min(x, axis=0)),
-                               mxm=jnp.mean(jnp.max(x, axis=0)),
-                               mnm=jnp.mean(jnp.mean(x, axis=0)),
-                               msm=jnp.mean(jnp.std(x, axis=0)))
+                               min_v=jnp.min(x, axis=1),
+                               max_v=jnp.max(x, axis=1),
+                               mean_v=jnp.mean(x, axis=1),
+                               std_v=jnp.std(x, axis=1))
             
             # ✅ Step 3: GMM计算 - 现在权重已经是分片的！
             intermediate_output = self._gmm_compute_with_sharded_weights(
@@ -307,15 +307,16 @@ class Qwen3MoE(nnx.Module):
             # ✅ 检查GMM计算结果
             if intermediate_output.shape[0] > 0:
                 # DEBUG: Print statistics for the output tensor on each shard for comparison.
+                # NOTE: The output vector will be truncated in the log output.
                 jax.debug.print("dev_{dev_id} output_intermediate_stats: shape={shape} "
-                               "mean_of_min(axis0)={mom}, mean_of_max(axis0)={mxm}, "
-                               "mean_of_mean(axis0)={mnm}, mean_of_std(axis0)={msm}",
+                               "min_vec(axis1)={min_v}, max_vec(axis1)={max_v}, "
+                               "mean_vec(axis1)={mean_v}, std_vec(axis1)={std_v}",
                                dev_id=expert_shard_id,
                                shape=intermediate_output.shape,
-                               mom=jnp.mean(jnp.min(intermediate_output, axis=0)),
-                               mxm=jnp.mean(jnp.max(intermediate_output, axis=0)),
-                               mnm=jnp.mean(jnp.mean(intermediate_output, axis=0)),
-                               msm=jnp.mean(jnp.std(intermediate_output, axis=0)))
+                               min_v=jnp.min(intermediate_output, axis=1),
+                               max_v=jnp.max(intermediate_output, axis=1),
+                               mean_v=jnp.mean(intermediate_output, axis=1),
+                               std_v=jnp.std(intermediate_output, axis=1))
             
             jax.debug.print("compute_output_shape={shape}", shape=intermediate_output.shape)
             
