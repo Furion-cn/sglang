@@ -631,43 +631,44 @@ class Qwen3MoE(nnx.Module):
                        dev_id=expert_shard_id, indices=start_indices, 
                        start=my_start_index, end=my_end_index, local=num_local_tokens)
         
-        # 3. Create a zero buffer and move the valid data to its correct position
-        local_result_buffer = jnp.zeros((target_size, data.shape[1]), dtype=data.dtype)
+        # 3. Create a zero buffer and move the valid data to its correct position.
+        # This implementation avoids creating intermediate tensors with dynamic shapes,
+        # which can be problematic under JIT compilation.
         
-        # Only take the valid portion of data (first num_local_tokens elements)
-        valid_data = data[:num_local_tokens]
+        # Create an index grid for the full-sized output buffer.
+        output_indices = jnp.arange(target_size)
         
-        # DEBUG: Print shapes and values for verification
-        jax.debug.print("dev_{dev_id} data_shape={d_shape} valid_shape={v_shape} num_tokens={n_tok}", 
-                       dev_id=expert_shard_id, 
-                       d_shape=data.shape,
-                       v_shape=valid_data.shape,
-                       n_tok=num_local_tokens)
+        # For each position in the output buffer, calculate which row to read from the source `data`.
+        # This creates a mapping: output_row -> source_row.
+        source_indices = output_indices - my_start_index
         
-        # Move the valid data to its correct position in the buffer
-        local_result_buffer = local_result_buffer.at[my_start_index:my_end_index].set(valid_data)
+        # Create a mask to identify the valid region in the output buffer for this device.
+        mask = (output_indices >= my_start_index) & (output_indices < my_end_index)
         
+        # To avoid out-of-bounds access when gathering from `data`, replace invalid source indices with 0.
+        # This is safe because these values will be discarded by the mask anyway.
+        safe_source_indices = jnp.where(mask, source_indices, 0)
+        
+        # Gather data from the source `data` array according to the calculated indices.
+        # The result `data_to_scatter` has the same full size as `local_result_buffer`.
+        data_to_scatter = data[safe_source_indices]
+        
+        # Use the mask to place the gathered data into the correct slice of the buffer.
+        # Where the mask is True, we take the value from `data_to_scatter`.
+        # Where it's False, we take the value from a zero buffer (i.e., keep it zero).
+        local_result_buffer = jnp.where(mask[:, None], data_to_scatter, 0.0)
+
         # DEBUG: Verify the data movement
-        result_slice = local_result_buffer[my_start_index:my_end_index]
-        jax.debug.print("dev_{dev_id} moved_data_shape={m_shape} start={start} end={end}, result_slice={result_slice}", 
+        result_slice = jax.lax.dynamic_slice(
+            local_result_buffer, (my_start_index, 0), (num_local_tokens, data.shape[1])
+        )
+        jax.debug.print("dev_{dev_id} moved_data_shape={m_shape} start={start} end={end}, result_slice_mean={mean}", 
                        dev_id=expert_shard_id,
                        m_shape=result_slice.shape,
                        start=my_start_index,
                        end=my_end_index,
-                       result_slice=jnp.mean(result_slice, axis=1))
+                       mean=jnp.mean(result_slice, axis=1))
         
-        # DEBUG: Print buffer info on each device BEFORE the psum
-        jax.debug.print("dev_{dev_id} pre_psum_buffer: "
-                       "d_shape={d_shape}, start={start}, num_local_tokens={num_local}, "
-                       "b_sum={b_sum}, b_shape={b_shape}, mean={mean}",
-                       dev_id=expert_shard_id,
-                       d_shape=data.shape,
-                       start=my_start_index,
-                       num_local=num_local_tokens,
-                       b_sum=jnp.sum(local_result_buffer),
-                       b_shape=local_result_buffer.shape,
-                       mean=jnp.mean(local_result_buffer, axis=1))
-
         # 4. Use an all-reduce sum to combine the buffers from all devices.
         # Since each device's buffer only has non-zero values in its unique slice,
         # summing them up is equivalent to a concatenation.
