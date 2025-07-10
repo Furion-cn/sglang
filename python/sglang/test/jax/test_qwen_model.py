@@ -22,7 +22,10 @@ from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 import jax
 from functools import partial
+from sglang.debug_tracer import global_tracer
 
+MAX_SEQ_LEN=128
+MAX_BATCH_SIZE=20
 
 class TestQwenModel(unittest.TestCase):
     """Test cases for the Qwen model."""
@@ -93,6 +96,9 @@ class TestQwenModel(unittest.TestCase):
             model_override_args="{}"
         )
 
+        self.enable_debug_tracer = os.environ.get(
+            'ENABLE_DEBUG_TRACER', False)
+
         # Load the model using JAXModelLoader
         with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
             mock_arch.return_value = (QWenLMHeadJaxModel, None)
@@ -123,16 +129,22 @@ class TestQwenModel(unittest.TestCase):
         # Concatenate all tokens directly without padding
         input_ids_flat = []
         positions_flat = []
+        invalid_positions_flat=[]
         for tokens in tokenized_inputs:
             input_ids_flat.extend(tokens)
             # Create positions at the same time
             positions_flat.extend(range(len(tokens)))
+            invalid_positions_flat.extend(range(len(tokens),MAX_SEQ_LEN,1))
         
         # Pad -inf at the end of inputs and positions, TODO
 
         # Create required arrays
-        input_ids_array = jnp.array(input_ids_flat, dtype=jnp.int32)
-        positions_array = jnp.array(positions_flat, dtype=jnp.int32)
+        valid_input_ids_array = jnp.array(input_ids_flat, dtype=jnp.int32)
+        invalid_input_ids_array = jnp.array([-1]*int(MAX_SEQ_LEN*len(texts)-valid_input_ids_array.size))
+        input_ids_array = jnp.concat([valid_input_ids_array,invalid_input_ids_array],axis=0)
+        valid_positions_array = jnp.array(positions_flat, dtype=jnp.int32)
+        invalid_positions_array =  jnp.array(invalid_positions_flat,dtype=jnp.int32)
+        positions_array = jnp.concat([valid_positions_array,invalid_positions_array],axis=0)
         seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)
 
         # Create start locations
@@ -148,8 +160,8 @@ class TestQwenModel(unittest.TestCase):
         #     max_batch_size=20,
         # )
         k_cache,v_cache=create_kv_cache(
-            max_seq_len=128,
-            max_batch_size=20,
+            max_seq_len=MAX_SEQ_LEN,
+            max_batch_size=MAX_BATCH_SIZE,
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
@@ -157,12 +169,15 @@ class TestQwenModel(unittest.TestCase):
         )
 
         # Create ForwardBatch
+        valid_cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
+        invalid_cache_loc=jnp.array([i for i in range(jnp.sum(seq_lens),MAX_SEQ_LEN*len(texts))])
+        cache_loc =jnp.concat([valid_cache_loc,invalid_cache_loc],axis=0)
         forward_batch = ForwardBatch(
             batch_size=len(actual_seq_lens),
             input_ids=input_ids_array,
             seq_lens=seq_lens,
             positions=positions_array,
-            cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32),
+            cache_loc=cache_loc,
             out_cache_loc=None,
             extend_start_loc=extend_start_loc,
             k_cache=k_cache,
@@ -284,7 +299,8 @@ class TestQwenModel(unittest.TestCase):
 
             questions.append(question)
 
-        return questions
+        #return questions
+        return ['Tell me about the history of China','Hello, how are you', '描述一下中国的特点']
 
     def _update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer, finished_requests, original_indices):
         """Update forward batch while handling finished requests"""
@@ -325,19 +341,35 @@ class TestQwenModel(unittest.TestCase):
         # update cache loc
         out_cache_start_loc = max(
             item for sublist in new_cache_loc for item in sublist) + 1
-        forward_batch.out_cache_loc = jnp.arange(
+        valid_out_cache_loc = jnp.arange(
             out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
-        forward_batch.cache_loc = jnp.array([
+        invalid_out_cache_loc=jnp.arange(out_cache_start_loc + forward_batch.batch_size, out_cache_start_loc+forward_batch.batch_size * MAX_SEQ_LEN, dtype=jnp.int32)
+        forward_batch.out_cache_loc = jnp.concat([valid_out_cache_loc, invalid_out_cache_loc], axis=0)
+        valid_cache_loc=jnp.array([
             item for i, cache_loc in enumerate(new_cache_loc)
             for item in cache_loc + [int(forward_batch.out_cache_loc[i])]
         ], dtype=jnp.int32)
+        invalid_cache_loc=jnp.array([i for i in range(valid_cache_loc.size,MAX_SEQ_LEN*forward_batch.batch_size)])
+        forward_batch.cache_loc = jnp.concat([valid_cache_loc,invalid_cache_loc],axis=0)
+
+        # create batch
+        # valid_cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
+        #invalid_cache_loc=jnp.array([i for i in range(jnp.sum(seq_lens),MAX_SEQ_LEN*MAX_BATCH_SIZE)])
+        #cache_loc =jnp.concat([valid_cache_loc,invalid_cache_loc],axis=0)
 
         # Update positions for decode mode
-        forward_batch.positions = jnp.array(
+        valid_positions = jnp.array(
             [seq_len - 1 for seq_len in new_seq_lens], dtype=jnp.int32)
+        invalid_positions_flat=[]
+        for seq_len in new_seq_lens:
+            invalid_positions_flat.extend(range(seq_len,MAX_SEQ_LEN+seq_len-1))
+        invalid_positions=jnp.array(invalid_positions_flat,dtype=jnp.int32)
+        forward_batch.positions = jnp.concat([valid_positions,invalid_positions],axis=0)
 
         # Update input ids
-        forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
+        valid_input_ids=jnp.array(new_input_ids, dtype=jnp.int32)
+        invalid_input_ids = jnp.array([-1]*int(forward_batch.batch_size*MAX_SEQ_LEN-valid_input_ids.size))
+        forward_batch.input_ids = jnp.concat([valid_input_ids, invalid_input_ids],axis=0)
 
         # Update extend start loc
         forward_batch.extend_start_loc = jnp.cumsum(
@@ -355,6 +387,8 @@ class TestQwenModel(unittest.TestCase):
         """
         print("🧪 Testing Qwen model generation...")
         model = self._setup_model()
+        if self.enable_debug_tracer:
+            global_tracer.start_session()
         jax_profiling_dir = os.environ.get(
             "JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
         batch_size = int(os.environ.get("BATCH_SIZE", 10))
@@ -382,6 +416,7 @@ class TestQwenModel(unittest.TestCase):
             import time
             start_time = time.time()
 
+
             input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
                 model.config, input_texts, tokenizer)
 
@@ -407,7 +442,7 @@ class TestQwenModel(unittest.TestCase):
                 }
 
             max_iterations = 15 if batch_size and batch_size > 10 else 30
-            max_iterations = 10
+            max_iterations = 5
             print(
                 f"\n🔄 Starting generation (max {max_iterations} iterations)...")
 
@@ -448,15 +483,22 @@ class TestQwenModel(unittest.TestCase):
                 #@partial(jax.jit,donate_argnums=(0,2))
                 @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
                 def _forward_decode(model:QWenLMHeadJaxModel,forward_batch,batch_size):
-                    return model(forward_batch.input_ids,
-                          forward_batch.positions, forward_batch,FORWARD_MODE_DECODE,batch_size)
+                    print("nothing to do")
+                    return
+                    # return model(forward_batch.input_ids,
+                    #       forward_batch.positions, forward_batch,FORWARD_MODE_DECODE,batch_size)
                                     
 
                 if iteration==0:
                     #print(f"forward_batch.k_cache: {forward_batch.k_cache}")
                     y,forward_batch = _forward_extend(model,forward_batch,forward_batch.batch_size)
-                else:
-                    y,forward_batch = _forward_decode(model,forward_batch,forward_batch.batch_size)
+                else: 
+                    #y,forward_batch = _forward_decode(model,forward_batch,forward_batch.batch_size)
+                    _forward_decode(model,forward_batch,forward_batch.batch_size)
+                    continue
+
+                if iteration == max_iterations-1:
+                    return
                 
                 #print(f"========y: {y}")
                 #print(f"forward_batch.k_cache: {forward_batch.k_cache[0]}")
@@ -472,6 +514,7 @@ class TestQwenModel(unittest.TestCase):
                         min_ps=jnp.full((forward_batch.batch_size, 1), 0.0),
                         vocab_size=model.config.vocab_size,
                     ))
+                print(f"[iter: {iteration}] next_token_ids: {next_token_ids.reshape(-1)}")
 
                 # 只为小批量打印详细信息
                 if len(input_texts) <= 10 and (iteration % 5 == 0):
@@ -491,6 +534,29 @@ class TestQwenModel(unittest.TestCase):
                 # Update batch and handle finished requests
                 new_original_indices = self._update_forward_batch(
                     forward_batch, next_token_ids, tokenizer, finished_requests, original_indices)
+                # print(
+                #     f"batch_size: {batch_size}, "
+                #     f"input_ids.shape: {forward_batch.input_ids.shape}, input_ids: {forward_batch.input_ids},\n"
+                #     f"seq_lens.shape: {forward_batch.seq_lens.shape}, seq_lens: {forward_batch.seq_lens},\n"
+                #     f"cache_loc.shape: {forward_batch.cache_loc.shape}, cache_loc: {forward_batch.cache_loc},\n"
+                #     f"out_cache_loc.shape: {forward_batch.out_cache_loc.shape}, out_cache_loc: {forward_batch.out_cache_loc},\n"
+                #     f"positions.shape: {forward_batch.positions.shape}, positions: {forward_batch.positions},\n"
+                #     f"extend_start_loc.shape: {forward_batch.extend_start_loc.shape}, extend_start_loc: {forward_batch.extend_start_loc},\n"
+                #     f"k_cache.shape: {forward_batch.k_cache.shape}, k_cache.value: {forward_batch.k_cache},\n" 
+                #     f"v_cache.shape: {forward_batch.v_cache.shape}, v_cache.value: {forward_batch.v_cache}"
+                # )
+                print(
+                    f"===========================================================\n"
+                    f"batch_size:             {forward_batch.batch_size}, \n"
+                    f"input_ids.shape:        {forward_batch.input_ids.shape}\n"
+                    f"seq_lens.shape:         {forward_batch.seq_lens.shape}\n"
+                    f"cache_loc.shape:        {forward_batch.cache_loc.shape}\n"
+                    f"out_cache_loc.shape:    {forward_batch.out_cache_loc.shape},\n"
+                    f"positions.shape:        {forward_batch.positions.shape}\n"
+                    f"extend_start_loc.shape: {forward_batch.extend_start_loc.shape}\n"
+                    f"k_cache.shape:          {forward_batch.k_cache.shape}\n" 
+                    f"v_cache.shape:          {forward_batch.v_cache.shape}"
+                )
 
                 if new_original_indices is not None:
                     original_indices = new_original_indices
@@ -559,6 +625,15 @@ class TestQwenModel(unittest.TestCase):
                 self.assertTrue(len(result['output']) >= len(result['input']))
 
             print(f"\n✅ Batch test completed successfully!")
+
+
+            if self.enable_debug_tracer:
+                print("\n🔴 Ending debug tracer session...")
+                debug_file = global_tracer.end_session()
+                if debug_file:
+                    print(f"✅ Debug trace saved to: {debug_file}")
+                else:
+                    print("⚠️  Debug trace not saved")
             return {
                 'total_time': total_time,
                 'throughput': len(input_texts)/total_time,

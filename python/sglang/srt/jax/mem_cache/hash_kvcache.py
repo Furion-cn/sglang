@@ -92,6 +92,7 @@ def set_kv_buffer(
     #     layer_id, loc, cache_k, cache_v,
     #     k_cache, v_cache
     # )
+    #print(f"[set_kv_buffer] loc.shape: {loc.shape}, cache_k.shape: {cache_k.shape}, cache_v.shape: {cache_v.shape}")
     assert loc.shape[0] == cache_k.shape[0] == cache_v.shape[0], "Batch size mismatch"
     # print(f"layer_id: {layer_id}, loc.shape: {loc.shape}, loc: {loc}")
     # print(f"k_cache: {k_cache.shape}, k: {cache_k.shape}")
