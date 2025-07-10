@@ -337,7 +337,7 @@ class Qwen3MoE(nnx.Module):
                 intermediate_output = self._expert_all_to_all_collect(
                     intermediate_output, group_sizes, expert_shard_id, original_size
                 )
-            
+                        
             jax.debug.print("collection_output_shape={shape}", shape=intermediate_output.shape)
             if intermediate_output.shape[0] > 0:
                 # 只输出两个值验证是否一致
@@ -602,7 +602,7 @@ class Qwen3MoE(nnx.Module):
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
         """
         Gathers variable-sized data from all expert devices into a single, correctly
-        ordered tensor. This implementation uses a robust padding and psum pattern
+        ordered tensor. This implementation uses a robust scatter-update and psum pattern
         to be JIT-compatible and avoid issues with dynamic shapes.
         """
         # 1. Calculate the number of tokens on *each* device from `global_group_sizes`.
@@ -615,15 +615,23 @@ class Qwen3MoE(nnx.Module):
         start_indices = jnp.concatenate([jnp.array([0], dtype=all_local_sizes.dtype), jnp.cumsum(all_local_sizes[:-1])])
         my_start_index = start_indices[expert_shard_id]
         
-        # 3. Manually pad the local `data` to the full `target_size`.
-        # The data is placed at `my_start_index`, and the rest is zeros.
-        # This creates a non-overlapping buffer on each device.
-        pad_before = my_start_index
-        pad_after = target_size - (my_start_index + data.shape[0])
+        # 3. Create a zero buffer and scatter the local `data` into its correct slot.
+        # This is a more robust alternative to jnp.pad for JIT compilation.
+        local_result_buffer = jnp.zeros((target_size, data.shape[1]), dtype=data.dtype)
+        # Create the indices where this device's data should be placed.
+        indices = jnp.arange(my_start_index, my_start_index + data.shape[0])
+        local_result_buffer = local_result_buffer.at[indices].set(data)
         
-        # JIT-safe padding: ((before, after), (before, after)) for each dimension
-        paddings = ((pad_before, pad_after), (0, 0))
-        local_result_buffer = jnp.pad(data, pad_width=paddings, mode='constant', constant_values=0)
+        # DEBUG: Print buffer info on each device BEFORE the psum
+        jax.debug.print("dev_{dev_id} pre_psum_buffer: "
+                       "data_shape={d_shape}, start_idx={start}, "
+                       "buffer_sum={b_sum}, buffer_shape={b_shape}, mean={mean}",
+                       dev_id=expert_shard_id,
+                       d_shape=data.shape,
+                       start=my_start_index,
+                       b_sum=jnp.sum(local_result_buffer),
+                       b_shape=local_result_buffer.shape,
+                       mean=jnp.mean(local_result_buffer, axis=1))
 
         # 4. Use an all-reduce sum to combine the buffers from all devices.
         # Since each device's buffer only has non-zero values in its unique slice,
