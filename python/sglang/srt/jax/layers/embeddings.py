@@ -146,6 +146,42 @@ class ParallelLMHead(Embed):
         raise RuntimeError("LMHead's weights should be used in the sampler.")
 
 
+@partial(jax.jit, static_argnames=["is_neox_style"])
+def _apply_rotary_emb(
+    x: jax.Array,
+    cos: jax.Array,
+    sin: jax.Array,
+    is_neox_style: bool,
+) -> jax.Array:
+    """
+    Args:
+        x: [num_tokens, num_heads, head_size]
+        cos: [num_tokens, head_size // 2]
+        sin: [num_tokens, head_size // 2]
+        is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
+            positional embeddings.
+    """
+    cos = jnp.expand_dims(cos, axis=-2).astype(x.dtype)
+    sin = jnp.expand_dims(sin, axis=-2).astype(x.dtype)
+    if is_neox_style:
+        # cos = cos.reshape(*cos.shape[:-1], -1, 1)
+        # sin = sin.reshape(*sin.shape[:-1], -1, 1)
+        # x = x.reshape(*x.shape[:-1], -1, 2)
+        x1, x2 = jnp.split(x, 2, axis=-1)
+    else:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    if is_neox_style:
+        # concatenated = jnp.concatenate((o1, o2), axis=-1)
+        # return concatenated.reshape(*concatenated.shape[:-2], -1)
+        return jnp.concatenate((o1, o2), axis=-1)
+    else:
+        stacked = jnp.stack((o1, o2), axis=-1)
+        return stacked.reshape(*stacked.shape[:-2], -1)
+
+
 class RotaryEmbedding(nnx.Module):
     """Rotary Position Embedding.
 

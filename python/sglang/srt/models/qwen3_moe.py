@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 from torch import nn
 
+from sglang.debug_tracer import global_tracer, trace_function
 from sglang.srt.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -165,27 +166,69 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             if name not in ["correction_bias"]
         ]
 
+    @trace_function(stage="MOE_SPARSE_FORWARD", include_args=False, include_output=True)
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
+        
+        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
+        
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        
+        global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
+        global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
+        
+        # Extract top-k for debugging (similar to JAX version)
+        top_k_logits, top_k_indices = torch.topk(router_logits, k=self.experts.top_k, dim=-1)
+        top_k_weights = torch.softmax(top_k_logits, dim=-1)
+        
+        global_tracer.print(top_k_logits, f"top_k_logits", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(top_k_indices, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
+        global_tracer.print(top_k_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
+        
+        # Expert computation
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+
+        # ✅ 关键：GMM计算完成后的统计信息（在all-reduce前）
+        logger.info(f"🔍 [Layer {self.layer_id}] PyTorch GMM output before all-reduce: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+        
+        global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
+        
         if self.tp_size > 1:
+            # ✅ All-reduce前的统计
+            logger.info(f"🔍 [Layer {self.layer_id}] PyTorch before all-reduce: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+            
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            
+            # ✅ All-reduce后的统计
+            logger.info(f"🔍 [Layer {self.layer_id}] PyTorch after all-reduce: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+            
+            global_tracer.print(final_hidden_states, f"moe_after_all_reduce", f"moe_combine_layer_id_{self.layer_id}")
+
+        # ✅ 最终输出统计
+        logger.info(f"🔍 [Layer {self.layer_id}] PyTorch final output: min={final_hidden_states.min():.6f}, max={final_hidden_states.max():.6f}, mean={final_hidden_states.mean():.8f}, std={final_hidden_states.std():.6f}")
+        
+        global_tracer.print(final_hidden_states, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
+    @trace_function(stage="MOE_DEEPEP_SPARSE_FORWARD", include_args=False, include_output=True)
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
+        global_tracer.print(hidden_states, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
+        
         forward_mode = forward_batch.forward_mode
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
+            
+            global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
+            global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
 
             topk_weights, topk_idx = select_experts(
                 hidden_states=hidden_states,
@@ -198,6 +241,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                     layer_id=self.layer_id,
                 ),
             )
+            
+            global_tracer.print(topk_weights, f"top_k_weights", f"moe_sparse_layer_id_{self.layer_id}")
+            global_tracer.print(topk_idx, f"top_k_indices", f"moe_sparse_layer_id_{self.layer_id}")
         else:
             topk_idx = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -205,6 +251,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             topk_weights = torch.empty(
                 (0, self.top_k), dtype=torch.float32, device=hidden_states.device
             )
+            
         if self.ep_size > 1:
             # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
             (
@@ -222,6 +269,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 topk_weights=topk_weights,
                 forward_mode=forward_mode,
             )
+            
+            global_tracer.print(hidden_states, f"moe_dispatch_output", f"moe_dispatch_layer_id_{self.layer_id}")
+            
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             topk_idx=topk_idx,
@@ -233,6 +283,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             num_recv_tokens_per_expert=num_recv_tokens_per_expert,
             forward_mode=forward_mode,
         )
+        
+        global_tracer.print(final_hidden_states, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
+        
         if self.ep_size > 1:
             final_hidden_states = self.deepep_dispatcher.combine(
                 hidden_states=final_hidden_states,
@@ -240,6 +293,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 topk_weights=topk_weights,
                 forward_mode=forward_mode,
             )
+            
+            global_tracer.print(final_hidden_states, f"moe_combine_output", f"moe_combine_layer_id_{self.layer_id}")
+                
         return final_hidden_states
 
     def op_gate(self, state):
@@ -357,6 +413,7 @@ class Qwen3MoeAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        self.layer_id = layer_id
 
         attn_tp_rank = get_attention_tp_rank()
         attn_tp_size = get_attention_tp_size()
@@ -470,6 +527,7 @@ class Qwen3MoeAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+    @trace_function(stage="MOE_ATTENTION_FORWARD", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -481,7 +539,9 @@ class Qwen3MoeAttention(nn.Module):
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
-        return self.forward_core(s)
+        result = self.forward_core(s)
+        
+        return result
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
@@ -561,6 +621,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             post_attention_layernorm=self.post_attention_layernorm,
         )
 
+    @trace_function(stage="MOE_DECODER_LAYER_FORWARD", include_args=False, include_output=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -568,10 +629,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        global_tracer.print(hidden_states, f"decoder_layer_input", f"moe_decoder_layer_id_{self.layer_id}")
 
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
+        
+        global_tracer.print(hidden_states, f"input_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_input_norm", f"moe_decoder_layer_id_{self.layer_id}")
 
         if hidden_states.shape[0] != 0:
             hidden_states = self.self_attn(
@@ -579,17 +644,24 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+        
+        global_tracer.print(hidden_states, f"self_attn_output", f"moe_decoder_layer_id_{self.layer_id}")
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-
+        
+        global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"moe_decoder_layer_id_{self.layer_id}")
+        global_tracer.print(residual, f"residual_after_post_attn_norm", f"moe_decoder_layer_id_{self.layer_id}")
+            
         hidden_states = self.mlp(hidden_states, forward_batch)
+        
+        global_tracer.print(hidden_states, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
-
+        
         return hidden_states, residual
 
     def op_comm_prepare_attn(
@@ -691,7 +763,15 @@ class Qwen3MoeForCausalLM(nn.Module):
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
         self.logits_processor = LogitsProcessor(config)
+        self._setup_debug_tracer()
 
+    def _setup_debug_tracer(self):
+        try:
+            global_tracer.set_model(self)
+        except Exception as e:
+            print(f"Warning: Could not setup debug tracer: {str(e)}")
+
+    @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     @torch.no_grad()
     def forward(
         self,
@@ -708,11 +788,13 @@ class Qwen3MoeForCausalLM(nn.Module):
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
         )
-
+        
         if self.pp_group.is_last_rank:
-            return self.logits_processor(
+            result = self.logits_processor(
                 input_ids, hidden_states, self.lm_head, forward_batch
             )
+            
+            return result
         else:
             return hidden_states
 
