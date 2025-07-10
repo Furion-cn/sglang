@@ -210,6 +210,16 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(inputs, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
         global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
         
+        # ✅ 添加输入统计检查
+        jax.debug.print("🔍 JAX MoE Input Stats: min={min}, max={max}, mean={mean}, std={std}", 
+                        min=inputs.min(), max=inputs.max(), mean=inputs.mean(), std=inputs.std())
+        
+        # ✅ 添加权重统计检查
+        w0_stats = f"w0: min={self.wi_0.value.min()}, max={self.wi_0.value.max()}, mean={self.wi_0.value.mean()}"
+        w1_stats = f"w1: min={self.wi_1.value.min()}, max={self.wi_1.value.max()}, mean={self.wi_1.value.mean()}"  
+        wo_stats = f"wo: min={self.wo.value.min()}, max={self.wo.value.max()}, mean={self.wo.value.mean()}"
+        jax.debug.print("🔍 JAX MoE Weight Stats: {w0} | {w1} | {wo}", w0=w0_stats, w1=w1_stats, wo=wo_stats)
+        
         if router_logits.shape[0] != total_tokens:
             raise ValueError(f"router_logits shape {router_logits.shape} doesn't match inputs shape {inputs.shape}")
         
@@ -219,6 +229,11 @@ class Qwen3MoE(nnx.Module):
         else:
             # ✅ 多设备模式：在MoE内部使用shard_map，权重作为参数传入
             output = self._expert_parallel_forward_with_shard_map(inputs, router_logits)
+        
+        # ✅ 添加输出统计检查
+        jax.debug.print("🔍 JAX MoE Output Stats: min={min}, max={max}, mean={mean}, std={std}", 
+                        min=output.min(), max=output.max(), mean=output.mean(), std=output.std())
+        
         jax.debug.print("layer_id={layer_id}, jax_moe_final_output={output}, min={min}, max={max}, mean={mean}, std={std}", layer_id=self.layer_id, output=output, min=output.min(), max=output.max(), mean=output.mean(), std=output.std())
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
@@ -432,13 +447,27 @@ class Qwen3MoE(nnx.Module):
             bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
             inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[-1]))
         
+        # ✅ 添加permute调试
+        jax.debug.print("🔍 Permute Input Stats: min={min}, max={max}, mean={mean}", 
+                        min=inputs_2d.min(), max=inputs_2d.max(), mean=inputs_2d.mean())
+        jax.debug.print("🔍 Top-k indices shape: {shape}, weights shape: {w_shape}", 
+                        shape=top_k_indices.shape, w_shape=top_k_weights.shape)
+        
         flatten_selected_experts = jnp.ravel(top_k_indices)
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
         sorted_indices = sorted_selected_experts // self.num_experts_per_tok
         
         sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
         
+        # ✅ 检查sorted_inputs
+        jax.debug.print("🔍 Sorted Inputs Stats: min={min}, max={max}, mean={mean}", 
+                        min=sorted_inputs.min(), max=sorted_inputs.max(), mean=sorted_inputs.mean())
+        
         group_sizes = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+        
+        # ✅ 检查group_sizes
+        jax.debug.print("🔍 Group sizes: {sizes}, total_tokens: {total}", 
+                        sizes=group_sizes, total=jnp.sum(group_sizes))
         
         expert_indices = jnp.arange(self.num_experts)
         sorted_experts = jnp.repeat(
@@ -630,6 +659,12 @@ class Qwen3MoE(nnx.Module):
         return sorted_inputs, local_group_sizes, sorted_experts_ids
     
     def _unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, seq_len):
+        # ✅ 添加unpermute调试
+        jax.debug.print("🔍 Unpermute Input Stats: min={min}, max={max}, mean={mean}", 
+                        min=intermediate.min(), max=intermediate.max(), mean=intermediate.mean())
+        jax.debug.print("🔍 Unpermute Input Shape: {shape}, non_zero_count: {nz}", 
+                        shape=intermediate.shape, nz=jnp.sum(intermediate != 0))
+        
         global_tracer.print(intermediate, f"unpermute_input", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(sorted_selected_experts, f"unpermute_sorted_experts", f"moe_combine_layer_id_{self.layer_id}")
         global_tracer.print(weights, f"unpermute_weights", f"moe_combine_layer_id_{self.layer_id}")
@@ -686,6 +721,10 @@ class Qwen3MoE(nnx.Module):
             reshaped_intermediate.astype(jnp.float32),
             reshaped_weights.astype(jnp.float32),
         )
+        
+        # ✅ 添加einsum后的调试
+        jax.debug.print("🔍 After Einsum Stats: min={min}, max={max}, mean={mean}, non_zero: {nz}", 
+                        min=output.min(), max=output.max(), mean=output.mean(), nz=jnp.sum(output != 0))
         
         global_tracer.print(output, f"unpermute_einsum_output", f"moe_combine_layer_id_{self.layer_id}")
         
