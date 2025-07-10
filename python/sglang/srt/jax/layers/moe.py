@@ -658,17 +658,6 @@ class Qwen3MoE(nnx.Module):
         # Where it's False, we take the value from a zero buffer (i.e., keep it zero).
         local_result_buffer = jnp.where(mask[:, None], data_to_scatter, 0.0)
 
-        # DEBUG: Verify the data movement
-        result_slice = jax.lax.dynamic_slice(
-            local_result_buffer, (my_start_index, 0), (num_local_tokens, data.shape[1])
-        )
-        jax.debug.print("dev_{dev_id} moved_data_shape={m_shape} start={start} end={end}, result_slice_mean={mean}", 
-                       dev_id=expert_shard_id,
-                       m_shape=result_slice.shape,
-                       start=my_start_index,
-                       end=my_end_index,
-                       mean=jnp.mean(result_slice, axis=1))
-        
         # 4. Use an all-reduce sum to combine the buffers from all devices.
         # Since each device's buffer only has non-zero values in its unique slice,
         # summing them up is equivalent to a concatenation.
