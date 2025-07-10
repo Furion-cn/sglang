@@ -555,30 +555,23 @@ class Qwen3MoE(nnx.Module):
             return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):  
-        local_size = data.shape[0]
+        summed_data = jax.lax.psum(data, axis_name=self.expert_axis_name)
+        global_tracer.print(summed_data, f"cpu_collect_psum_data", f"moe_combine_layer_id_{self.layer_id}")
         
-        all_data = jax.lax.all_gather(data, axis_name=self.expert_axis_name)
-        
-        global_tracer.print(all_data, f"cpu_collect_all_data_simple", f"moe_combine_layer_id_{self.layer_id}")
-        
-        result = all_data.reshape(-1, data.shape[1])
-        
-        global_tracer.print(result, f"cpu_collect_flattened_result", f"moe_combine_layer_id_{self.layer_id}")
-        
-        # Step 3: 确保不超过目标大小
-        actual_size = result.shape[0]
-        if actual_size >= target_size:
-            result = result[:target_size]
-        else:
-            # 如果不够，用零填充
-            padding_size = target_size - actual_size
-            padding = jnp.zeros((padding_size, result.shape[1]), dtype=result.dtype)
-            result = jnp.concatenate([result, padding], axis=0)
+        result = summed_data
         
         global_tracer.print(result, f"cpu_collect_final_simple", f"moe_combine_layer_id_{self.layer_id}")
+        
+        actual_size = result.shape[0] 
+        if actual_size != target_size:
+            raise ValueError(
+                f"Collection output size mismatch: actual={actual_size}, expected={target_size}. "
+                f"This suggests an issue with the dispatch/collect logic."
+            )
+        
         global_tracer.print(
-            jnp.array([result.shape[0], target_size, actual_size]), 
-            f"cpu_collect_size_check_simple", 
+            jnp.array([result.shape[0], target_size]), 
+            f"cpu_collect_size_verified", 
             f"moe_combine_layer_id_{self.layer_id}"
         )
         
