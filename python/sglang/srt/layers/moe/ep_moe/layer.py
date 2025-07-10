@@ -361,9 +361,6 @@ class EPMoE(torch.nn.Module):
             block_shape=self.block_shape,
         )
         
-        # Add detailed GMM wi_0/wi_1 equivalent tracers  
-        global_tracer.print(gateup_output, f"gmm_wi_0_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(gateup_output, f"gmm_wi_1_output", f"moe_compute_layer_id_{self.layer_id}")
         global_tracer.print(gateup_output, f"gateup_output", f"moe_compute_layer_id_{self.layer_id}")
         
         del gateup_input
@@ -413,10 +410,7 @@ class EPMoE(torch.nn.Module):
             )
         else:
             raise ValueError(f"Unsupported activation: {self.activation=}")
-            
-        # Add detailed activation tracers
-        global_tracer.print(down_input, f"gmm_silu_activation", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_input, f"gmm_intermediate_layer", f"moe_compute_layer_id_{self.layer_id}")
+
         global_tracer.print(down_input, f"down_input", f"moe_compute_layer_id_{self.layer_id}")
         
         del gateup_output
@@ -462,11 +456,6 @@ class EPMoE(torch.nn.Module):
         
         # ✅ 关键：GMM计算完成后的统计信息
         logger.info(f"🔍 [Layer {self.layer_id}] EP MoE GMM output: min={down_output.min():.6f}, max={down_output.max():.6f}, mean={down_output.mean():.8f}, std={down_output.std():.6f}")
-        
-        # Add detailed GMM output tracers
-        global_tracer.print(down_output, f"gmm_wo_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"gmm_final_output", f"moe_compute_layer_id_{self.layer_id}")
-        global_tracer.print(down_output, f"down_output", f"moe_compute_layer_id_{self.layer_id}")
         
         # Simulate compute output for JAX alignment
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
