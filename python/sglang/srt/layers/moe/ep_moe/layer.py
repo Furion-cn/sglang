@@ -49,6 +49,9 @@ from sglang.srt.utils import (
     set_weight_attrs,
 )
 from sglang.debug_tracer import global_tracer, trace_function
+import logging
+
+logger = logging.getLogger(__name__)
 
 _is_hip = is_hip()
 
@@ -304,18 +307,20 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
-        # Add detailed dispatch output tracers
-        global_tracer.print(gateup_input, f"moe_dispatch_x", f"moe_compute_layer_id_{self.layer_id}_rank_{self.tp_rank}")
-        # DEBUG: Print statistics to compare with JAX version.
+
         if gateup_input.shape[0] > 0:
             # NOTE: The output tensor will be truncated in the log output.
-            print(
-                f"dev_{self.tp_rank} input_x_stats: shape={gateup_input.shape} "
-                f"min_vec(axis1)={torch.min(gateup_input.float(), dim=1).values}, "
-                f"max_vec(axis1)={torch.max(gateup_input.float(), dim=1).values}, "
-                f"mean_vec(axis1)={torch.mean(gateup_input.float(), dim=1)}, "
-                f"std_vec(axis1)={torch.std(gateup_input.float(), dim=1)}"
+            gateup_input_float = gateup_input.cpu().float()
+            logger.info(
+                f"dev_{self.tp_rank} gateup_input_stats: shape={gateup_input.shape} "
+                f"min_vec(axis1)={torch.min(gateup_input_float, dim=1).values}, "
+                f"max_vec(axis1)={torch.max(gateup_input_float, dim=1).values}, "
+                f"mean_vec(axis1)={torch.mean(gateup_input_float, dim=1)}, "
+                f"std_vec(axis1)={torch.std(gateup_input_float, dim=1)}"
             )
+
+        # Add detailed dispatch output tracers
+        global_tracer.print(gateup_input, f"moe_dispatch_x", f"moe_compute_layer_id_{self.layer_id}_rank_{self.tp_rank}")        
 
         dispose_tensor(hidden_states)
 
@@ -471,13 +476,14 @@ class EPMoE(torch.nn.Module):
         # Simulate compute output for JAX alignment
         global_tracer.print(down_output, f"moe_compute_output", f"moe_compute_layer_id_{self.layer_id}")
         if down_output.shape[0] > 0:
+            down_output_float = down_output.cpu().float()
             # NOTE: The output tensor will be truncated in the log output.
-            print(
-                    f"dev_{self.tp_rank} output_intermediate_stats: shape={down_output.shape} "
-                    f"min_vec(axis1)={torch.min(down_output.float(), dim=1).values}, "
-                    f"max_vec(axis1)={torch.max(down_output.float(), dim=1).values}, "
-                    f"mean_vec(axis1)={torch.mean(down_output.float(), dim=1)}, "
-                    f"std_vec(axis1)={torch.std(down_output.float(), dim=1)}"
+            logger.info(
+                    f"dev_{self.tp_rank} output_intermediate_stats: shape={down_output_float.shape} "
+                    f"min_vec(axis1)={torch.min(down_output_float, dim=1).values}, "
+                    f"max_vec(axis1)={torch.max(down_output_float, dim=1).values}, "
+                    f"mean_vec(axis1)={torch.mean(down_output_float, dim=1)}, "
+                    f"std_vec(axis1)={torch.std(down_output_float, dim=1)}"
                 )
 
         # PostReorder
