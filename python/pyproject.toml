@@ -137,7 +137,7 @@ exclude = [
     "dist*",
     "playground*",
     "scripts*",
-    "tests*",
+    # "tests*",  # 已删除
 ]
 
 [tool.wheel]
@@ -148,9 +148,10 @@ exclude = [
     "dist*",
     "playground*",
     "scripts*",
-    "tests*",
+    # "tests*",  # 已删除
 ]
 
 [tool.codespell]
 ignore-words-list = "ans, als, hel, boostrap, childs, te, vas, hsa, ment"
 skip = "*.json,*.jsonl,*.patch,*.txt"
+

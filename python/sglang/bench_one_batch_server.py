@@ -18,16 +18,15 @@ import json
 import multiprocessing
 import os
 import time
-from typing import Tuple
+from typing import Tuple, Optional
 
 import requests
-
 from sglang.bench_serving import get_tokenizer, sample_random_requests
 from sglang.profiler import run_profile
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
-from sglang.test.test_utils import is_in_ci, write_github_step_summary
+# from sglang.test.test_utils import is_in_ci, write_github_step_summary
 
 
 @dataclasses.dataclass
@@ -46,6 +45,7 @@ class BenchArgs:
     show_report: bool = False
     profile: bool = False
     profile_by_stage: bool = False
+    dataset_path: str = ""
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -79,6 +79,7 @@ class BenchArgs:
         parser.add_argument("--show-report", action="store_true")
         parser.add_argument("--profile", action="store_true")
         parser.add_argument("--profile-by-stage", action="store_true")
+        parser.add_argument("--dataset-path", type=str, default=BenchArgs.dataset_path)
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -133,6 +134,7 @@ def run_one_case(
     tokenizer,
     profile: bool = False,
     profile_by_stage: bool = False,
+    dataset_path: Optional[str] = "",
 ):
     requests.post(url + "/flush_cache")
     input_requests = sample_random_requests(
@@ -141,7 +143,7 @@ def run_one_case(
         num_prompts=batch_size,
         range_ratio=1.0,
         tokenizer=tokenizer,
-        dataset_path="",
+        dataset_path=dataset_path,
         random_sample=True,
         return_text=False,
     )
@@ -275,6 +277,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
             run_name="",
             result_filename="",
             tokenizer=tokenizer,
+            dataset_path=bench_args.dataset_path,
         )
         print("=" * 8 + " Warmup End   " + "=" * 8 + "\n")
 
@@ -298,6 +301,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
                     run_name=bench_args.run_name,
                     result_filename=bench_args.result_filename,
                     tokenizer=tokenizer,
+                    dataset_path=bench_args.dataset_path,
                 )
             )
 
@@ -322,6 +326,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
                                 tokenizer=tokenizer,
                                 profile=bench_args.profile,
                                 profile_by_stage=bench_args.profile_by_stage,
+                                dataset_path=bench_args.dataset_path,
                             )[-1],
                         )
                     )
@@ -384,8 +389,8 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     # print metrics table
     print(summary)
 
-    if is_in_ci():
-        write_github_step_summary(summary)
+    # if is_in_ci():
+    #     write_github_step_summary(summary)
 
 
 if __name__ == "__main__":
@@ -397,3 +402,4 @@ if __name__ == "__main__":
     bench_args = BenchArgs.from_cli_args(args)
 
     run_benchmark(server_args, bench_args)
+
