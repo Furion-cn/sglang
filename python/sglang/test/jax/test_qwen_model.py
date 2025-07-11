@@ -25,7 +25,7 @@ from functools import partial
 from sglang.debug_tracer import global_tracer
 
 MAX_SEQ_LEN=128
-MAX_BATCH_SIZE=20
+MAX_BATCH_SIZE=10
 
 class TestQwenModel(unittest.TestCase):
     """Test cases for the Qwen model."""
@@ -442,9 +442,27 @@ class TestQwenModel(unittest.TestCase):
                 }
 
             max_iterations = 15 if batch_size and batch_size > 10 else 30
-            max_iterations = 5
+            #max_iterations = 11
             print(
                 f"\n🔄 Starting generation (max {max_iterations} iterations)...")
+
+            # Forward pass
+            # note: donate_argnums is necessary because 'jaxlib._jax.XlaRuntimeError: RESOURCE_EXHAUSTED' will meet without it.
+            @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
+            def _forward_extend(model:QWenLMHeadJaxModel,forward_batch,batch_size):
+                #print(f"model: {model}")
+                #print(f"batch_size: {batch_size}")
+                #return None,None
+                return model(forward_batch.input_ids,
+                      forward_batch.positions, forward_batch,FORWARD_MODE_EXTEND,batch_size)
+
+            #@partial(jax.jit,donate_argnums=(0,2))
+            @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
+            def _forward_decode(model:QWenLMHeadJaxModel,forward_batch,batch_size):
+                #print("nothing to do")
+                #return
+                return model(forward_batch.input_ids,
+                     forward_batch.positions, forward_batch,FORWARD_MODE_DECODE,batch_size)
 
             for iteration in range(max_iterations):
                 if forward_batch is None:
@@ -469,36 +487,29 @@ class TestQwenModel(unittest.TestCase):
                 # cal2(model)
                 # print(f"end")
                 # return 
+                import jax.tree_util as tree_util
 
-                # Forward pass
-                # note: donate_argnums is necessary because 'jaxlib._jax.XlaRuntimeError: RESOURCE_EXHAUSTED' will meet without it.
-                @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
-                def _forward_extend(model:QWenLMHeadJaxModel,forward_batch,batch_size):
-                    #print(f"model: {model}")
-                    #print(f"batch_size: {batch_size}")
-                    #return None,None
-                    return model(forward_batch.input_ids,
-                          forward_batch.positions, forward_batch,FORWARD_MODE_EXTEND,batch_size)
+                # 检查 ForwardBatch 是否为 pytree
+                try:
+                    tree_util.tree_flatten(forward_batch)
+                    print("ForwardBatch is a valid pytree")
+                except Exception as e:
+                    print(f"ForwardBatch is not a valid pytree: {e}")
 
-                #@partial(jax.jit,donate_argnums=(0,2))
-                @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
-                def _forward_decode(model:QWenLMHeadJaxModel,forward_batch,batch_size):
-                    print("nothing to do")
-                    return
-                    # return model(forward_batch.input_ids,
-                    #       forward_batch.positions, forward_batch,FORWARD_MODE_DECODE,batch_size)
-                                    
+
+
+
+                #_forward_decode_jit=nnx.jit(_forward_decode,static_argnums=(2,))  
 
                 if iteration==0:
                     #print(f"forward_batch.k_cache: {forward_batch.k_cache}")
                     y,forward_batch = _forward_extend(model,forward_batch,forward_batch.batch_size)
-                else: 
+                else:
                     #y,forward_batch = _forward_decode(model,forward_batch,forward_batch.batch_size)
-                    _forward_decode(model,forward_batch,forward_batch.batch_size)
-                    continue
+                    y,forward_batch = _forward_decode(model,forward_batch,forward_batch.batch_size)
+                    #_forward_decode(model,forward_batch,forward_batch.batch_size)
+                    #continue
 
-                if iteration == max_iterations-1:
-                    return
                 
                 #print(f"========y: {y}")
                 #print(f"forward_batch.k_cache: {forward_batch.k_cache[0]}")
@@ -514,7 +525,8 @@ class TestQwenModel(unittest.TestCase):
                         min_ps=jnp.full((forward_batch.batch_size, 1), 0.0),
                         vocab_size=model.config.vocab_size,
                     ))
-                print(f"[iter: {iteration}] next_token_ids: {next_token_ids.reshape(-1)}")
+                print(f"============================================[iter: {iteration}, logits: {y.next_token_logits}]")
+                print(f"============================================[iter: {iteration}] next_token_ids: {next_token_ids.reshape(-1)}")
 
                 # 只为小批量打印详细信息
                 if len(input_texts) <= 10 and (iteration % 5 == 0):
@@ -531,9 +543,11 @@ class TestQwenModel(unittest.TestCase):
                         print(
                             f"Request {original_indices[batch_idx]} (batch_idx {batch_idx}): token_id={token_id[0]}, decoded={decoded_token}")
 
-                # Update batch and handle finished requests
+
+                #print(f"[==========before update forward_batch] id :{id(forward_batch)}")
                 new_original_indices = self._update_forward_batch(
                     forward_batch, next_token_ids, tokenizer, finished_requests, original_indices)
+                #print(f"[==========after update forward_batch] id :{id(forward_batch)}")
                 # print(
                 #     f"batch_size: {batch_size}, "
                 #     f"input_ids.shape: {forward_batch.input_ids.shape}, input_ids: {forward_batch.input_ids},\n"
@@ -545,18 +559,22 @@ class TestQwenModel(unittest.TestCase):
                 #     f"k_cache.shape: {forward_batch.k_cache.shape}, k_cache.value: {forward_batch.k_cache},\n" 
                 #     f"v_cache.shape: {forward_batch.v_cache.shape}, v_cache.value: {forward_batch.v_cache}"
                 # )
-                print(
-                    f"===========================================================\n"
-                    f"batch_size:             {forward_batch.batch_size}, \n"
-                    f"input_ids.shape:        {forward_batch.input_ids.shape}\n"
-                    f"seq_lens.shape:         {forward_batch.seq_lens.shape}\n"
-                    f"cache_loc.shape:        {forward_batch.cache_loc.shape}\n"
-                    f"out_cache_loc.shape:    {forward_batch.out_cache_loc.shape},\n"
-                    f"positions.shape:        {forward_batch.positions.shape}\n"
-                    f"extend_start_loc.shape: {forward_batch.extend_start_loc.shape}\n"
-                    f"k_cache.shape:          {forward_batch.k_cache.shape}\n" 
-                    f"v_cache.shape:          {forward_batch.v_cache.shape}"
-                )
+                                # Update batch and handle finished requests
+                # print(
+                #     f"===========================================================\n"
+                #     f"batch_size:             {forward_batch.batch_size}, \n"
+                #     f"input_ids.shape:        {forward_batch.input_ids.shape, forward_batch.input_ids.dtype if forward_batch.input_ids is not None else None,None}\n"
+                #     f"seq_lens.shape:         {forward_batch.seq_lens.shape, forward_batch.seq_lens.dtype if forward_batch.seq_lens is not None else None,None}\n"
+                #     f"cache_loc.shape:        {forward_batch.cache_loc.shape, forward_batch.cache_loc.dtype if forward_batch.cache_loc is not None else None,None}\n"
+                #     f"out_cache_loc.shape:    {forward_batch.out_cache_loc.shape, forward_batch.out_cache_loc.dtype if forward_batch.out_cache_loc is not None else None,None},\n"
+                #     f"positions.shape:        {forward_batch.positions.shape, forward_batch.positions.dtype if forward_batch.positions is not None else None,None}\n"
+                #     f"extend_start_loc.shape: {forward_batch.extend_start_loc.shape, forward_batch.extend_start_loc.dtype if forward_batch.extend_start_loc is not None else None,None}\n"
+                #     f"k_cache.shape:          {forward_batch.k_cache.shape, forward_batch.k_cache.dtype if forward_batch.k_cache is not None else None,None}\n" 
+                #     f"v_cache.shape:          {forward_batch.v_cache.shape, forward_batch.v_cache.dtype if forward_batch.v_cache is not None else None,None}"
+                # )
+
+
+
 
                 if new_original_indices is not None:
                     original_indices = new_original_indices

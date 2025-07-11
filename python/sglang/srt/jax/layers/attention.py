@@ -107,7 +107,7 @@ class Attention(nnx.Module):
 
 
 #@partial(jax.jit, static_argnames=["num_heads", "num_kv_heads", "is_causal", "mode"])
-@trace_function(stage="INTERNAL_ATTENTION_FORWARD_ATTENTION", include_args=True, include_output=True)
+#@trace_function(stage="INTERNAL_ATTENTION_FORWARD_ATTENTION", include_args=True, include_output=True)
 def forward_attention(q: jax.Array,
                       k_cache: jax.Array,
                       v_cache: jax.Array,
@@ -218,6 +218,7 @@ def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: 
         seq_mask = (q_batch_ids[:, None] == k_batch_ids[None, :]) & (
             q_batch_ids[:, None] >= 0)
         return seq_mask
+
 
     # def create_decode_sequence_mask():
     #     total_prefix_len = key_len
