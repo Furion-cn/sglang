@@ -264,7 +264,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 ]
 
                 input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
-                    input_texts, tokenizer)
+                    model.config, input_texts, tokenizer)
 
                 print(f"Input text batch: {input_texts}")
                 print(f"Batch size: {len(input_texts)}")
