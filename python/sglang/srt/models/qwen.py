@@ -203,9 +203,9 @@ class QWenBlock(nn.Module):
         # Self Attention
         residual = hidden_states
         
-        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
+        #global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
-        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
+        #global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
         
         hidden_states = self.attn(
             positions=positions,
@@ -217,9 +217,9 @@ class QWenBlock(nn.Module):
         # Fully Connected
         residual = hidden_states
         
-        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
+        #global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
-        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
+        #global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
         
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
@@ -263,9 +263,9 @@ class QWenModel(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        global_tracer.print(input_ids, "embedding_input", "embedding_all")
+        #global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.wte(input_ids)
-        global_tracer.print(hidden_states, "embedding_output", "embedding_all")
+        #global_tracer.print(hidden_states, "embedding_output", "embedding_all")
         
         for layer in self.h:
             hidden_states = layer(
@@ -274,9 +274,9 @@ class QWenModel(nn.Module):
                 forward_batch=forward_batch,
             )
         
-        global_tracer.print(hidden_states, "RMSNorm_final_input", "rmsnorm_final")
+        #global_tracer.print(hidden_states, "RMSNorm_final_input", "rmsnorm_final")
         hidden_states = self.ln_f(hidden_states)
-        global_tracer.print(hidden_states, "RMSNorm_final_output", "rmsnorm_final")
+        #global_tracer.print(hidden_states, "RMSNorm_final_output", "rmsnorm_final")
         
         return hidden_states
 
