@@ -388,21 +388,10 @@ class Qwen3MoE(nnx.Module):
         
         return sorted_inputs, sorted_selected_experts, top_k_weights, group_sizes, sorted_experts
     
-    def _expert_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
-        can_use_ragged, device_type = self._detect_device_capabilities()
-        
-        global_tracer.print(
-            jnp.array([can_use_ragged]), 
-            f"dispatch_device_ragged_support", 
-            f"moe_dispatch_layer_id_{self.layer_id}"
-        )
-        
-        if can_use_ragged:
-            return self._ragged_all_to_all_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
-        else:
-            return self._cpu_simple_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
+    def _expert_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):        
+        return self._simple_dispatch(data, global_group_sizes, sorted_experts, expert_shard_id)
     
-    def _cpu_simple_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
+    def _simple_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
         local_expert_size = self.experts_per_device
         
         # compute each token's expert shard
@@ -463,18 +452,7 @@ class Qwen3MoE(nnx.Module):
         return x, local_group_sizes, selected_experts
     
     def _expert_all_to_all_collect(self, data, global_group_sizes, expert_shard_id, target_size):
-        can_use_ragged, device_type = self._detect_device_capabilities()
-        
-        global_tracer.print(
-            jnp.array([can_use_ragged]), 
-            f"collect_device_ragged_support", 
-            f"moe_collect_layer_id_{self.layer_id}"
-        )
-        
-        if can_use_ragged:
-            return self._ragged_all_to_all_collect(data, global_group_sizes, expert_shard_id, target_size)
-        else:
-            return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
+        return self._cpu_simple_collect(data, global_group_sizes, expert_shard_id, target_size)
     
     def _cpu_simple_collect(self, data, global_group_sizes, expert_shard_id, target_size):
         """

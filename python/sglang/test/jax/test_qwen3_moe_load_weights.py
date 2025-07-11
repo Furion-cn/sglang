@@ -59,7 +59,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         
         devices = jax.devices()        
         self.mesh = create_device_mesh(
-            ici_parallelism=[2, 1, 1, 4],
+            ici_parallelism=[1, 4, 1, 4],
             dcn_parallelism=[1, 1, 1, 1]
         )
         
