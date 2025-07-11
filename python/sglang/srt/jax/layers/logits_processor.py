@@ -8,6 +8,7 @@ from sglang.srt.jax.layers.embeddings import EmbedCls
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_EXTEND,FORWARD_MODE_DECODE
 from functools import partial
 from flax.typing import PromoteDtypeFn
+from sglang.debug_tracer import global_tracer, trace_function
 
 
 @struct.dataclass
@@ -50,6 +51,7 @@ class LogitsProcessor(nnx.Module):
                 lm_head.dtype,
                 self.vocab_size,
             )
+        global_tracer.print(logits, f"Logits", 'Logits')
         return LogitsProcessorOutput(next_token_logits=logits)
 
 #@partial(jax.jit,static_argnums=(3,5,6))
