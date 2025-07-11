@@ -110,6 +110,7 @@ def run_tests(test_name=None, model_path=None, verbose=False):
     print("=" * 50)
     
     try:
+        del env['JAX_PLATFORMS']
         result = subprocess.run(cmd, env=env, cwd=Path(__file__).parent)
         return result.returncode == 0
     except Exception as e:
