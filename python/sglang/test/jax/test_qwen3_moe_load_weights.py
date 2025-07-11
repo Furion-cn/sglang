@@ -29,6 +29,7 @@ from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh
 from sglang.test.test_utils import CustomTestCase
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 
 class Sequence:
     def __init__(self, tokenizer, input_text: str):
@@ -73,7 +74,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             jnp.arange(x.shape[1]) for _ in range(x.shape[0])
         ]).reshape(x.shape[0], x.shape[1])
 
-    def _create_batch_from_texts(self, texts, tokenizer):
+    def _create_batch_from_texts(self, model_config, texts, tokenizer):
         """Create initial batch from texts with tokenization (no padding needed)
 
         Args:
@@ -108,6 +109,16 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
 
+        # new kv cache
+        cache_pool = ReqToHashKVCachePool(
+            head_num=model_config.num_key_value_heads,
+            head_dim=model_config.head_dim // model_config.num_attention_heads,
+            layer_num=model_config.num_hidden_layers,
+            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
+            max_seq_len=128,
+            max_batch_size=20,
+        )
+
         # Create ForwardBatch
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
@@ -115,8 +126,10 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             input_ids=input_ids_array,
             seq_lens=seq_lens,
             positions=positions_array,
+            cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32),
+            out_cache_loc=None,
             extend_start_loc=extend_start_loc,
-            total_tokens=len(input_ids_array)
+            token_to_kv_pool=cache_pool,
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
