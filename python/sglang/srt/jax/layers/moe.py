@@ -262,10 +262,7 @@ class Qwen3MoE(nnx.Module):
             # Unpermute
             output = self._unpermute(
                 intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
-            )
-
-            jax.debug.print("layer_id={layer_id}, jax_moe_final_output={output}, min={min}, max={max}, mean={mean}, std={std}", layer_id=self.layer_id, output=output, min=output.min(), max=output.max(), mean=output.mean(), std=output.std())
-            
+            )            
             return output
         
         return shard_map(
