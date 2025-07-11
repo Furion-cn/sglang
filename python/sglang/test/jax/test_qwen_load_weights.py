@@ -30,6 +30,7 @@ from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
+from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 
 
 class Sequence:
@@ -108,32 +109,26 @@ class TestQWenLoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
         # new kv cache
-        kv_cache = ReqToHashKVCachePool(
+        cache_pool = ReqToHashKVCachePool(
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
             dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
-            max_seq_len=1024,
-            max_batch_size=20
+            max_seq_len=128,
+            max_batch_size=20,
         )
-        # batch size
-        batch_size = len(actual_seq_lens)
-        # cache loc
-        cache_loc = jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
+
         # Create ForwardBatch
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
-            batch_size=batch_size,
+            batch_size=len(actual_seq_lens),
             input_ids=input_ids_array,
-            cache_loc=cache_loc, # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] if seq_lens = [3,4,3]
-            out_cache_loc=None,
             seq_lens=seq_lens,
             positions=positions_array,
+            cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32),
+            out_cache_loc=None,
             extend_start_loc=extend_start_loc,
-            total_tokens=len(input_ids_array),
-            sequences=texts.copy(),
-            prefix_str=texts.copy(),
-            token_to_kv_pool=kv_cache,
+            token_to_kv_pool=cache_pool,
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
