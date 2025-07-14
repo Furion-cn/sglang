@@ -75,6 +75,9 @@ class PaddedForwardBatch:
     # Boolean mask for valid sequences [max_batch_size]  
     seq_mask: jax.Array
     
+    # Flags to remember original None values
+    out_cache_loc_was_none: bool = False
+    
     # token to kv cache pool
     token_to_kv_pool: ReqToHashKVCachePool = None
 
@@ -116,11 +119,15 @@ class PaddedForwardBatch:
             jnp.zeros(pad_tokens, dtype=forward_batch.cache_loc.dtype)
         ])
         
-        # Pad out_cache_loc  
-        out_cache_loc_padded = jnp.concatenate([
-            forward_batch.out_cache_loc,
-            jnp.zeros(pad_tokens, dtype=forward_batch.out_cache_loc.dtype)
-        ])
+        # Pad out_cache_loc - handle None case
+        out_cache_loc_was_none = forward_batch.out_cache_loc is None
+        if forward_batch.out_cache_loc is not None:
+            out_cache_loc_padded = jnp.concatenate([
+                forward_batch.out_cache_loc,
+                jnp.zeros(pad_tokens, dtype=forward_batch.out_cache_loc.dtype)
+            ])
+        else:
+            out_cache_loc_padded = jnp.zeros(max_total_tokens, dtype=jnp.int32)
         
         # Pad positions
         positions_padded = jnp.concatenate([
@@ -159,6 +166,7 @@ class PaddedForwardBatch:
             actual_total_tokens=actual_total_tokens,
             token_mask=token_mask,
             seq_mask=seq_mask,
+            out_cache_loc_was_none=out_cache_loc_was_none,
             token_to_kv_pool=forward_batch.token_to_kv_pool
         )
     
@@ -170,7 +178,7 @@ class PaddedForwardBatch:
             input_ids=self.input_ids[:self.actual_total_tokens],
             seq_lens=self.seq_lens[:self.actual_batch_size],
             cache_loc=self.cache_loc[:self.actual_total_tokens],
-            out_cache_loc=self.out_cache_loc[:self.actual_total_tokens],
+            out_cache_loc=None if self.out_cache_loc_was_none else self.out_cache_loc[:self.actual_total_tokens],
             positions=self.positions[:self.actual_total_tokens] if self.positions is not None else None,
             extend_start_loc=self.extend_start_loc[:self.actual_batch_size] if self.extend_start_loc is not None else None,
             token_to_kv_pool=self.token_to_kv_pool
