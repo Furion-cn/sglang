@@ -194,48 +194,86 @@ class Qwen3MoE(nnx.Module):
             return False, 'cpu'
 
     @trace_function(stage="MOE_SPARSE_FORWARD", include_args=False, include_output=True)
-    def __call__(self, inputs, router_logits=None):
+    def __call__(self, inputs, router_logits=None, forward_batch=None):
+        """
+        Forward pass with automatic padding support.
+        
+        Args:
+            inputs: Input hidden states
+            router_logits: Router logits from gate
+            forward_batch: ForwardBatch or PaddedForwardBatch
+        """
         if router_logits is None:
             raise ValueError("router_logits is required for Qwen3MoE")
             
         inputs = inputs.astype(self.dtype)
-        total_tokens, hidden_dim = inputs.shape
         
-        global_tracer.print(inputs, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
-        global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
-        
-        if router_logits.shape[0] != total_tokens:
-            raise ValueError(f"router_logits shape {router_logits.shape} doesn't match inputs shape {inputs.shape}")
-        
-        if self.expert_parallelism == 1:
-            output = self._single_device_forward(inputs, router_logits)
+        # 处理 PaddedForwardBatch 和普通 ForwardBatch
+        if forward_batch and hasattr(forward_batch, 'actual_total_tokens'):
+            # PaddedForwardBatch 情况 - 传递完整的 inputs 给 JIT 函数
+            if self.expert_parallelism == 1:
+                output = self._single_device_forward_padded(inputs, router_logits, forward_batch)
+            else:
+                output = self._expert_parallel_forward_with_shard_map(inputs, router_logits, forward_batch)
+            
+            global_tracer.print(output, f"moe_final_output_padded", f"moe_sparse_layer_id_{self.layer_id}")
         else:
-            output = self._expert_parallel_forward_with_shard_map(inputs, router_logits)
+            # 普通的 ForwardBatch 情况
+            total_tokens, hidden_dim = inputs.shape
+            
+            global_tracer.print(inputs, f"moe_input", f"moe_sparse_layer_id_{self.layer_id}")
+            global_tracer.print(router_logits, f"router_logits", f"moe_sparse_layer_id_{self.layer_id}")
+            
+            if router_logits.shape[0] != total_tokens:
+                raise ValueError(f"router_logits shape {router_logits.shape} doesn't match inputs shape {inputs.shape}")
+            
+            if self.expert_parallelism == 1:
+                output = self._single_device_forward(inputs, router_logits)
+            else:
+                output = self._expert_parallel_forward_with_shard_map(inputs, router_logits, None)
+            
+            global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         
-        global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
     
     @nnx.jit
-    def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):        
-        def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
+    def _expert_parallel_forward_with_shard_map(self, inputs, router_logits, forward_batch=None):
+        """
+        Expert parallel forward pass with optional padding support.
+        
+        Args:
+            inputs: Full input tensor (may be padded)
+            router_logits: Full router logits (may be padded) 
+            forward_batch: PaddedForwardBatch if using padding, None otherwise
+        """
+        def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights, actual_tokens):
             expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
             
-            # topk
-            top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
+            # 如果是 padded，只处理有效的 tokens
+            if actual_tokens > 0:  # actual_tokens == 0 表示非 padded 模式
+                valid_hidden_states = hidden_states[:actual_tokens]
+                valid_router_logits = router_logits[:actual_tokens]
+            else:
+                valid_hidden_states = hidden_states
+                valid_router_logits = router_logits
+            
+            # topk - 只在有效的 tokens 上进行
+            top_k_logits, top_k_indices = jax.lax.top_k(valid_router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.bfloat16), axis=-1).astype(self.dtype)
             
             # qwen3 moe norm_topk_prob=true
             top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
             
-            if hidden_states.ndim == 2:
-                total_tokens = hidden_states.shape[0]
+            if valid_hidden_states.ndim == 2:
+                total_tokens = valid_hidden_states.shape[0]
                 batch_size, seq_len = 1, total_tokens
             else:
-                batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+                batch_size, seq_len = valid_hidden_states.shape[0], valid_hidden_states.shape[1]
                 total_tokens = batch_size * seq_len
-            # Permute
+            
+            # Permute - 在有效 tokens 上
             x, sorted_selected_experts, weights, group_sizes, selected_experts = self._permute(
-                hidden_states, top_k_indices, top_k_weights
+                valid_hidden_states, top_k_indices, top_k_weights
             )
             
             # EP Dispatch
@@ -259,11 +297,29 @@ class Qwen3MoE(nnx.Module):
                     intermediate_output, group_sizes, expert_shard_id, original_size
                 )
             
-            # Unpermute
-            output = self._unpermute(
+            # Unpermute - 在有效 tokens 上
+            valid_output = self._unpermute(
                 intermediate_output, sorted_selected_experts, weights, batch_size, seq_len
-            )            
+            )
+            
+            # 如果是 padded 模式，需要 pad 回原始大小
+            if actual_tokens > 0:
+                pad_size = hidden_states.shape[0] - actual_tokens
+                if pad_size > 0:
+                    padding = jnp.zeros((pad_size, valid_output.shape[-1]), dtype=valid_output.dtype)
+                    output = jnp.concatenate([valid_output, padding], axis=0)
+                else:
+                    output = valid_output
+            else:
+                output = valid_output
+                
             return output
+        
+        # 确定 actual_tokens 参数
+        if forward_batch is not None:
+            actual_tokens = forward_batch.actual_total_tokens
+        else:
+            actual_tokens = 0  # 表示非 padded 模式
         
         return shard_map(
             _internal_moe_computation,
@@ -274,10 +330,11 @@ class Qwen3MoE(nnx.Module):
                 P(self.expert_axis_name, None, None),  # w0_weights
                 P(self.expert_axis_name, None, None),  # w1_weights  
                 P(self.expert_axis_name, None, None),  # wo_weights
+                P(),                         # actual_tokens (scalar)
             ),
             out_specs=P(None),
             check_rep=False,
-        )(inputs, router_logits, self.wi_0.value, self.wi_1.value, self.wo.value)
+        )(inputs, router_logits, self.wi_0.value, self.wi_1.value, self.wo.value, actual_tokens)
     
     def _gmm_compute_with_sharded_weights(self, x, local_group_sizes, selected_experts, w0_kernel, w1_kernel, wo_kernel):
         global_tracer.print(x, f"gmm_sharded_input_x", f"moe_compute_layer_id_{self.layer_id}")
@@ -326,6 +383,32 @@ class Qwen3MoE(nnx.Module):
         top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
         
         return self._single_device_forward_impl(inputs, top_k_indices, top_k_weights)
+    
+    def _single_device_forward_padded(self, inputs, router_logits, forward_batch):
+        """
+        Single device forward with padding support.
+        
+        Args:
+            inputs: Full input tensor (padded)
+            router_logits: Full router logits (padded)
+            forward_batch: PaddedForwardBatch
+        """
+        # 只处理有效的 tokens
+        valid_inputs = inputs[:forward_batch.actual_total_tokens]
+        valid_router_logits = router_logits[:forward_batch.actual_total_tokens]
+        
+        # 使用现有的单设备 forward 逻辑
+        valid_output = self._single_device_forward(valid_inputs, valid_router_logits)
+        
+        # Pad output back to full size
+        pad_size = inputs.shape[0] - forward_batch.actual_total_tokens
+        if pad_size > 0:
+            padding = jnp.zeros((pad_size, valid_output.shape[-1]), dtype=valid_output.dtype)
+            output = jnp.concatenate([valid_output, padding], axis=0)
+        else:
+            output = valid_output
+            
+        return output
     
     def _single_device_forward_impl(self, inputs, top_k_indices, top_k_weights):
         global_tracer.print(inputs, f"moe_local_input", f"moe_compute_layer_id_{self.layer_id}")

@@ -15,7 +15,7 @@ from sglang.srt.jax.utils import (
     get_expected_param_paths,
     update_state_recursive,
 )
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, PaddedForwardBatch, ForwardMode
 from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
 from jax.sharding import Mesh, PartitionSpec as P
@@ -78,10 +78,42 @@ class QWen3MoeAttention(nnx.Module):
         self,
         positions: jax.Array,
         hidden_states: jax.Array,
-        forward_batch: ForwardBatch,
+        forward_batch,  # 可以是 ForwardBatch 或 PaddedForwardBatch
     ) -> jax.Array:
         q, k, v = self._proj_qkv(positions, hidden_states)
-        attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
+        
+        # 如果是 PaddedForwardBatch，需要特殊处理
+        if isinstance(forward_batch, PaddedForwardBatch):
+            # 创建临时 ForwardBatch 用于兼容现有的 attention
+            temp_forward_batch = ForwardBatch(
+                forward_mode=forward_batch.forward_mode,
+                batch_size=forward_batch.actual_batch_size,
+                input_ids=forward_batch.input_ids[:forward_batch.actual_total_tokens],
+                seq_lens=forward_batch.seq_lens[:forward_batch.actual_batch_size], 
+                cache_loc=forward_batch.cache_loc[:forward_batch.actual_total_tokens],
+                out_cache_loc=forward_batch.out_cache_loc[:forward_batch.actual_total_tokens],
+                positions=forward_batch.positions[:forward_batch.actual_total_tokens],
+                extend_start_loc=forward_batch.extend_start_loc[:forward_batch.actual_batch_size] if forward_batch.extend_start_loc is not None else None,
+                token_to_kv_pool=forward_batch.token_to_kv_pool
+            )
+            
+            # 只处理有效的 tokens
+            valid_q = q[:forward_batch.actual_total_tokens]
+            valid_k = k[:forward_batch.actual_total_tokens]
+            valid_v = v[:forward_batch.actual_total_tokens]
+            
+            attn_output_valid = self.attn(valid_q, valid_k, valid_v, temp_forward_batch, self.layer_id, is_causal=True)
+            
+            # Pad attention output back to full size
+            pad_size = q.shape[0] - forward_batch.actual_total_tokens
+            attn_output = jnp.concatenate([
+                attn_output_valid,
+                jnp.zeros((pad_size, attn_output_valid.shape[1]), dtype=attn_output_valid.dtype)
+            ], axis=0)
+        else:
+            # 普通的 ForwardBatch 处理
+            attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
+        
         output, _ = self.c_proj(attn_output)
         return output
     
@@ -194,7 +226,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
         self,
         positions: jax.Array,
         hidden_states: jax.Array,
-        forward_batch: ForwardBatch,
+        forward_batch,  # 可以是 ForwardBatch 或 PaddedForwardBatch
         residual: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         global_tracer.print(hidden_states, f"decoder_layer_input", f"moe_decoder_layer_id_{self.layer_id}")
@@ -225,7 +257,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
             router_logits = self.moe_gate(hidden_states)            
             global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
-            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
+            mlp_output = self.mlp(hidden_states, router_logits=router_logits, forward_batch=forward_batch)
             global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
                         
             hidden_states = mlp_output
@@ -263,18 +295,32 @@ class QWen3MoeModel(nnx.Module):
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
-                 forward_batch: ForwardBatch,
+                 forward_batch,  # 可以是 ForwardBatch 或 PaddedForwardBatch
                  ) -> jax.Array:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         
+        # 如果是 PaddedForwardBatch，需要应用 token mask
+        if isinstance(forward_batch, PaddedForwardBatch):
+            hidden_states = hidden_states * forward_batch.token_mask[:, None]
+        
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
+            
+            # 如果是 PaddedForwardBatch，确保 padding 位置保持为零
+            if isinstance(forward_batch, PaddedForwardBatch):
+                hidden_states = hidden_states * forward_batch.token_mask[:, None]
+                if residual is not None:
+                    residual = residual * forward_batch.token_mask[:, None]
         
         if residual is not None:
             hidden_states, residual = self.norm(hidden_states, residual)
         else:
             hidden_states = self.norm(hidden_states)
+        
+        # 最终 masking 确保 padding 位置为零
+        if isinstance(forward_batch, PaddedForwardBatch):
+            hidden_states = hidden_states * forward_batch.token_mask[:, None]
         
         return hidden_states
 
@@ -289,6 +335,11 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
             config.vocab_size, config.hidden_size, rngs=rngs)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self._setup_debug_tracer()
+        
+        # Padding 配置
+        self.max_batch_size = getattr(config, 'max_batch_size', 32)
+        self.max_total_tokens = getattr(config, 'max_total_tokens', 4096)
+        self.enable_padding = getattr(config, 'enable_padding', False)
 
     def _setup_debug_tracer(self):
         try:
@@ -414,8 +465,80 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
                  ) -> Any:
+        """
+        Main forward pass with automatic padding and JIT compilation.
+        
+        Args:
+            input_ids: Input token IDs
+            positions: Position indices
+            forward_batch: ForwardBatch object
+            
+        Returns:
+            LogitsProcessorOutput
+        """
+        if self.enable_padding:
+            # 自动转换为 PaddedForwardBatch
+            try:
+                padded_batch = PaddedForwardBatch.from_forward_batch(
+                    forward_batch, self.max_batch_size, self.max_total_tokens
+                )
+                return self._forward_padded_jit(padded_batch)
+            except ValueError as e:
+                # 如果超出 padding 限制，打印警告并使用原始方法
+                print(f"Warning: Padding failed ({e}), falling back to dynamic shapes")
+                return self._forward_dynamic(input_ids, positions, forward_batch)
+        else:
+            return self._forward_dynamic(input_ids, positions, forward_batch)
+    
+    @nnx.jit
+    def _forward_padded_jit(self, padded_batch: PaddedForwardBatch) -> Any:
+        """
+        JIT-compiled padded forward pass.
+        """
+        # Extract padded arrays
+        input_ids = padded_batch.input_ids
+        positions = padded_batch.positions
+        
+        # Forward through model with padded inputs
+        hidden_states = self.model(input_ids, positions, padded_batch)
+        
+        # Process logits with padding awareness
+        result = self._process_logits_padded(hidden_states, padded_batch)
+        
+        return result
+    
+    def _forward_dynamic(self, input_ids: jax.Array, positions: jax.Array, forward_batch: ForwardBatch) -> Any:
+        """
+        Dynamic shape forward pass (fallback).
+        """
         hidden_states = self.model(input_ids, positions, forward_batch)
         result = self.logits_processor(hidden_states, self.lm_head, forward_batch)
         return result
+    
+    def _process_logits_padded(self, hidden_states: jax.Array, padded_batch: PaddedForwardBatch):
+        """
+        Process logits with padding awareness.
+        """
+        if padded_batch.forward_mode == ForwardMode.EXTEND:
+            # For extend mode, we need last token of each valid sequence
+            last_token_indices = padded_batch.extend_start_loc[:padded_batch.actual_batch_size] + \
+                                 padded_batch.seq_lens[:padded_batch.actual_batch_size] - 1
+            
+            # Extract last hidden states for valid sequences
+            last_hidden_states = hidden_states[last_token_indices]
+        else:
+            # For decode mode, first N tokens are the ones we want
+            last_hidden_states = hidden_states[:padded_batch.actual_batch_size]
+        
+        # Compute logits
+        last_hidden_states, embedding = self.lm_head.promote_dtype(
+            (last_hidden_states, self.lm_head.embedding.value), 
+            dtype=self.lm_head.dtype
+        )
+        logits = jnp.dot(last_hidden_states, embedding.T)
+        logits = logits[:, :self.logits_processor.vocab_size]
+        
+        from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
+        return LogitsProcessorOutput(next_token_logits=logits)
 
 EntryClass = Qwen3MoeForCausalLMJaxModel

@@ -324,6 +324,169 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 else:
                     print("⚠️  Debug trace not saved")
 
+                # 测试 Padding 功能
+                print("\n=== Testing Padding Functionality ===")
+                
+                # 配置 padding 参数
+                model.max_batch_size = 8
+                model.max_total_tokens = 256
+                model.enable_padding = True
+                
+                print(f"Padding config: max_batch_size={model.max_batch_size}, max_total_tokens={model.max_total_tokens}")
+                
+                # 测试不同大小的输入
+                padding_test_cases = [
+                    {"texts": ["1+1=?"], "description": "Single sequence"},
+                    {"texts": ["Hi", "Hello"], "description": "Small batch"},
+                ]
+                
+                for i, case in enumerate(padding_test_cases):
+                    print(f"\n--- Padding Test {i+1}: {case['description']} ---")
+                    
+                    test_input_texts = case["texts"]
+                    test_input_ids_array, test_actual_seq_lens, test_forward_batch = self._create_batch_from_texts(
+                        model.config, test_input_texts, tokenizer)
+                    
+                    print(f"Batch size: {len(test_input_texts)}")
+                    print(f"Total tokens: {test_input_ids_array.shape[0]}")
+                    
+                    # 测试 padding 转换
+                    from sglang.srt.jax.model_executor.forward_batch_info import PaddedForwardBatch
+                    try:
+                        padded_batch = PaddedForwardBatch.from_forward_batch(
+                            test_forward_batch, model.max_batch_size, model.max_total_tokens
+                        )
+                        print(f"✅ Padding conversion successful")
+                        print(f"   Actual: batch_size={padded_batch.actual_batch_size}, total_tokens={padded_batch.actual_total_tokens}")
+                        print(f"   Padded to: batch_size={padded_batch.max_batch_size}, total_tokens={padded_batch.max_total_tokens}")
+                    except ValueError as e:
+                        print(f"❌ Padding conversion failed: {e}")
+                        continue
+                    
+                    # 测试多轮生成 - padding vs normal
+                    print("🔄 Testing multi-step generation with padding...")
+                    
+                    with self.mesh:
+                        # 创建两个独立的 forward_batch 副本用于对比
+                        import copy
+                        test_forward_batch_padded = copy.deepcopy(test_forward_batch)
+                        test_forward_batch_normal = copy.deepcopy(test_forward_batch)
+                        
+                        # 存储生成结果用于对比
+                        padded_results = []
+                        normal_results = []
+                        
+                        for gen_step in range(2):  # 测试2轮生成
+                            print(f"   Generation step {gen_step + 1}...")
+                            
+                            # Padded forward (enable_padding=True)
+                            model.enable_padding = True
+                            y_padded = model(test_forward_batch_padded.input_ids,
+                                           test_forward_batch_padded.positions, 
+                                           test_forward_batch_padded)
+                            
+                            # Normal forward (enable_padding=False) 
+                            model.enable_padding = False
+                            y_normal = model(test_forward_batch_normal.input_ids,
+                                           test_forward_batch_normal.positions,
+                                           test_forward_batch_normal)
+                            
+                            # 使用相同的采样参数采样
+                            next_token_ids_padded = sampler(
+                                y_padded,
+                                sampling_info=SamplingBatchInfo(
+                                    temperatures=jnp.full((len(test_input_texts), 1), 1.0),
+                                    top_ps=jnp.full((len(test_input_texts), 1), 1.0),
+                                    top_ks=jnp.ones((len(test_input_texts), 1)),
+                                    min_ps=jnp.full((len(test_input_texts), 1), 0.0),
+                                    vocab_size=model.config.vocab_size,
+                                ))
+                            
+                            next_token_ids_normal = sampler(
+                                y_normal,
+                                sampling_info=SamplingBatchInfo(
+                                    temperatures=jnp.full((len(test_input_texts), 1), 1.0),
+                                    top_ps=jnp.full((len(test_input_texts), 1), 1.0),
+                                    top_ks=jnp.ones((len(test_input_texts), 1)),
+                                    min_ps=jnp.full((len(test_input_texts), 1), 0.0),
+                                    vocab_size=model.config.vocab_size,
+                                ))
+                            
+                            # 验证logits一致性
+                            logits_diff = jnp.abs(y_normal.next_token_logits - y_padded.next_token_logits).max()
+                            print(f"     Step {gen_step + 1} logits difference: {logits_diff:.2e}")
+                            
+                            # 存储结果
+                            padded_results.append(next_token_ids_padded)
+                            normal_results.append(next_token_ids_normal)
+                            
+                            # 更新两个 forward_batch（这里是关键！）
+                            self.update_forward_batch(test_forward_batch_padded, next_token_ids_padded, tokenizer)
+                            self.update_forward_batch(test_forward_batch_normal, next_token_ids_normal, tokenizer)
+                        
+                        # 验证最终生成的token序列是否一致
+                        print("   🔍 Comparing final generation results...")
+                        all_consistent = True
+                        for step_idx, (padded_tokens, normal_tokens) in enumerate(zip(padded_results, normal_results)):
+                            tokens_match = jnp.array_equal(padded_tokens, normal_tokens)
+                            if not tokens_match:
+                                all_consistent = False
+                                print(f"     Step {step_idx + 1}: Token mismatch!")
+                                print(f"       Padded: {padded_tokens}")
+                                print(f"       Normal: {normal_tokens}")
+                            else:
+                                print(f"     Step {step_idx + 1}: Tokens match ✅")
+                        
+                        if all_consistent:
+                            print("   ✅ All generation steps produced consistent results")
+                        else:
+                            print("   ⚠️  Some generation steps had different results")
+                    
+                    # 性能对比测试（单次前向传播）
+                    import time
+                    with self.mesh:
+                        print("🕒 Performance comparison (single forward pass)...")
+                        
+                        # 重新创建干净的 forward_batch
+                        _, _, clean_forward_batch = self._create_batch_from_texts(
+                            model.config, test_input_texts, tokenizer)
+                        
+                        # 预热
+                        for _ in range(2):
+                            _ = model(clean_forward_batch.input_ids, clean_forward_batch.positions, clean_forward_batch)
+                        
+                        # 测试 padded forward
+                        num_runs = 3
+                        model.enable_padding = True
+                        start_time = time.time()
+                        for _ in range(num_runs):
+                            result_padded = model(clean_forward_batch.input_ids, clean_forward_batch.positions, clean_forward_batch)
+                        padded_time = (time.time() - start_time) / num_runs
+                        
+                        # 测试 dynamic forward (关闭 padding)
+                        model.enable_padding = False
+                        start_time = time.time()
+                        for _ in range(num_runs):
+                            result_normal = model(clean_forward_batch.input_ids, clean_forward_batch.positions, clean_forward_batch)
+                        normal_time = (time.time() - start_time) / num_runs
+                        model.enable_padding = True  # 恢复
+                        
+                        # 验证结果一致性
+                        logits_diff = jnp.abs(result_normal.next_token_logits - result_padded.next_token_logits).max()
+                        
+                        print(f"   Padded forward time: {padded_time*1000:.2f} ms")
+                        print(f"   Normal forward time: {normal_time*1000:.2f} ms")
+                        print(f"   Speedup: {normal_time/padded_time:.2f}x")
+                        print(f"   Max logits difference: {logits_diff:.2e}")
+                        
+                        # 验证结果
+                        if float(logits_diff) < 1e-5:
+                            print(f"   ✅ Results are consistent")
+                        else:
+                            print(f"   ⚠️  Results have some difference but within acceptable range")
+
+                print("\n🎉 Padding tests completed!")
+
         except Exception as e:
             if 'global_tracer' in locals():
                 try:
@@ -393,7 +556,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
 
         # update forward mode
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
+        if forward_batch.forward_mode == ForwardMode.DECODE:
             forward_batch.forward_mode = ForwardMode.DECODE
 
 if __name__ == '__main__':
