@@ -222,15 +222,12 @@ class QWen3MoeDecoderLayer(nnx.Module):
         global_tracer.print(residual, f"residual_after_post_attn_norm", f"moe_decoder_layer_id_{self.layer_id}")
         
         if self.is_moe_layer:
-            print(f"\n[Layer {self.layer_id}] MOE layer is processing...")            
             router_logits = self.moe_gate(hidden_states)            
             global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
             mlp_output = self.mlp(hidden_states, router_logits=router_logits)
             global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
-            
-            print(f"[Layer {self.layer_id}] MLP output shape: {mlp_output.shape}")
-            
+                        
             hidden_states = mlp_output
         else:
             hidden_states = self.mlp(hidden_states)
