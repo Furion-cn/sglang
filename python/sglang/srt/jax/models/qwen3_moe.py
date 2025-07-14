@@ -80,6 +80,13 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
+        q, k, v = self._proj_qkv(positions, hidden_states)
+        attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
+        output, _ = self.c_proj(attn_output)
+        return output
+    
+    @nnx.jit
+    def _proj_qkv(self, positions, hidden_states):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
 
@@ -92,9 +99,7 @@ class QWen3MoeAttention(nnx.Module):
         k = k_by_head.reshape(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
-        output, _ = self.c_proj(attn_output)
-        return output
+        return q, k, v
 
 class QWen3MoeDecoderLayer(nnx.Module):
     def __init__(self,
