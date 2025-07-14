@@ -4,7 +4,7 @@ QWenLMHeadJaxModel JAXModelLoader Integration Tests
 
 Usage:
     python -m unittest test_qwen_load_weights.TestQWenLoadWeights
-    
+
     # Test with specific model path:
     MODEL_PATH=/path/to/jax/qwen/model python -m unittest test_qwen_load_weights.TestQWenLoadWeights.test_load_model_with_jax_loader
 """
@@ -30,7 +30,6 @@ from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
-from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 
 
 class Sequence:
@@ -109,26 +108,32 @@ class TestQWenLoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
         # new kv cache
-        cache_pool = ReqToHashKVCachePool(
+        kv_cache = ReqToHashKVCachePool(
             head_num=model_config.num_attention_heads,
             head_dim=model_config.hidden_size // model_config.num_attention_heads,
             layer_num=model_config.num_hidden_layers,
             dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
-            max_seq_len=128,
-            max_batch_size=20,
+            max_seq_len=1024,
+            max_batch_size=20
         )
-
+        # batch size
+        batch_size = len(actual_seq_lens)
+        # cache loc
+        cache_loc = jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
         # Create ForwardBatch
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
-            batch_size=len(actual_seq_lens),
+            batch_size=batch_size,
             input_ids=input_ids_array,
+            cache_loc=cache_loc,  # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] if seq_lens = [3,4,3]
+            out_cache_loc=None,
             seq_lens=seq_lens,
             positions=positions_array,
-            cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32),
-            out_cache_loc=None,
             extend_start_loc=extend_start_loc,
-            token_to_kv_pool=cache_pool,
+            total_tokens=len(input_ids_array),
+            sequences=texts.copy(),
+            prefix_str=texts.copy(),
+            token_to_kv_pool=kv_cache,
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
@@ -329,7 +334,7 @@ class TestQWenLoadWeights(CustomTestCase):
         out_cache_start_loc = jnp.max(forward_batch.cache_loc) + 1
         forward_batch.out_cache_loc = jnp.arange(
             out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
-            
+
         cache_start_loc = 0
         new_input_ids = []
         new_seq_lens = []
@@ -341,17 +346,23 @@ class TestQWenLoadWeights(CustomTestCase):
             new_seq_lens.append(new_seq_len)
             decoded_token = tokenizer.decode(
                 [current_token_id])
-            
+
             # update cache loc
             old_cache_loc = forward_batch.cache_loc[
-                cache_start_loc:cache_start_loc + seq_len]
+                            cache_start_loc:cache_start_loc + seq_len]
             new_cache_loc_list.append(jnp.concatenate(
-                [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
+                [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx + 1]], axis=0))
             cache_start_loc += seq_len
-            
+
+            if forward_batch.forward_mode == ForwardMode.DECODE:
+                # update prefix
+                forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
+
+            # update sequences
+            forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
-        
+
         # update cache loc
         forward_batch.cache_loc = jnp.concatenate(new_cache_loc_list, axis=0)
         # update seq lens
