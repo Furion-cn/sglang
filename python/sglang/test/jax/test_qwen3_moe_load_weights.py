@@ -376,12 +376,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
             cache_start_loc += seq_len
             
-            if forward_batch.forward_mode == ForwardMode.DECODE:
-                # update prefix
-                forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
-
-            # update sequences
-            forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
         
@@ -397,8 +391,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             [seq_len - 1 for seq_len in new_seq_lens], dtype=jnp.int32)
         # update input ids
         forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
-        # update total tokens
-        forward_batch.total_tokens = len(new_input_ids)
+
         # update forward mode
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE

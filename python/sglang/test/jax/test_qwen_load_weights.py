@@ -349,12 +349,6 @@ class TestQWenLoadWeights(CustomTestCase):
                 [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
             cache_start_loc += seq_len
             
-            if forward_batch.forward_mode == ForwardMode.DECODE:
-                # update prefix
-                forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
-
-            # update sequences
-            forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
         
