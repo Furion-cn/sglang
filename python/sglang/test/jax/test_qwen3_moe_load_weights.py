@@ -27,7 +27,7 @@ from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, Forwa
 from sglang.srt.jax.models.qwen3_moe import Qwen3MoeForCausalLMJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
-from sglang.test.jax.test_utils import create_device_mesh
+from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 
@@ -271,8 +271,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 print(f"Actual sequence lengths: {actual_seq_lens}")
                 print(f"Input tokens shape: {input_ids_array.shape}")
                 print(f"Input tokens: {input_ids_array}")
-
-                with self.mesh:
+                jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
+                with self.mesh, jax_trace_context(jax_profiling_dir):
                     for i in range(1):  # Reduced iterations for MoE testing
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
