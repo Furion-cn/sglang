@@ -68,6 +68,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         self.device_config = DeviceConfig("cpu")
         self.jax_loader = JAXModelLoader(self.load_config)
         self.tokenizer = self._get_tokenizer()
+        self.enable_debug_tracer = os.environ.get("ENABLE_DEBUG_TRACER", "0") == "1"
 
     def _get_positions(self, x):
         return jnp.concatenate([
@@ -249,7 +250,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 print("\n🔄 Test Qwen3 MoE model input and output with JAXModelLoader...")
                 
                 print("\n🟢 Starting debug tracer session...")
-                global_tracer.start_session()
+                if self.enable_debug_tracer:
+                    global_tracer.start_session()
                 
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 tokenizer = self._get_tokenizer()
@@ -356,17 +358,19 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     print()
 
                 print("\n🔴 Ending debug tracer session...")
-                debug_file = global_tracer.end_session()
-                if debug_file:
-                    print(f"✅ Debug trace saved to: {debug_file}")
+                if self.enable_debug_tracer:
+                    debug_file = global_tracer.end_session()
+                    if debug_file:
+                        print(f"✅ Debug trace saved to: {debug_file}")
                 else:
                     print("⚠️  Debug trace not saved")
 
         except Exception as e:
             if 'global_tracer' in locals():
                 try:
-                    global_tracer.end_session()
-                    print("🔴 Debug tracer session ended due to exception")
+                    if self.enable_debug_tracer:
+                        global_tracer.end_session()
+                        print("🔴 Debug tracer session ended due to exception")
                 except:
                     pass
             self.fail(f"JAXModelLoader integration test for Qwen3 MoE failed: {e}")
