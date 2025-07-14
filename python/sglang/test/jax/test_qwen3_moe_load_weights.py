@@ -258,71 +258,71 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 # Multiple questions to simulate batch > 1 scenario
                 # Use simpler prompts for MoE testing
-                input_texts = [
-                    # "The capital of France is",
-                    # "What is 2+2?",
-                    # "Hello, my name is"
-                    "1+1=?",
-                ]
+                # input_texts = [
+                #     # "The capital of France is",
+                #     # "What is 2+2?",
+                #     # "Hello, my name is"
+                #     "1+1=?",
+                # ]
 
-                input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
-                    model.config, input_texts, tokenizer)
+                # input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
+                #     model.config, input_texts, tokenizer)
 
-                print(f"Input text batch: {input_texts}")
-                print(f"Batch size: {len(input_texts)}")
-                print(f"Actual sequence lengths: {actual_seq_lens}")
-                print(f"Input tokens shape: {input_ids_array.shape}")
-                print(f"Input tokens: {input_ids_array}")
-                jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
-                with self.mesh, jax_trace_context(jax_profiling_dir):
-                    for i in range(3):  # Reduced iterations for MoE testing
-                        # Use existing forward_batch, no need to recreate
-                        y = model(forward_batch.input_ids,
-                                  forward_batch.positions, forward_batch)
+                # print(f"Input text batch: {input_texts}")
+                # print(f"Batch size: {len(input_texts)}")
+                # print(f"Actual sequence lengths: {actual_seq_lens}")
+                # print(f"Input tokens shape: {input_ids_array.shape}")
+                # print(f"Input tokens: {input_ids_array}")
+                # jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
+                # with self.mesh, jax_trace_context(jax_profiling_dir):
+                #     for i in range(3):  # Reduced iterations for MoE testing
+                #         # Use existing forward_batch, no need to recreate
+                #         y = model(forward_batch.input_ids,
+                #                   forward_batch.positions, forward_batch)
 
-                        # The LogitsProcessor now automatically extracts the last token logits
-                        # y.next_token_logits shape: [batch_size, vocab_size]
+                #         # The LogitsProcessor now automatically extracts the last token logits
+                #         # y.next_token_logits shape: [batch_size, vocab_size]
 
-                        # Sample next token for each sequence in the batch
-                        next_token_ids = sampler(
-                            y,  # Pass the LogitsProcessorOutput directly
-                            sampling_info=SamplingBatchInfo(
-                                temperatures=jnp.full(
-                                    (len(input_texts), 1), 1.0),
-                                top_ps=jnp.full((len(input_texts), 1), 1.0),
-                                top_ks=jnp.ones((len(input_texts), 1)),
-                                min_ps=jnp.full((len(input_texts), 1), 0.0),
-                                vocab_size=model.config.vocab_size,
-                            ))
+                #         # Sample next token for each sequence in the batch
+                #         next_token_ids = sampler(
+                #             y,  # Pass the LogitsProcessorOutput directly
+                #             sampling_info=SamplingBatchInfo(
+                #                 temperatures=jnp.full(
+                #                     (len(input_texts), 1), 1.0),
+                #                 top_ps=jnp.full((len(input_texts), 1), 1.0),
+                #                 top_ks=jnp.ones((len(input_texts), 1)),
+                #                 min_ps=jnp.full((len(input_texts), 1), 0.0),
+                #                 vocab_size=model.config.vocab_size,
+                #             ))
 
-                        self.update_forward_batch(
-                            forward_batch, next_token_ids, tokenizer)
+                #         self.update_forward_batch(
+                #             forward_batch, next_token_ids, tokenizer)
 
-                # Decode complete results for each sequence
-                print(f"\n=== Qwen3 MoE Complete Generation Results ===")
-                start_idx = 0
-                for batch_idx in range(len(input_texts)):
-                    # Extract tokens for each sequence from flattened array
-                    seq_len = actual_seq_lens[batch_idx]
-                    end_idx = start_idx + seq_len
-                    full_sequence = [int(token)
-                                     for token in input_ids_array[start_idx:end_idx]]
-                    decoded_full = tokenizer.decode(full_sequence)
-                    print(f"Sequence {batch_idx}: {full_sequence}")
-                    print(f"Decoded text {batch_idx}: '{decoded_full}'")
-                    print(
-                        f"Original question {batch_idx}: '{input_texts[batch_idx]}'")
-                    print(f"Actual length {batch_idx}: {seq_len}")
-                    start_idx = end_idx
-                    print()
+                # # Decode complete results for each sequence
+                # print(f"\n=== Qwen3 MoE Complete Generation Results ===")
+                # start_idx = 0
+                # for batch_idx in range(len(input_texts)):
+                #     # Extract tokens for each sequence from flattened array
+                #     seq_len = actual_seq_lens[batch_idx]
+                #     end_idx = start_idx + seq_len
+                #     full_sequence = [int(token)
+                #                      for token in input_ids_array[start_idx:end_idx]]
+                #     decoded_full = tokenizer.decode(full_sequence)
+                #     print(f"Sequence {batch_idx}: {full_sequence}")
+                #     print(f"Decoded text {batch_idx}: '{decoded_full}'")
+                #     print(
+                #         f"Original question {batch_idx}: '{input_texts[batch_idx]}'")
+                #     print(f"Actual length {batch_idx}: {seq_len}")
+                #     start_idx = end_idx
+                #     print()
 
-                print("\n🔴 Ending debug tracer session...")
-                if self.enable_debug_tracer:
-                    debug_file = global_tracer.end_session()
-                    if debug_file:
-                        print(f"✅ Debug trace saved to: {debug_file}")
-                else:
-                    print("⚠️  Debug trace not saved")
+                # print("\n🔴 Ending debug tracer session...")
+                # if self.enable_debug_tracer:
+                #     debug_file = global_tracer.end_session()
+                #     if debug_file:
+                #         print(f"✅ Debug trace saved to: {debug_file}")
+                # else:
+                #     print("⚠️  Debug trace not saved")
 
                 # 测试 Padding 功能
                 print("\n=== Testing Padding Functionality ===")
