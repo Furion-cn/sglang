@@ -392,6 +392,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         # Test attention
         output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
 
+
         # Check output shape and properties
         self.assertEqual(output.shape, (total_tokens, hidden_size))
         self.assertTrue(jnp.isfinite(output).all())

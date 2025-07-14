@@ -145,7 +145,6 @@ class ParallelLMHead(Embed):
         del input_
         raise RuntimeError("LMHead's weights should be used in the sampler.")
 
-
 class RotaryEmbedding(nnx.Module):
     """Rotary Position Embedding.
 

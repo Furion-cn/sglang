@@ -1,9 +1,17 @@
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Iterable, Union, Callable, Any
 
 import jax
 from flax import nnx
 from jax import numpy as jnp
 
+def _canonicalize_tuple(x):
+  if isinstance(x, Iterable):
+    return tuple(x)
+  else:
+    return (x,)
+
+def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
+  return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
 class LinearBase(nnx.Module):
     """Base linear layer.

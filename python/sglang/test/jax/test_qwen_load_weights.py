@@ -4,7 +4,7 @@ QWenLMHeadJaxModel JAXModelLoader Integration Tests
 
 Usage:
     python -m unittest test_qwen_load_weights.TestQWenLoadWeights
-    
+
     # Test with specific model path:
     MODEL_PATH=/path/to/jax/qwen/model python -m unittest test_qwen_load_weights.TestQWenLoadWeights.test_load_model_with_jax_loader
 """
@@ -125,7 +125,7 @@ class TestQWenLoadWeights(CustomTestCase):
             forward_mode=ForwardMode.EXTEND,
             batch_size=batch_size,
             input_ids=input_ids_array,
-            cache_loc=cache_loc, # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] if seq_lens = [3,4,3]
+            cache_loc=cache_loc,  # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] if seq_lens = [3,4,3]
             out_cache_loc=None,
             seq_lens=seq_lens,
             positions=positions_array,
@@ -334,7 +334,7 @@ class TestQWenLoadWeights(CustomTestCase):
         out_cache_start_loc = jnp.max(forward_batch.cache_loc) + 1
         forward_batch.out_cache_loc = jnp.arange(
             out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
-            
+
         cache_start_loc = 0
         new_input_ids = []
         new_seq_lens = []
@@ -346,14 +346,14 @@ class TestQWenLoadWeights(CustomTestCase):
             new_seq_lens.append(new_seq_len)
             decoded_token = tokenizer.decode(
                 [current_token_id])
-            
+
             # update cache loc
             old_cache_loc = forward_batch.cache_loc[
-                cache_start_loc:cache_start_loc + seq_len]
+                            cache_start_loc:cache_start_loc + seq_len]
             new_cache_loc_list.append(jnp.concatenate(
-                [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
+                [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx + 1]], axis=0))
             cache_start_loc += seq_len
-            
+
             if forward_batch.forward_mode == ForwardMode.DECODE:
                 # update prefix
                 forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
@@ -362,7 +362,7 @@ class TestQWenLoadWeights(CustomTestCase):
             forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
-        
+
         # update cache loc
         forward_batch.cache_loc = jnp.concatenate(new_cache_loc_list, axis=0)
         # update seq lens
