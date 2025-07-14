@@ -84,5 +84,5 @@ def jax_trace_context(log_dir: str):
     create_perfetto_link = os.getenv(
         "JAX_TRACE_CREATE_PERFETTO_LINK", "1") == "1"
 
-    return jax.profiler.trace(log_dir,
+    return jax.profiler.trace(log_dir, create_perfetto_trace=True,
                               create_perfetto_link=create_perfetto_link)
