@@ -85,7 +85,7 @@ class QWen3MoeAttention(nnx.Module):
         output, _ = self.c_proj(attn_output)
         return output
     
-    @nnx.jit
+    #@nnx.jit
     def _proj_qkv(self, positions, hidden_states):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
