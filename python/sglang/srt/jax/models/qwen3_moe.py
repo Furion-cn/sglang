@@ -396,6 +396,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
             
             constrained_state = apply_mixed_constraints(model_state, modified_pspecs)
             nnx.update(self, constrained_state)
+            jax.debug.visualize_array_sharding(constrained_state['model']['layers'][0]['self_attn']['c_attn']['weight'])
             print("mix mesh constraint applied")
             
         except Exception as e:
