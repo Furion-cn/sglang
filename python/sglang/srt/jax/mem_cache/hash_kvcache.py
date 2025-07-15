@@ -50,20 +50,13 @@ class ReqToHashKVCachePool(KVCache):
         
         if is_multi_device:
             try:
-                # 使用排序的设备列表创建对齐的mesh
                 sorted_devices = sorted(current_devices, key=lambda d: d.id)
                 aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 cache_pspec = P(None, 'data', None)
                 cache_sharding = NamedSharding(aligned_mesh, cache_pspec)
                 
-                print(f"  - Applying DP sharding with aligned mesh: {aligned_mesh}")
-                
                 self.k_cache = jax.device_put(self.k_cache, cache_sharding)
                 self.v_cache = jax.device_put(self.v_cache, cache_sharding)
-                
-                print(f"[KV Cache] DP sharding applied successfully")
-                print(f"  - K cache sharding: {self.k_cache.sharding}")
-                print(f"  - V cache sharding: {self.v_cache.sharding}")
             except Exception as e:
                 print(f"[KV Cache] Failed to apply DP sharding: {e}, continuing without constraint")
         else:
@@ -89,9 +82,6 @@ class ReqToHashKVCachePool(KVCache):
 def get_kv_buffer(layer_id: int, k_cache: jax.Array, v_cache: jax.Array) -> Tuple[jax.Array, jax.Array]:
     k_buffer = k_cache[layer_id]
     v_buffer = v_cache[layer_id]
-    
-    # 在JIT函数中无法访问sharding信息，所以直接返回buffer
-    # DP分片应该在调用此函数之前或之后处理
     return k_buffer, v_buffer
 
 
@@ -105,9 +95,6 @@ def set_kv_cache(
     v_cache: jax.Array
 ) -> Tuple[jax.Array, jax.Array]:
     assert loc.shape[0] == k.shape[0] == v.shape[0], "Batch size mismatch"
-    
-    # 在JIT函数中无法访问sharding信息，直接进行计算
-    # DP分片应该在调用此函数之前或之后处理
     k_cache = k_cache.at[layer_id, loc].set(k)
     v_cache = v_cache.at[layer_id, loc].set(v)
 

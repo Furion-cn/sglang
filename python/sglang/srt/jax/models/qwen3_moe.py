@@ -19,8 +19,7 @@ from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
 from jax.sharding import Mesh, PartitionSpec as P
-from jax.experimental.shard_map import shard_map
-import numpy as np
+from jax.sharding import NamedSharding
 
 class QWen3MoeAttention(nnx.Module):
     def __init__(self,
@@ -84,21 +83,16 @@ class QWen3MoeAttention(nnx.Module):
         print(f"  - Input shape: {hidden_states.shape} (rank: {hidden_states.ndim})")
         print(f"  - Input sharding: {hidden_states.sharding}")
         
-        # 检查是否需要应用DP分片
-        # 通过检查sharding的设备数量来判断是否在多设备环境
-        input_devices = list(hidden_states.sharding.device_set)
-        is_multi_device = len(input_devices) > 1
+        available_devices = list(jax.devices())
+        is_multi_device = len(available_devices) > 1
         
-        print(f"  - Number of devices: {len(input_devices)}")
+        print(f"  - Available devices: {len(available_devices)}")
         print(f"  - Multi-device environment: {is_multi_device}")
         
         if is_multi_device:
-            try:
-                # 尝试应用DP分片 - 使用设备的自然顺序
-                from jax.sharding import Mesh, NamedSharding
-                
+            try:                
                 # 按设备ID排序以确保一致的顺序
-                sorted_devices = sorted(input_devices, key=lambda d: d.id)
+                sorted_devices = sorted(available_devices, key=lambda d: d.id)
                 aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 pspec = P('data', None)
                 aligned_sharding = NamedSharding(aligned_mesh, pspec)
@@ -123,11 +117,8 @@ class QWen3MoeAttention(nnx.Module):
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         
-        # 对输出应用相同的DP分片逻辑
         if is_multi_device:
             try:
-                output_devices = list(output.sharding.device_set)
-                sorted_devices = sorted(output_devices, key=lambda d: d.id)
                 aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 pspec = P('data', None)
                 aligned_sharding = NamedSharding(aligned_mesh, pspec)
