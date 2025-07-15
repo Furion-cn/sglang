@@ -51,6 +51,7 @@ class LinearBase(nnx.Module):
             self.bias = None
 
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, Optional[jax.Array]]:
+        jax.debug.print("{weight}", weight=self.weight)
         """Forward pass of the linear layer."""
         bias = self.bias if not self.skip_bias_add else None
         # Access the underlying JAX array using .value property
