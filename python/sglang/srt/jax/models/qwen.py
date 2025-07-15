@@ -136,8 +136,17 @@ class QWenAttention(nnx.Module):
         layer_id: int,
         forward_mode:str,
     ):
+        jax.debug.visualize_array_sharding(self.c_attn.weight.value)
+        jax.debug.print("c_attn weight shape: {shape}", shape=self.c_attn.weight.value.shape)
+        jax.debug.visualize_array_sharding(self.c_proj.weight.value)
+        jax.debug.print("c_proj weight shape: {shape}", shape=self.c_proj.weight.value.shape)
+
         qkv, _ = self.c_attn(hidden_states)
+        jax.debug.visualize_array_sharding(qkv)
+        jax.debug.print("qkv shape: {shape}", shape=qkv.shape)
         q, k, v = jnp.split(qkv, 3, axis=-1)
+        jax.debug.visualize_array_sharding(q)
+        jax.debug.print("q shape: {shape}", shape=q.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output ,forward_batch= self.attn(
             q, k, v, forward_batch=forward_batch, layer_id=layer_id, is_causal=True,forward_mode=forward_mode)
