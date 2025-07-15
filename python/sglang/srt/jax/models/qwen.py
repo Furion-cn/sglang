@@ -134,22 +134,7 @@ class QWenAttention(nnx.Module):
         layer_id: int,
     ) -> jax.Array:
         qkv, _ = self.c_attn(hidden_states)
-        jax.debug.visualize_array_sharding(qkv)
         q, k, v = jnp.split(qkv, 3, axis=-1)
-
-        # device_id = jax.lax.axis_index('tensor')
-        # num_devices = jax.lax.axis_size('tensor')
-
-        # jax.debug.print("layer {id} device {dev_id}/{num_dev} q local shape: {shape}",
-        #                 id=layer_id, dev_id=device_id, num_dev=num_devices, shape=q.shape)
-        # jax.debug.print("layer {id} device {dev_id}/{num_dev} k local shape: {shape}",
-        #                 id=layer_id, dev_id=device_id, num_dev=num_devices, shape=k.shape)
-        # jax.debug.print("layer {id} device {dev_id}/{num_dev} v local shape: {shape}",
-        #                 id=layer_id, dev_id=device_id, num_dev=num_devices, shape=v.shape)
-        
-        jax.debug.visualize_array_sharding(q)
-        jax.debug.visualize_array_sharding(k)
-        jax.debug.visualize_array_sharding(v)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(
