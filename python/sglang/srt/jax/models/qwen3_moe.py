@@ -80,14 +80,7 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        print(f"[Attention Debug Layer {self.layer_id}] Weight sharding info:")
-        print(f"  - c_attn weight shape: {self.c_attn.weight.shape}")
-        print(f"  - c_attn weight sharding: {self.c_attn.weight.sharding}")
-        try:
-            jax.debug.visualize_array_sharding(self.c_attn.weight)
-        except Exception as e:
-            print(f"  - Failed to visualize sharding: {e}")
-        
+        jax.debug.visualize_array_sharding(self.c_attn.weight.value)
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
@@ -321,123 +314,69 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         from jax.sharding import PartitionSpec as P
         
         expert_mesh = getattr(self.config, 'expert_mesh', None)
-        main_mesh = getattr(self.config, 'mesh', None)
         
-        print(f"[Debug] apply mix mesh constraint...")
-        print(f"[Debug] Expert mesh: {expert_mesh}")
-        print(f"[Debug] Main mesh: {main_mesh}")
-        
-        if expert_mesh is None:
-            print(f"[Debug] No expert mesh, using standard constraint")
-            pspecs = nnx.get_partition_spec(model_state)
-            pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
-            nnx.update(self, pstate)
-            return
-        
-        if main_mesh is None:
-            print(f"[Debug] Warning: main_mesh is None, creating default mesh for non-MoE parameters")
-            # 创建一个默认的mesh用于非MoE参数
-            devices = jax.devices()
-            if len(devices) > 1:
-                main_mesh = jax.sharding.Mesh(devices, axis_names=('tensor',))
-                print(f"[Debug] Created default main_mesh: {main_mesh}")
-            else:
-                print(f"[Debug] Single device, will skip mesh constraints for non-MoE parameters")
-        
+        # 1. 首先对整个模型应用标准的sharding约束
         pspecs = nnx.get_partition_spec(model_state)
+        sharded_state = jax.lax.with_sharding_constraint(model_state, pspecs)
+        nnx.update(self, sharded_state)
         
+        # 2. 如果有expert_mesh，只对MoE层覆盖其专用约束
+        if expert_mesh is None:
+            return
+            
+        # 获取MoE层的ID
         moe_layer_ids = set()
         for i, layer in enumerate(self.model.layers):
             if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
                 moe_layer_ids.add(i)
         
-        print(f"[Debug] MoE layer ids: {moe_layer_ids}")
-        
-        def is_moe_parameter(path):
-            for layer_id in moe_layer_ids:
-                layer_path = f"model/layers/{layer_id}"
-                if layer_path in path:
-                    if any(component in path for component in ['mlp', 'moe_gate']):
-                        return True
-            return False
-        
-        def get_moe_partition_spec(path, original_pspec):
-            if 'moe_gate' in path:
-                return P(None, 'expert')
-            elif 'mlp' in path:
-                if len(original_pspec.axis_names) >= 2:
-                    return P('expert', *(original_pspec.axis_names[1:]))
-                else:
-                    return P('expert', None)
-            else:
-                return original_pspec
-        
-        def deep_override(specs, state, path=""):
-            if isinstance(specs, dict) and isinstance(state, dict):
-                result = {}
-                for key in specs:
-                    if key in state:
-                        current_path = f"{path}/{key}" if path else key
-                        result[key] = deep_override(specs[key], state[key], current_path)
+        if not moe_layer_ids:
+            return
+            
+        # 3. 只对MoE相关参数重新应用expert_mesh约束
+        def apply_moe_constraints(obj, path=""):
+            if hasattr(obj, '__dict__'):
+                for attr_name, attr_value in obj.__dict__.items():
+                    current_path = f"{path}.{attr_name}" if path else attr_name
+                    
+                    # 检查是否是MoE层的参数
+                    is_moe_param = False
+                    for layer_id in moe_layer_ids:
+                        layer_path = f"model.layers.{layer_id}"
+                        if layer_path in current_path and ('mlp' in current_path or 'moe_gate' in current_path):
+                            is_moe_param = True
+                            break
+                    
+                    if is_moe_param and hasattr(attr_value, 'value') and hasattr(attr_value.value, 'shape'):
+                        # 这是MoE参数，需要重新约束
+                        with expert_mesh:
+                            if 'moe_gate' in current_path:
+                                new_pspec = P(None, 'expert') 
+                            elif 'mlp' in current_path:
+                                # 获取原始的partition spec
+                                original_pspec = getattr(attr_value, 'sharding', None)
+                                if original_pspec and hasattr(original_pspec, 'spec'):
+                                    original_axes = original_pspec.spec
+                                    if len(original_axes) >= 2:
+                                        new_pspec = P('expert', *(original_axes[1:]))
+                                    else:
+                                        new_pspec = P('expert', None)
+                                else:
+                                    new_pspec = P('expert', None)
+                            else:
+                                continue
+                                
+                            # 应用新的约束
+                            new_value = jax.lax.with_sharding_constraint(attr_value.value, new_pspec)
+                            attr_value.value = new_value
                     else:
-                        result[key] = specs[key]
-                return result
-            elif isinstance(specs, P) and hasattr(state, 'shape'):
-                if is_moe_parameter(path):
-                    new_pspec = get_moe_partition_spec(path, specs)
-                    print(f"[Debug] MoE rewrite: {path} -> {new_pspec}")
-                    return new_pspec
-                else:
-                    print(f"[Debug] Non-MoE parameter: {path} -> {specs}")
-                    return specs
-            else:
-                return specs
-        
-        modified_pspecs = deep_override(pspecs, model_state)
+                        # 递归处理子对象
+                        apply_moe_constraints(attr_value, current_path)
         
         try:
-            def apply_mixed_constraints(state, specs, path=""):
-                if isinstance(state, dict) and isinstance(specs, dict):
-                    result = {}
-                    for key in state:
-                        if key in specs:
-                            current_path = f"{path}/{key}" if path else key
-                            result[key] = apply_mixed_constraints(state[key], specs[key], current_path)
-                        else:
-                            result[key] = state[key]
-                    return result
-                elif hasattr(state, 'shape') and isinstance(specs, P):
-                    if is_moe_parameter(path):
-                        print(f"[Debug] Applying expert_mesh constraint to: {path}")
-                        with expert_mesh:
-                            return jax.lax.with_sharding_constraint(state, specs)
-                    else:
-                        if main_mesh is not None:
-                            print(f"[Debug] Applying main_mesh constraint to: {path}")
-                            with main_mesh:
-                                return jax.lax.with_sharding_constraint(state, specs)
-                        else:
-                            print(f"[Debug] Skipping constraint for {path} (no main_mesh)")
-                            return state
-                else:
-                    return state
-            
-            constrained_state = apply_mixed_constraints(model_state, modified_pspecs)
-            nnx.update(self, constrained_state)
-            print("[Debug] mix mesh constraint applied")
-            
+            apply_moe_constraints(self)
         except Exception as e:
-            print(f"[Debug] mix mesh constraint failed: {e}")
-            import traceback
-            traceback.print_exc()
-            try:
-                pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
-                nnx.update(self, pstate)
-                print("[Debug] fallback to standard constraint")
-            except Exception as fallback_e:
-                print(f"[Debug] standard constraint failed: {fallback_e}")
-                nnx.update(self, model_state)
-                print("[Debug] use unconstrainted model state")
+            print(f"Warning: Failed to apply MoE constraints: {e}")
 
     @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     def __call__(self,
