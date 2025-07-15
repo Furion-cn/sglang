@@ -136,6 +136,13 @@ class QWenAttention(nnx.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
+        jax.debug.print("layer {id} device {dev_id}/{num_dev} q local shape: {shape}",
+                        id=layer_id,  shape=q.shape)
+        jax.debug.print("layer {id} device {dev_id}/{num_dev} k local shape: {shape}",
+                        id=layer_id, shape=k.shape)
+        jax.debug.print("layer {id} device {dev_id}/{num_dev} v local shape: {shape}",
+                        id=layer_id, shape=v.shape)
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(
             q, k, v, forward_batch=forward_batch, layer_id=layer_id, is_causal=True)
