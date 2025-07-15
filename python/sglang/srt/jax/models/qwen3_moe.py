@@ -80,7 +80,14 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        jax.debug.visualize_array_sharding(self.c_attn.weight.value.sharding)
+        print(f"[Attention Debug Layer {self.layer_id}] Weight sharding info:")
+        print(f"  - c_attn weight shape: {self.c_attn.weight.shape}")
+        print(f"  - c_attn weight sharding: {self.c_attn.weight.sharding}")
+        try:
+            jax.debug.visualize_array_sharding(self.c_attn.weight)
+        except Exception as e:
+            print(f"  - Failed to visualize sharding: {e}")
+        
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
@@ -315,14 +322,27 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         
         expert_mesh = getattr(self.config, 'expert_mesh', None)
         main_mesh = getattr(self.config, 'mesh', None)
+        
+        print(f"[Debug] apply mix mesh constraint...")
+        print(f"[Debug] Expert mesh: {expert_mesh}")
+        print(f"[Debug] Main mesh: {main_mesh}")
+        
         if expert_mesh is None:
+            print(f"[Debug] No expert mesh, using standard constraint")
             pspecs = nnx.get_partition_spec(model_state)
             pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
             nnx.update(self, pstate)
             return
         
-        print(f"apply mix mesh constraint...")
-        print(f"Expert mesh: {expert_mesh}")
+        if main_mesh is None:
+            print(f"[Debug] Warning: main_mesh is None, creating default mesh for non-MoE parameters")
+            # 创建一个默认的mesh用于非MoE参数
+            devices = jax.devices()
+            if len(devices) > 1:
+                main_mesh = jax.sharding.Mesh(devices, axis_names=('tensor',))
+                print(f"[Debug] Created default main_mesh: {main_mesh}")
+            else:
+                print(f"[Debug] Single device, will skip mesh constraints for non-MoE parameters")
         
         pspecs = nnx.get_partition_spec(model_state)
         
@@ -331,7 +351,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
             if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
                 moe_layer_ids.add(i)
         
-        print(f"MoE layer ids: {moe_layer_ids}")
+        print(f"[Debug] MoE layer ids: {moe_layer_ids}")
         
         def is_moe_parameter(path):
             for layer_id in moe_layer_ids:
@@ -365,9 +385,10 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
             elif isinstance(specs, P) and hasattr(state, 'shape'):
                 if is_moe_parameter(path):
                     new_pspec = get_moe_partition_spec(path, specs)
-                    print(f"rewrite: {path} -> {new_pspec}")
+                    print(f"[Debug] MoE rewrite: {path} -> {new_pspec}")
                     return new_pspec
                 else:
+                    print(f"[Debug] Non-MoE parameter: {path} -> {specs}")
                     return specs
             else:
                 return specs
@@ -387,28 +408,36 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                     return result
                 elif hasattr(state, 'shape') and isinstance(specs, P):
                     if is_moe_parameter(path):
+                        print(f"[Debug] Applying expert_mesh constraint to: {path}")
                         with expert_mesh:
                             return jax.lax.with_sharding_constraint(state, specs)
                     else:
-                        with main_mesh:
-                            return jax.lax.with_sharding_constraint(state, specs)
+                        if main_mesh is not None:
+                            print(f"[Debug] Applying main_mesh constraint to: {path}")
+                            with main_mesh:
+                                return jax.lax.with_sharding_constraint(state, specs)
+                        else:
+                            print(f"[Debug] Skipping constraint for {path} (no main_mesh)")
+                            return state
                 else:
                     return state
             
             constrained_state = apply_mixed_constraints(model_state, modified_pspecs)
             nnx.update(self, constrained_state)
-            print("mix mesh constraint applied")
+            print("[Debug] mix mesh constraint applied")
             
         except Exception as e:
-            print(f"mix mesh constraint failed: {e}")
+            print(f"[Debug] mix mesh constraint failed: {e}")
+            import traceback
+            traceback.print_exc()
             try:
                 pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
                 nnx.update(self, pstate)
-                print("fallback to standard constraint")
+                print("[Debug] fallback to standard constraint")
             except Exception as fallback_e:
-                print(f"standard constraint failed: {fallback_e}")
+                print(f"[Debug] standard constraint failed: {fallback_e}")
                 nnx.update(self, model_state)
-                print("use unconstrainted model state")
+                print("[Debug] use unconstrainted model state")
 
     @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     def __call__(self,
