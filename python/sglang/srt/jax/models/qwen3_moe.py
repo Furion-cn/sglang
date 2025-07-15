@@ -249,20 +249,38 @@ class QWen3MoeDecoderLayer(nnx.Module):
             global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
             print(f"[MoE Layer {self.layer_id}] Before MoE - hidden_states sharding: {hidden_states.sharding}")
-            hidden_states_for_moe = jax.lax.with_sharding_constraint(hidden_states, P(None))
-            router_logits_for_moe = jax.lax.with_sharding_constraint(router_logits, P(None))
-            print(f"[MoE Layer {self.layer_id}] After constraint - hidden_states sharding: {hidden_states_for_moe.sharding}")
+            print(f"[MoE Layer {self.layer_id}] Before MoE - router_logits sharding: {router_logits.sharding}")
+            
+            # 强制将数据重新分布到MoE mesh的设备顺序
+            # 使用replicated sharding确保数据在所有设备上都有完整副本
+            expert_mesh = self.expert_mesh
+            replicated_sharding = jax.sharding.NamedSharding(expert_mesh, P(None))
+            
+            hidden_states_for_moe = jax.device_put(hidden_states, replicated_sharding)
+            router_logits_for_moe = jax.device_put(router_logits, replicated_sharding)
+            
+            print(f"[MoE Layer {self.layer_id}] After device_put - hidden_states sharding: {hidden_states_for_moe.sharding}")
+            print(f"[MoE Layer {self.layer_id}] After device_put - router_logits sharding: {router_logits_for_moe.sharding}")
             
             mlp_output = self.mlp(hidden_states_for_moe, router_logits=router_logits_for_moe)
             global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
             
             print(f"[MoE Layer {self.layer_id}] MoE output sharding: {mlp_output.sharding}")
+            # MoE输出后，重新应用DP分片
             mlp_output = jax.lax.with_sharding_constraint(mlp_output, P('data', None))
             print(f"[MoE Layer {self.layer_id}] After DP constraint - output sharding: {mlp_output.sharding}")
                         
             hidden_states = mlp_output
         else:
-            hidden_states = self.mlp(hidden_states)
+            # 普通MLP层，确保输入输出都正确处理DP分片
+            print(f"[MLP Layer {self.layer_id}] Before MLP - hidden_states sharding: {hidden_states.sharding}")
+            mlp_output = self.mlp(hidden_states)
+            print(f"[MLP Layer {self.layer_id}] After MLP - output sharding: {mlp_output.sharding}")
+            
+            # 确保MLP输出也在data轴分片
+            mlp_output = jax.lax.with_sharding_constraint(mlp_output, P('data', None))
+            print(f"[MLP Layer {self.layer_id}] After DP constraint - output sharding: {mlp_output.sharding}")
+            hidden_states = mlp_output
             
         return hidden_states, residual
 
