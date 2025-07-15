@@ -512,7 +512,7 @@ class UnifiedDebugTracer:
                 'has_nan': bool(jnp.any(jnp.isnan(tensor)).item()),
                 'has_inf': bool(jnp.any(jnp.isinf(tensor)).item()),
                 'extra_info': extra_info,
-                'value':tensor[:10],
+                'value':tensor,
             }
             
             # 改进的layer_id提取逻辑

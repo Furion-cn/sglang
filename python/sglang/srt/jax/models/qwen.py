@@ -66,7 +66,7 @@ class QWenMLP(nnx.Module):
 
         self.act_func = jax.nn.silu
 
-    #@trace_function(stage="MLP", include_args=False, include_output=True)
+    @trace_function(stage="MLP", include_args=False, include_output=True)
     def __call__(self, hidden_states: jnp.ndarray):
         return _mlp_forward(hidden_states, self.w1.weight.value, self.w2.weight.value, self.c_proj.weight.value)
 
@@ -127,7 +127,7 @@ class QWenAttention(nnx.Module):
             rngs=rngs
         )
 
-    #@trace_function(stage="ATTENTION", include_args=False, include_output=True)
+    @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -183,7 +183,7 @@ class QWenBlock(nnx.Module):
             rngs=rngs,
         )
 
-    #@trace_function(stage="BLOCK", include_args=False, include_output=True)
+    @trace_function(stage="BLOCK", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -193,13 +193,9 @@ class QWenBlock(nnx.Module):
     ):
         residual = hidden_states
 
-        if self.layer_id==0 or self.layer_id==31:
-            global_tracer.print(
-                hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
+        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_1(hidden_states)
-        if self.layer_id==0 or self.layer_id==31:
-            global_tracer.print(
-                hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
+        global_tracer.print(hidden_states, f"RMSNorm_pre_attn_output", f"rmsnorm_layer_id_{self.layer_id}")
 
         hidden_states,forward_batch = self.attn(
             positions=positions,
@@ -208,24 +204,16 @@ class QWenBlock(nnx.Module):
             layer_id=self.layer_id,
             forward_mode=forward_mode,
         )
-        if self.layer_id==0 or self.layer_id==31:
-            global_tracer.print(hidden_states, f"After ATTN",
-                                f"After_ATTN_{self.layer_id}")
         hidden_states = residual + hidden_states
 
         residual = hidden_states
 
-        if self.layer_id==0 or self.layer_id==31:
-            global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input",
-                                f"rmsnorm_layer_id_{self.layer_id}")
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_input", f"rmsnorm_layer_id_{self.layer_id}")
         hidden_states = self.ln_2(hidden_states)
-        if self.layer_id==0 or self.layer_id==31:
-            global_tracer.print(
-                hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
+        global_tracer.print(hidden_states, f"RMSNorm_pre_mlp_output", f"rmsnorm_layer_id_{self.layer_id}")
 
         hidden_states = self.mlp(hidden_states)
-        if self.layer_id==0 or self.layer_id==31:
-            global_tracer.print(hidden_states, f"mlp_output_{self.layer_id}", 'MLP')
+        global_tracer.print(hidden_states, f"mlp_output_{self.layer_id}", 'MLP')
         hidden_states = residual + hidden_states
         return hidden_states, forward_batch
 
@@ -259,7 +247,7 @@ class QWenModel(nnx.Module):
             rngs=rngs
         )
 
-    #@trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
+    @trace_function(stage="TRANSFORMER", include_args=False, include_output=True)
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
@@ -267,9 +255,9 @@ class QWenModel(nnx.Module):
                  forward_mode:str,
                  batch_size:int,
                  ):
-        #global_tracer.print(input_ids, "embedding_input", "embedding_all")
+        global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.embed_tokens(input_ids)
-        #global_tracer.print(hidden_states, "embedding_output", "embedding_all")
+        global_tracer.print(hidden_states, "embedding_output", "embedding_all")
 
         for layer in self.h:
             hidden_states,forward_batch = layer(positions, hidden_states, forward_batch,forward_mode)
@@ -280,7 +268,6 @@ class QWenModel(nnx.Module):
         global_tracer.print(
             hidden_states, "RMSNorm_final_output", "rmsnorm_final")
         
-        #global_tracer.print(hidden_states[0] if len(hidden_states) > 1 else hidden_states, f"HiddenStates After QwenModel", 'HiddenStates after QwenModel') 
 
         return hidden_states,forward_batch
 

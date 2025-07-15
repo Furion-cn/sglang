@@ -51,7 +51,6 @@ class LogitsProcessor(nnx.Module):
                 lm_head.dtype,
                 self.vocab_size,
             )
-        global_tracer.print(logits, f"Logits", 'Logits')
         return LogitsProcessorOutput(next_token_logits=logits)
 
 #@partial(jax.jit,static_argnums=(3,5,6))
