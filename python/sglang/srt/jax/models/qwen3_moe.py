@@ -324,7 +324,6 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         print(f"Expert mesh: {expert_mesh}")
         
         pspecs = nnx.get_partition_spec(model_state)
-        jax.debug.print("{pspecs}", pspecs=pspecs)
         
         moe_layer_ids = set()
         for i, layer in enumerate(self.model.layers):
@@ -373,7 +372,6 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 return specs
         
         modified_pspecs = deep_override(pspecs, model_state)
-        jax.debug.print("{modified_pspecs}", modified_pspecs=modified_pspecs)
 
         
         try:

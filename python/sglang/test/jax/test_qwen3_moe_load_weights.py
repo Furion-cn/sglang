@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import jax
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -232,6 +233,9 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 )
 
                 print("✅ Qwen3 MoE model loaded successfully!")
+                state = nnx.state(model)
+                jax.debug.print("{state}", state=state)
+
 
                 self.assertIsInstance(model, Qwen3MoeForCausalLMJaxModel)
                 self.assertIsNotNone(model.config)
