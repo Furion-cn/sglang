@@ -264,17 +264,16 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     # "Hello, my name is"
                     "1+1=?",
                 ]
-
-                input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
-                    model.config, input_texts, tokenizer)
-
-                print(f"Input text batch: {input_texts}")
-                print(f"Batch size: {len(input_texts)}")
-                print(f"Actual sequence lengths: {actual_seq_lens}")
-                print(f"Input tokens shape: {input_ids_array.shape}")
-                print(f"Input tokens: {input_ids_array}")
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
+                    input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
+                        model.config, input_texts, tokenizer)
+
+                    print(f"Input text batch: {input_texts}")
+                    print(f"Batch size: {len(input_texts)}")
+                    print(f"Actual sequence lengths: {actual_seq_lens}")
+                    print(f"Input tokens shape: {input_ids_array.shape}")
+                    print(f"Input tokens: {input_ids_array}")
                     for i in range(3):  # Reduced iterations for MoE testing
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
