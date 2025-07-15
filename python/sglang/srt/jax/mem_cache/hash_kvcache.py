@@ -90,24 +90,8 @@ def get_kv_buffer(layer_id: int, k_cache: jax.Array, v_cache: jax.Array) -> Tupl
     k_buffer = k_cache[layer_id]
     v_buffer = v_cache[layer_id]
     
-    # 检查是否需要应用DP分片
-    buffer_devices = list(k_buffer.sharding.device_set)
-    is_multi_device = len(buffer_devices) > 1
-    
-    if is_multi_device:
-        try:
-            # 使用实际设备创建对齐的mesh
-            sorted_devices = sorted(buffer_devices, key=lambda d: d.id)
-            aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
-            pspec = P('data', None)
-            buffer_sharding = NamedSharding(aligned_mesh, pspec)
-            
-            k_buffer = jax.device_put(k_buffer, buffer_sharding)
-            v_buffer = jax.device_put(v_buffer, buffer_sharding)
-        except Exception:
-            # 如果分片失败，继续执行不应用约束
-            pass
-    
+    # 在JIT函数中无法访问sharding信息，所以直接返回buffer
+    # DP分片应该在调用此函数之前或之后处理
     return k_buffer, v_buffer
 
 
@@ -122,38 +106,8 @@ def set_kv_cache(
 ) -> Tuple[jax.Array, jax.Array]:
     assert loc.shape[0] == k.shape[0] == v.shape[0], "Batch size mismatch"
     
-    # 检查是否需要应用DP分片
-    kv_devices = list(k.sharding.device_set)
-    cache_devices = list(k_cache.sharding.device_set)
-    
-    # 为k, v应用DP分片（如果是多设备环境）
-    if len(kv_devices) > 1:
-        try:
-            sorted_devices = sorted(kv_devices, key=lambda d: d.id)
-            aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
-            pspec = P('data', None)
-            kv_sharding = NamedSharding(aligned_mesh, pspec)
-            
-            k = jax.device_put(k, kv_sharding)
-            v = jax.device_put(v, kv_sharding)
-        except Exception:
-            # 如果分片失败，继续执行不应用约束
-            pass
-    
-    # 为cache应用DP分片（如果是多设备环境）
-    if len(cache_devices) > 1:
-        try:
-            sorted_devices = sorted(cache_devices, key=lambda d: d.id)
-            aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
-            cache_pspec = P(None, 'data', None) if k_cache.ndim == 3 else P('data', None)
-            cache_sharding = NamedSharding(aligned_mesh, cache_pspec)
-            
-            k_cache = jax.device_put(k_cache, cache_sharding)
-            v_cache = jax.device_put(v_cache, cache_sharding)
-        except Exception:
-            # 如果分片失败，继续执行不应用约束
-            pass
-
+    # 在JIT函数中无法访问sharding信息，直接进行计算
+    # DP分片应该在调用此函数之前或之后处理
     k_cache = k_cache.at[layer_id, loc].set(k)
     v_cache = v_cache.at[layer_id, loc].set(v)
 
