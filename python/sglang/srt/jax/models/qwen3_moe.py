@@ -3,7 +3,6 @@ from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from flax import nnx
 from jax import numpy as jnp
 from jax import jax
-from jax.sharding import PartitionSpec as P
 
 from transformers import PretrainedConfig
 from sglang.srt.jax.layers.layernorm import RMSNorm
@@ -19,7 +18,7 @@ from sglang.srt.jax.utils import (
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 import numpy as np
 
@@ -81,16 +80,34 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        print(f"[DP Debug Layer {self.layer_id}] DP mesh detected:")
+        # 获取当前的mesh环境来检查是否需要DP分片
+        current_mesh = jax.experimental.maps.thread_resources.env.physical_mesh
+        
+        print(f"[DP Debug Layer {self.layer_id}] Current mesh: {current_mesh}")
         print(f"  - Input shape: {hidden_states.shape} (rank: {hidden_states.ndim})")
         print(f"  - Input sharding before: {hidden_states.sharding}")
         
-        pspec = P('data', None)
-        
-        print(f"  - Using partition spec: {pspec}")
-        
-        hidden_states = jax.lax.with_sharding_constraint(hidden_states, pspec)
-        print(f"  - Input sharding after: {hidden_states.sharding}")
+        # 如果当前mesh包含data轴且input数据需要DP分片
+        if current_mesh is not None and 'data' in current_mesh.axis_names:
+            # 获取input的当前sharding的device设备列表
+            input_devices = list(hidden_states.sharding.device_set)
+            
+            # 创建与input相同设备顺序的mesh来应用约束
+            from jax.sharding import Mesh, NamedSharding
+            try:
+                # 使用与input相同的设备顺序创建mesh
+                aligned_mesh = Mesh(input_devices, axis_names=('data',))
+                pspec = P('data', None)
+                aligned_sharding = NamedSharding(aligned_mesh, pspec)
+                
+                print(f"  - Aligned mesh: {aligned_mesh}")
+                print(f"  - Using partition spec: {pspec}")
+                
+                # 使用aligned sharding应用约束
+                hidden_states = jax.device_put(hidden_states, aligned_sharding)
+                print(f"  - Input sharding after: {hidden_states.sharding}")
+            except Exception as e:
+                print(f"  - Failed to apply DP constraint: {e}, continuing without constraint")
         
         if hasattr(self.c_attn, 'weight'):
             c_attn_weight = self.c_attn.weight
@@ -101,12 +118,21 @@ class QWen3MoeAttention(nnx.Module):
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         
-        pspec = P('data', None)
-        print(f"  - Output shape: {output.shape}, using pspec: {pspec}")
-        output = jax.lax.with_sharding_constraint(output, pspec)
-        print(f"  - Output sharding: {output.sharding}")
-        print(f"[DP Debug Layer {self.layer_id}] DP attention completed")
+        # 对输出应用相同的DP分片逻辑
+        if current_mesh is not None and 'data' in current_mesh.axis_names:
+            output_devices = list(output.sharding.device_set)
+            try:
+                aligned_mesh = Mesh(output_devices, axis_names=('data',))
+                pspec = P('data', None)
+                aligned_sharding = NamedSharding(aligned_mesh, pspec)
+                
+                print(f"  - Output shape: {output.shape}, using pspec: {pspec}")
+                output = jax.device_put(output, aligned_sharding)
+                print(f"  - Output sharding: {output.sharding}")
+            except Exception as e:
+                print(f"  - Failed to apply output DP constraint: {e}, continuing without constraint")
         
+        print(f"[DP Debug Layer {self.layer_id}] DP attention completed")
         return output
     
     #@nnx.jit
@@ -171,7 +197,8 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 self.expert_mesh = config.expert_mesh
             else:
                 devices = jax.devices()
-                self.expert_mesh = Mesh(devices, ('expert',))
+                config.expert_mesh = Mesh(devices, axis_names=('expert',))
+                self.expert_mesh = config.expert_mesh
                 
             
             if 'expert' not in self.expert_mesh.axis_names:
@@ -248,39 +275,12 @@ class QWen3MoeDecoderLayer(nnx.Module):
             router_logits = self.moe_gate(hidden_states)            
             global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
-            print(f"[MoE Layer {self.layer_id}] Before MoE - hidden_states sharding: {hidden_states.sharding}")
-            print(f"[MoE Layer {self.layer_id}] Before MoE - router_logits sharding: {router_logits.sharding}")
-            
-            # 强制将数据重新分布到MoE mesh的设备顺序
-            # 使用replicated sharding确保数据在所有设备上都有完整副本
-            expert_mesh = self.expert_mesh
-            replicated_sharding = jax.sharding.NamedSharding(expert_mesh, P(None))
-            
-            hidden_states_for_moe = jax.device_put(hidden_states, replicated_sharding)
-            router_logits_for_moe = jax.device_put(router_logits, replicated_sharding)
-            
-            print(f"[MoE Layer {self.layer_id}] After device_put - hidden_states sharding: {hidden_states_for_moe.sharding}")
-            print(f"[MoE Layer {self.layer_id}] After device_put - router_logits sharding: {router_logits_for_moe.sharding}")
-            
-            mlp_output = self.mlp(hidden_states_for_moe, router_logits=router_logits_for_moe)
+            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
             global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
-            
-            print(f"[MoE Layer {self.layer_id}] MoE output sharding: {mlp_output.sharding}")
-            # MoE输出后，重新应用DP分片
-            mlp_output = jax.lax.with_sharding_constraint(mlp_output, P('data', None))
-            print(f"[MoE Layer {self.layer_id}] After DP constraint - output sharding: {mlp_output.sharding}")
                         
             hidden_states = mlp_output
         else:
-            # 普通MLP层，确保输入输出都正确处理DP分片
-            print(f"[MLP Layer {self.layer_id}] Before MLP - hidden_states sharding: {hidden_states.sharding}")
-            mlp_output = self.mlp(hidden_states)
-            print(f"[MLP Layer {self.layer_id}] After MLP - output sharding: {mlp_output.sharding}")
-            
-            # 确保MLP输出也在data轴分片
-            mlp_output = jax.lax.with_sharding_constraint(mlp_output, P('data', None))
-            print(f"[MLP Layer {self.layer_id}] After DP constraint - output sharding: {mlp_output.sharding}")
-            hidden_states = mlp_output
+            hidden_states = self.mlp(hidden_states)
             
         return hidden_states, residual
 
