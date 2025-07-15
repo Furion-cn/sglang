@@ -80,7 +80,7 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        jax.debug.visualize_array_sharding(self.c_attn.weight)
+        jax.debug.visualize_array_sharding(self.c_attn.weight.value.sharding)
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
@@ -314,7 +314,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         from jax.sharding import PartitionSpec as P
         
         expert_mesh = getattr(self.config, 'expert_mesh', None)
-        
+        main_mesh = getattr(self.config, 'mesh', None)
         if expert_mesh is None:
             pspecs = nnx.get_partition_spec(model_state)
             pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
@@ -390,7 +390,8 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                         with expert_mesh:
                             return jax.lax.with_sharding_constraint(state, specs)
                     else:
-                        return jax.lax.with_sharding_constraint(state, specs)
+                        with main_mesh:
+                            return jax.lax.with_sharding_constraint(state, specs)
                 else:
                     return state
             
