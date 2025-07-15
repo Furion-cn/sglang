@@ -20,7 +20,6 @@ from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
-import numpy as np
 
 class QWen3MoeAttention(nnx.Module):
     def __init__(self,
@@ -52,6 +51,7 @@ class QWen3MoeAttention(nnx.Module):
             kernel_axes=(None, "tensor"),
             rngs=rngs,
         )
+        jax.debug.print("{c_attn_type}", c_attn_type=type(self.c_attn.weight))
         self.c_proj = LinearBase(
             input_size=num_heads * self.head_dim,
             output_size=hidden_size,
@@ -80,7 +80,7 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        jax.debug.print("{c_attn}", c_attn=self.c_attn.weight)
+        jax.debug.print("{c_attn_type}", c_attn_type=type(self.c_attn.weight)) 
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)

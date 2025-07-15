@@ -233,11 +233,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 )
 
                 print("✅ Qwen3 MoE model loaded successfully!")
-                state = nnx.state(model)
-                jax.debug.print("{state}", state=state['model']['layers'][3]['self_attn']['c_attn']['weight'].sharding)
-                jax.debug.visualize_array_sharding(state['model']['layers'][3]['self_attn']['c_attn']['weight'].value)
-
-
                 self.assertIsInstance(model, Qwen3MoeForCausalLMJaxModel)
                 self.assertIsNotNone(model.config)
 
