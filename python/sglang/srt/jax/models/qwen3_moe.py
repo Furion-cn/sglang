@@ -80,17 +80,31 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        hidden_states = jax.lax.with_sharding_constraint(
-            hidden_states, P('data', None, None)
-        )
+        print(f"[DP Debug Layer {self.layer_id}] DP mesh detected:")
+        print(f"  - Input shape: {hidden_states.shape} (rank: {hidden_states.ndim})")
+        print(f"  - Input sharding before: {hidden_states.sharding}")
+        
+        pspec = P('data', None)
+        
+        print(f"  - Using partition spec: {pspec}")
+        
+        hidden_states = jax.lax.with_sharding_constraint(hidden_states, pspec)
+        print(f"  - Input sharding after: {hidden_states.sharding}")
+        
+        if hasattr(self.c_attn, 'kernel'):
+            c_attn_weight = self.c_attn.kernel
+            print(f"  - c_attn weight shape: {c_attn_weight.shape}")
+            print(f"  - c_attn weight sharding: {c_attn_weight.sharding}")
         
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         
-        output = jax.lax.with_sharding_constraint(
-            output, P('data', None, None)
-        )
+        pspec = P('data', None)
+        print(f"  - Output shape: {output.shape}, using pspec: {pspec}")
+        output = jax.lax.with_sharding_constraint(output, pspec)
+        print(f"  - Output sharding: {output.sharding}")
+        print(f"[DP Debug Layer {self.layer_id}] DP attention completed")
         
         return output
     
