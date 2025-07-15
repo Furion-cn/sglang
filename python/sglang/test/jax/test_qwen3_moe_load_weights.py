@@ -234,7 +234,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 print("✅ Qwen3 MoE model loaded successfully!")
                 state = nnx.state(model)
-                jax.debug.print("{state}", state=state)
+                jax.debug.print("{state}", state=state[3])
 
 
                 self.assertIsInstance(model, Qwen3MoeForCausalLMJaxModel)
