@@ -315,9 +315,70 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         
         expert_mesh = getattr(self.config, 'expert_mesh', None)
         
+        # 调试：检查原始权重大小和partition specs
+        def check_weights_and_pspecs(state, pspecs, path=""):
+            if isinstance(state, dict) and isinstance(pspecs, dict):
+                for key in state:
+                    if key in pspecs:
+                        current_path = f"{path}/{key}" if path else key
+                        check_weights_and_pspecs(state[key], pspecs[key], current_path)
+            elif hasattr(state, 'shape'):
+                size_mb = state.size * 4 / (1024 * 1024)  # 假设bfloat16，4字节
+                if size_mb > 50:  # 大于50MB的权重
+                    print(f"Weight: {path}")
+                    print(f"  Shape: {state.shape}, Size: {size_mb:.1f}MB")
+                    print(f"  Current sharding: {getattr(state, 'sharding', 'no sharding')}")
+                    print(f"  Target pspec: {pspecs}")
+                    
+                    # 检查pspec是否会导致分片
+                    if pspecs and hasattr(pspecs, 'axis_names'):
+                        sharded_dims = [i for i, axis in enumerate(pspecs.axis_names) if axis is not None]
+                        if not sharded_dims:
+                            print(f"  WARNING: No sharding planned for this large weight!")
+                    print()
+
+        print("=== Checking weights and partition specs before constraint ===")
+        
         # 1. 首先获取整个模型的标准sharding约束
         pspecs = nnx.get_partition_spec(model_state)
-        sharded_state = jax.lax.with_sharding_constraint(model_state, pspecs)
+        
+        # 检查权重和分片规格
+        check_weights_and_pspecs(model_state, pspecs)
+        
+        print("=== Applying standard sharding constraints ===")
+        try:
+            sharded_state = jax.lax.with_sharding_constraint(model_state, pspecs)
+            print("Standard sharding constraints applied successfully")
+        except Exception as e:
+            print(f"FAILED to apply standard sharding constraints: {e}")
+            # 尝试跳过problematic的权重
+            print("Trying to apply constraints selectively...")
+            
+            def apply_constraints_safely(state, pspecs, path=""):
+                if isinstance(state, dict) and isinstance(pspecs, dict):
+                    result = {}
+                    for key in state:
+                        if key in pspecs:
+                            current_path = f"{path}/{key}" if path else key
+                            try:
+                                result[key] = apply_constraints_safely(state[key], pspecs[key], current_path)
+                            except Exception as constraint_e:
+                                print(f"Skipping constraint for {current_path}: {constraint_e}")
+                                result[key] = state[key]
+                        else:
+                            result[key] = state[key]
+                    return result
+                elif hasattr(state, 'shape'):
+                    size_mb = state.size * 4 / (1024 * 1024)
+                    if size_mb > 200:  # 对于特别大的权重，先跳过约束
+                        print(f"Skipping constraint for large weight at {path} ({size_mb:.1f}MB)")
+                        return state
+                    else:
+                        return jax.lax.with_sharding_constraint(state, pspecs)
+                else:
+                    return state
+            
+            sharded_state = apply_constraints_safely(model_state, pspecs)
         
         # 调试：检查大权重的分片情况
         def check_large_weights(state, path=""):
