@@ -80,7 +80,7 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        jax.debug.print("{self.c_attn.weight.value.sharding}", self.c_attn.weight)
+        jax.debug.print("{c_attn}", c_attn=self.c_attn.weight)
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
