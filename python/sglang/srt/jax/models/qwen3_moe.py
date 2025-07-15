@@ -80,14 +80,14 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        jax.debug.visualize_array_sharding(self.c_attn.weight.value)
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
     
-    #@nnx.jit
+    @nnx.jit
     def _proj_qkv(self, positions, hidden_states):
+        jax.debug.visualize_array_sharding(self.c_attn.weight.value)
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
 
@@ -396,7 +396,6 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
             
             constrained_state = apply_mixed_constraints(model_state, modified_pspecs)
             nnx.update(self, constrained_state)
-            jax.debug.visualize_array_sharding(constrained_state['model']['layers'][0]['self_attn']['c_attn']['weight'])
             print("mix mesh constraint applied")
             
         except Exception as e:
