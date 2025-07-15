@@ -315,68 +315,65 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         
         expert_mesh = getattr(self.config, 'expert_mesh', None)
         
-        # 1. 首先对整个模型应用标准的sharding约束
+        # 1. 首先获取整个模型的标准sharding约束
         pspecs = nnx.get_partition_spec(model_state)
         sharded_state = jax.lax.with_sharding_constraint(model_state, pspecs)
-        nnx.update(self, sharded_state)
         
-        # 2. 如果有expert_mesh，只对MoE层覆盖其专用约束
-        if expert_mesh is None:
-            return
+        # 2. 如果有expert_mesh，修改MoE层的sharding约束
+        if expert_mesh is not None:
+            # 获取MoE层的ID
+            moe_layer_ids = set()
+            for i, layer in enumerate(self.model.layers):
+                if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
+                    moe_layer_ids.add(i)
             
-        # 获取MoE层的ID
-        moe_layer_ids = set()
-        for i, layer in enumerate(self.model.layers):
-            if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
-                moe_layer_ids.add(i)
-        
-        if not moe_layer_ids:
-            return
-            
-        # 3. 只对MoE相关参数重新应用expert_mesh约束
-        def apply_moe_constraints(obj, path=""):
-            if hasattr(obj, '__dict__'):
-                for attr_name, attr_value in obj.__dict__.items():
-                    current_path = f"{path}.{attr_name}" if path else attr_name
-                    
-                    # 检查是否是MoE层的参数
-                    is_moe_param = False
-                    for layer_id in moe_layer_ids:
-                        layer_path = f"model.layers.{layer_id}"
-                        if layer_path in current_path and ('mlp' in current_path or 'moe_gate' in current_path):
-                            is_moe_param = True
-                            break
-                    
-                    if is_moe_param and hasattr(attr_value, 'value') and hasattr(attr_value.value, 'shape'):
-                        # 这是MoE参数，需要重新约束
-                        with expert_mesh:
-                            if 'moe_gate' in current_path:
-                                new_pspec = P(None, 'expert') 
-                            elif 'mlp' in current_path:
-                                # 获取原始的partition spec
-                                original_pspec = getattr(attr_value, 'sharding', None)
-                                if original_pspec and hasattr(original_pspec, 'spec'):
-                                    original_axes = original_pspec.spec
-                                    if len(original_axes) >= 2:
-                                        new_pspec = P('expert', *(original_axes[1:]))
+            if moe_layer_ids:
+                # 递归修改sharded_state中的MoE参数
+                def modify_moe_sharding(state, path=""):
+                    if isinstance(state, dict):
+                        result = {}
+                        for key, value in state.items():
+                            current_path = f"{path}/{key}" if path else key
+                            result[key] = modify_moe_sharding(value, current_path)
+                        return result
+                    elif hasattr(state, 'shape'):
+                        # 检查是否是MoE参数
+                        is_moe_param = False
+                        for layer_id in moe_layer_ids:
+                            layer_path = f"model/layers/{layer_id}"
+                            if layer_path in path and ('mlp' in path or 'moe_gate' in path):
+                                is_moe_param = True
+                                break
+                        
+                        if is_moe_param:
+                            # 对MoE参数应用expert_mesh约束
+                            with expert_mesh:
+                                if 'moe_gate' in path:
+                                    new_pspec = P(None, 'expert') 
+                                elif 'mlp' in path:
+                                    # 根据权重类型确定分片策略
+                                    if 'wi_0' in path or 'wi_1' in path:
+                                        new_pspec = P('expert', None, 'tensor')
+                                    elif 'wo' in path:
+                                        new_pspec = P('expert', 'tensor', None)
                                     else:
                                         new_pspec = P('expert', None)
                                 else:
                                     new_pspec = P('expert', None)
-                            else:
-                                continue
-                                
-                            # 应用新的约束
-                            new_value = jax.lax.with_sharding_constraint(attr_value.value, new_pspec)
-                            attr_value.value = new_value
+                                    
+                                return jax.lax.with_sharding_constraint(state, new_pspec)
+                        
+                        return state
                     else:
-                        # 递归处理子对象
-                        apply_moe_constraints(attr_value, current_path)
+                        return state
+                
+                try:
+                    sharded_state = modify_moe_sharding(sharded_state)
+                except Exception as e:
+                    print(f"Warning: Failed to apply MoE constraints: {e}")
         
-        try:
-            apply_moe_constraints(self)
-        except Exception as e:
-            print(f"Warning: Failed to apply MoE constraints: {e}")
+        # 3. 一次性更新整个模型
+        nnx.update(self, sharded_state)
 
     @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     def __call__(self,
