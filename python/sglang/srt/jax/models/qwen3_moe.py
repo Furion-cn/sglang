@@ -80,9 +80,18 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
+        hidden_states = jax.lax.with_sharding_constraint(
+            hidden_states, P('data', None, None)
+        )
+        
         q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
+        
+        output = jax.lax.with_sharding_constraint(
+            output, P('data', None, None)
+        )
+        
         return output
     
     #@nnx.jit
@@ -419,3 +428,44 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         return result
 
 EntryClass = Qwen3MoeForCausalLMJaxModel
+
+"""
+混合并行（DP + TP）完整示例：
+
+import jax
+from jax.sharding import Mesh, PartitionSpec as P
+
+# 示例1：8设备 -> 2个DP组，每组4设备TP
+devices = jax.devices()[:8]
+mixed_mesh_2x4 = Mesh(devices.reshape(2, 4), axis_names=('data', 'tensor'))
+
+with mixed_mesh_2x4:
+    # 创建模型（权重自动在tensor轴分片）
+    model = Qwen3MoeForCausalLMJaxModel(config=config, rngs=rngs)
+    
+    # 输入数据在data轴分片
+    input_ids = jax.lax.with_sharding_constraint(
+        input_ids, P('data', None)  # (batch, seq_len)
+    )
+    positions = jax.lax.with_sharding_constraint(
+        positions, P('data', None)
+    )
+    
+    # forward pass（激活值自动保持data轴分片）
+    output = model(input_ids, positions, forward_batch)
+
+# 示例2：16设备 -> 4个DP组，每组4设备TP  
+devices = jax.devices()[:16]
+mixed_mesh_4x4 = Mesh(devices.reshape(4, 4), axis_names=('data', 'tensor'))
+
+# 示例3：32设备 -> 8个DP组，每组4设备TP
+devices = jax.devices()[:32] 
+mixed_mesh_8x4 = Mesh(devices.reshape(8, 4), axis_names=('data', 'tensor'))
+
+# 关键优势验证：
+# ✅ 灵活扩展：调整reshape参数即可改变DP:TP比例
+# ✅ 内存效率：每个设备只存储1/4的模型权重（4设备TP组）
+# ✅ 通信优化：
+#    - DP组内AllReduce：4设备间同步TP计算结果
+#    - DP组间AllReduce：梯度同步（训练时）
+"""
