@@ -41,14 +41,18 @@ class ReqToHashKVCachePool(KVCache):
         
         print(f"[KV Cache] Checking DP sharding for cache: {self.k_cache.shape}")
         
-        # 获取当前mesh环境
-        current_mesh = jax.experimental.maps.thread_resources.env.physical_mesh
+        # 检查当前设备环境
+        current_devices = list(jax.devices())
+        is_multi_device = len(current_devices) > 1
         
-        if current_mesh is not None and 'data' in current_mesh.axis_names:
+        print(f"[KV Cache] Number of devices: {len(current_devices)}")
+        print(f"[KV Cache] Multi-device environment: {is_multi_device}")
+        
+        if is_multi_device:
             try:
-                # 使用当前设备创建对齐的mesh
-                current_devices = list(jax.devices())
-                aligned_mesh = Mesh(current_devices, axis_names=('data',))
+                # 使用排序的设备列表创建对齐的mesh
+                sorted_devices = sorted(current_devices, key=lambda d: d.id)
+                aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 cache_pspec = P(None, 'data', None)
                 cache_sharding = NamedSharding(aligned_mesh, cache_pspec)
                 
@@ -63,7 +67,7 @@ class ReqToHashKVCachePool(KVCache):
             except Exception as e:
                 print(f"[KV Cache] Failed to apply DP sharding: {e}, continuing without constraint")
         else:
-            print(f"[KV Cache] No DP mesh detected, skipping sharding")
+            print(f"[KV Cache] Single device environment, skipping DP sharding")
 
     def get_kv_buffer(self, layer_id: int) -> Tuple[jax.Array, jax.Array]:
         return get_kv_buffer(layer_id, self.k_cache, self.v_cache)
@@ -86,19 +90,20 @@ def get_kv_buffer(layer_id: int, k_cache: jax.Array, v_cache: jax.Array) -> Tupl
     k_buffer = k_cache[layer_id]
     v_buffer = v_cache[layer_id]
     
-    # 获取当前mesh并尝试应用DP分片，如果失败则继续
-    current_mesh = jax.experimental.maps.thread_resources.env.physical_mesh
-    if current_mesh is not None and 'data' in current_mesh.axis_names:
+    # 检查是否需要应用DP分片
+    buffer_devices = list(k_buffer.sharding.device_set)
+    is_multi_device = len(buffer_devices) > 1
+    
+    if is_multi_device:
         try:
             # 使用实际设备创建对齐的mesh
-            devices = list(k_buffer.sharding.device_set)
-            if len(devices) > 1:  # 只在多设备时应用分片
-                aligned_mesh = Mesh(devices, axis_names=('data',))
-                pspec = P('data', None)
-                buffer_sharding = NamedSharding(aligned_mesh, pspec)
-                
-                k_buffer = jax.device_put(k_buffer, buffer_sharding)
-                v_buffer = jax.device_put(v_buffer, buffer_sharding)
+            sorted_devices = sorted(buffer_devices, key=lambda d: d.id)
+            aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
+            pspec = P('data', None)
+            buffer_sharding = NamedSharding(aligned_mesh, pspec)
+            
+            k_buffer = jax.device_put(k_buffer, buffer_sharding)
+            v_buffer = jax.device_put(v_buffer, buffer_sharding)
         except Exception:
             # 如果分片失败，继续执行不应用约束
             pass
@@ -117,29 +122,34 @@ def set_kv_cache(
 ) -> Tuple[jax.Array, jax.Array]:
     assert loc.shape[0] == k.shape[0] == v.shape[0], "Batch size mismatch"
     
-    # 尝试应用DP分片，如果失败则继续
-    current_mesh = jax.experimental.maps.thread_resources.env.physical_mesh
-    if current_mesh is not None and 'data' in current_mesh.axis_names:
+    # 检查是否需要应用DP分片
+    kv_devices = list(k.sharding.device_set)
+    cache_devices = list(k_cache.sharding.device_set)
+    
+    # 为k, v应用DP分片（如果是多设备环境）
+    if len(kv_devices) > 1:
         try:
-            # 为k, v应用DP分片
-            kv_devices = list(k.sharding.device_set)
-            if len(kv_devices) > 1:
-                aligned_mesh = Mesh(kv_devices, axis_names=('data',))
-                pspec = P('data', None)
-                kv_sharding = NamedSharding(aligned_mesh, pspec)
-                
-                k = jax.device_put(k, kv_sharding)
-                v = jax.device_put(v, kv_sharding)
+            sorted_devices = sorted(kv_devices, key=lambda d: d.id)
+            aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
+            pspec = P('data', None)
+            kv_sharding = NamedSharding(aligned_mesh, pspec)
             
-            # 为cache应用DP分片
-            cache_devices = list(k_cache.sharding.device_set)
-            if len(cache_devices) > 1:
-                aligned_mesh = Mesh(cache_devices, axis_names=('data',))
-                cache_pspec = P(None, 'data', None) if k_cache.ndim == 3 else P('data', None)
-                cache_sharding = NamedSharding(aligned_mesh, cache_pspec)
-                
-                k_cache = jax.device_put(k_cache, cache_sharding)
-                v_cache = jax.device_put(v_cache, cache_sharding)
+            k = jax.device_put(k, kv_sharding)
+            v = jax.device_put(v, kv_sharding)
+        except Exception:
+            # 如果分片失败，继续执行不应用约束
+            pass
+    
+    # 为cache应用DP分片（如果是多设备环境）
+    if len(cache_devices) > 1:
+        try:
+            sorted_devices = sorted(cache_devices, key=lambda d: d.id)
+            aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
+            cache_pspec = P(None, 'data', None) if k_cache.ndim == 3 else P('data', None)
+            cache_sharding = NamedSharding(aligned_mesh, cache_pspec)
+            
+            k_cache = jax.device_put(k_cache, cache_sharding)
+            v_cache = jax.device_put(v_cache, cache_sharding)
         except Exception:
             # 如果分片失败，继续执行不应用约束
             pass

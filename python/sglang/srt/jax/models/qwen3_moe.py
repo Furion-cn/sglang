@@ -80,34 +80,39 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        # 获取当前的mesh环境来检查是否需要DP分片
-        current_mesh = jax.experimental.maps.thread_resources.env.physical_mesh
-        
-        print(f"[DP Debug Layer {self.layer_id}] Current mesh: {current_mesh}")
+        print(f"[DP Debug Layer {self.layer_id}] Checking for DP sharding:")
         print(f"  - Input shape: {hidden_states.shape} (rank: {hidden_states.ndim})")
-        print(f"  - Input sharding before: {hidden_states.sharding}")
+        print(f"  - Input sharding: {hidden_states.sharding}")
         
-        # 如果当前mesh包含data轴且input数据需要DP分片
-        if current_mesh is not None and 'data' in current_mesh.axis_names:
-            # 获取input的当前sharding的device设备列表
-            input_devices = list(hidden_states.sharding.device_set)
-            
-            # 创建与input相同设备顺序的mesh来应用约束
-            from jax.sharding import Mesh, NamedSharding
+        # 检查是否需要应用DP分片
+        # 通过检查sharding的设备数量来判断是否在多设备环境
+        input_devices = list(hidden_states.sharding.device_set)
+        is_multi_device = len(input_devices) > 1
+        
+        print(f"  - Number of devices: {len(input_devices)}")
+        print(f"  - Multi-device environment: {is_multi_device}")
+        
+        if is_multi_device:
             try:
-                # 使用与input相同的设备顺序创建mesh
-                aligned_mesh = Mesh(input_devices, axis_names=('data',))
+                # 尝试应用DP分片 - 使用设备的自然顺序
+                from jax.sharding import Mesh, NamedSharding
+                
+                # 按设备ID排序以确保一致的顺序
+                sorted_devices = sorted(input_devices, key=lambda d: d.id)
+                aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 pspec = P('data', None)
                 aligned_sharding = NamedSharding(aligned_mesh, pspec)
                 
-                print(f"  - Aligned mesh: {aligned_mesh}")
+                print(f"  - Applying DP sharding with mesh: {aligned_mesh}")
                 print(f"  - Using partition spec: {pspec}")
                 
-                # 使用aligned sharding应用约束
                 hidden_states = jax.device_put(hidden_states, aligned_sharding)
                 print(f"  - Input sharding after: {hidden_states.sharding}")
+                
             except Exception as e:
                 print(f"  - Failed to apply DP constraint: {e}, continuing without constraint")
+        else:
+            print(f"  - Single device environment, skipping DP sharding")
         
         if hasattr(self.c_attn, 'weight'):
             c_attn_weight = self.c_attn.weight
@@ -119,16 +124,18 @@ class QWen3MoeAttention(nnx.Module):
         output, _ = self.c_proj(attn_output)
         
         # 对输出应用相同的DP分片逻辑
-        if current_mesh is not None and 'data' in current_mesh.axis_names:
-            output_devices = list(output.sharding.device_set)
+        if is_multi_device:
             try:
-                aligned_mesh = Mesh(output_devices, axis_names=('data',))
+                output_devices = list(output.sharding.device_set)
+                sorted_devices = sorted(output_devices, key=lambda d: d.id)
+                aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 pspec = P('data', None)
                 aligned_sharding = NamedSharding(aligned_mesh, pspec)
                 
-                print(f"  - Output shape: {output.shape}, using pspec: {pspec}")
+                print(f"  - Output shape: {output.shape}, applying DP sharding")
                 output = jax.device_put(output, aligned_sharding)
                 print(f"  - Output sharding: {output.sharding}")
+                
             except Exception as e:
                 print(f"  - Failed to apply output DP constraint: {e}, continuing without constraint")
         
