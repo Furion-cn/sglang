@@ -306,10 +306,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 f"Missing weights for parameters: {sorted(missing_paths)}")
 
         update_state_recursive(model_state, flat_weights)
-        pspecs = nnx.get_partition_spec(model_state)
-        pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
-        nnx.update(self, pstate)
-        # self._apply_sharding_constraints_with_mixed_meshes(model_state)
+        self._apply_sharding_constraints_with_mixed_meshes(model_state)
 
     def _apply_sharding_constraints_with_mixed_meshes(self, model_state):
         import jax
@@ -376,6 +373,8 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 return specs
         
         modified_pspecs = deep_override(pspecs, model_state)
+        jax.debug.print("{modified_pspecs}", modified_pspecs=modified_pspecs)
+
         
         try:
             def apply_mixed_constraints(state, specs, path=""):
