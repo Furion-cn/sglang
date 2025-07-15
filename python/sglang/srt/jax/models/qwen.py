@@ -125,6 +125,11 @@ class QWenAttention(nnx.Module):
             rngs=rngs
         )
 
+        jax.debug.print("qkv_proj weight shape: {shape}", shape=self.c_attn.weight.value.shape)
+        jax.debug.visualize_array_sharding(self.c_attn.weight.value)
+        jax.debug.print("c_proj weight shape: {shape}", shape=self.c_proj.weight.value.shape)
+        jax.debug.visualize_array_sharding(self.c_proj.weight.value)
+
     @trace_function(stage="ATTENTION", include_args=False, include_output=True)
     def __call__(
         self,
@@ -135,13 +140,6 @@ class QWenAttention(nnx.Module):
     ) -> jax.Array:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, 3, axis=-1)
-
-        jax.debug.print("layer {id} q local shape: {shape}",
-                        id=layer_id,  shape=q.shape)
-        jax.debug.print("layer {id} k local shape: {shape}",
-                        id=layer_id, shape=k.shape)
-        jax.debug.print("layer {id} v local shape: {shape}",
-                        id=layer_id, shape=v.shape)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(
