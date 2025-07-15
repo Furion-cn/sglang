@@ -319,6 +319,20 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         pspecs = nnx.get_partition_spec(model_state)
         sharded_state = jax.lax.with_sharding_constraint(model_state, pspecs)
         
+        # 调试：检查大权重的分片情况
+        def check_large_weights(state, path=""):
+            if isinstance(state, dict):
+                for key, value in state.items():
+                    current_path = f"{path}/{key}" if path else key
+                    check_large_weights(value, current_path)
+            elif hasattr(state, 'shape'):
+                size_mb = state.size * 4 / (1024 * 1024)  # 假设bfloat16，4字节
+                if size_mb > 100:  # 大于100MB的权重
+                    print(f"Large weight: {path}, shape: {state.shape}, size: {size_mb:.1f}MB, sharding: {getattr(state, 'sharding', 'no sharding')}")
+        
+        print("=== Checking large weights after standard sharding ===")
+        check_large_weights(sharded_state)
+        
         # 2. 如果有expert_mesh，修改MoE层的sharding约束
         if expert_mesh is not None:
             # 获取MoE层的ID
@@ -326,6 +340,8 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
             for i, layer in enumerate(self.model.layers):
                 if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
                     moe_layer_ids.add(i)
+            
+            print(f"MoE layer IDs: {moe_layer_ids}")
             
             if moe_layer_ids:
                 # 递归修改sharded_state中的MoE参数
@@ -347,6 +363,7 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                         
                         if is_moe_param:
                             # 对MoE参数应用expert_mesh约束
+                            print(f"Applying MoE sharding to: {path}, shape: {state.shape}")
                             with expert_mesh:
                                 if 'moe_gate' in path:
                                     new_pspec = P(None, 'expert') 
@@ -360,7 +377,8 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                                         new_pspec = P('expert', None)
                                 else:
                                     new_pspec = P('expert', None)
-                                    
+                                
+                                print(f"  -> New pspec: {new_pspec}")
                                 return jax.lax.with_sharding_constraint(state, new_pspec)
                         
                         return state
@@ -369,8 +387,12 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 
                 try:
                     sharded_state = modify_moe_sharding(sharded_state)
+                    print("=== Checking large weights after MoE sharding ===")
+                    check_large_weights(sharded_state)
                 except Exception as e:
                     print(f"Warning: Failed to apply MoE constraints: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         # 3. 一次性更新整个模型
         nnx.update(self, sharded_state)
