@@ -137,15 +137,15 @@ class QWenAttention(nnx.Module):
         jax.debug.visualize_array_sharding(qkv)
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
-        device_id = jax.lax.axis_index('tensor')
-        num_devices = jax.lax.axis_size('tensor')
+        # device_id = jax.lax.axis_index('tensor')
+        # num_devices = jax.lax.axis_size('tensor')
 
-        jax.debug.print("layer {id} device {dev_id}/{num_dev} q local shape: {shape}",
-                        id=layer_id, dev_id=device_id, num_dev=num_devices, shape=q.shape)
-        jax.debug.print("layer {id} device {dev_id}/{num_dev} k local shape: {shape}",
-                        id=layer_id, dev_id=device_id, num_dev=num_devices, shape=k.shape)
-        jax.debug.print("layer {id} device {dev_id}/{num_dev} v local shape: {shape}",
-                        id=layer_id, dev_id=device_id, num_dev=num_devices, shape=v.shape)
+        # jax.debug.print("layer {id} device {dev_id}/{num_dev} q local shape: {shape}",
+        #                 id=layer_id, dev_id=device_id, num_dev=num_devices, shape=q.shape)
+        # jax.debug.print("layer {id} device {dev_id}/{num_dev} k local shape: {shape}",
+        #                 id=layer_id, dev_id=device_id, num_dev=num_devices, shape=k.shape)
+        # jax.debug.print("layer {id} device {dev_id}/{num_dev} v local shape: {shape}",
+        #                 id=layer_id, dev_id=device_id, num_dev=num_devices, shape=v.shape)
         
         jax.debug.visualize_array_sharding(q)
         jax.debug.visualize_array_sharding(k)
