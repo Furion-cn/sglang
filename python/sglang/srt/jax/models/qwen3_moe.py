@@ -84,14 +84,17 @@ class QWen3MoeAttention(nnx.Module):
         print(f"  - Input sharding: {hidden_states.sharding}")
         
         available_devices = list(jax.devices())
-        is_multi_device = len(available_devices) > 1
+        num_devices = len(available_devices)
+        batch_size = hidden_states.shape[0]
         
-        print(f"  - Available devices: {len(available_devices)}")
-        print(f"  - Multi-device environment: {is_multi_device}")
+        should_apply_dp = num_devices > 1 and batch_size >= num_devices
         
-        if is_multi_device:
-            try:                
-                # 按设备ID排序以确保一致的顺序
+        print(f"  - Available devices: {num_devices}")
+        print(f"  - Batch size: {batch_size}")
+        print(f"  - Should apply DP: {should_apply_dp}")
+        
+        if should_apply_dp:
+            try:
                 sorted_devices = sorted(available_devices, key=lambda d: d.id)
                 aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 pspec = P('data', None)
@@ -106,7 +109,10 @@ class QWen3MoeAttention(nnx.Module):
             except Exception as e:
                 print(f"  - Failed to apply DP constraint: {e}, continuing without constraint")
         else:
-            print(f"  - Single device environment, skipping DP sharding")
+            if num_devices <= 1:
+                print(f"  - Single device environment, skipping DP sharding")
+            else:
+                print(f"  - Batch size ({batch_size}) < devices ({num_devices}), skipping DP sharding")
         
         if hasattr(self.c_attn, 'weight'):
             c_attn_weight = self.c_attn.weight
@@ -117,7 +123,7 @@ class QWen3MoeAttention(nnx.Module):
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         
-        if is_multi_device:
+        if should_apply_dp:
             try:
                 aligned_mesh = Mesh(sorted_devices, axis_names=('data',))
                 pspec = P('data', None)
@@ -133,7 +139,7 @@ class QWen3MoeAttention(nnx.Module):
         print(f"[DP Debug Layer {self.layer_id}] DP attention completed")
         return output
     
-    #@nnx.jit
+    @nnx.jit
     def _proj_qkv(self, positions, hidden_states):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
