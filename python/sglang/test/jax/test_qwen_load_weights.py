@@ -114,7 +114,8 @@ class TestQWenLoadWeights(CustomTestCase):
             layer_num=model_config.num_hidden_layers,
             dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
             max_seq_len=1024,
-            max_batch_size=20
+            max_batch_size=20,
+            mesh=self.mesh,
         )
         # batch size
         batch_size = len(actual_seq_lens)
@@ -130,9 +131,6 @@ class TestQWenLoadWeights(CustomTestCase):
             seq_lens=seq_lens,
             positions=positions_array,
             extend_start_loc=extend_start_loc,
-            total_tokens=len(input_ids_array),
-            sequences=texts.copy(),
-            prefix_str=texts.copy(),
             token_to_kv_pool=kv_cache,
         )
 
@@ -354,12 +352,6 @@ class TestQWenLoadWeights(CustomTestCase):
                 [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx + 1]], axis=0))
             cache_start_loc += seq_len
 
-            if forward_batch.forward_mode == ForwardMode.DECODE:
-                # update prefix
-                forward_batch.prefix_str[batch_idx] = forward_batch.sequences[batch_idx]
-
-            # update sequences
-            forward_batch.sequences[batch_idx] = forward_batch.prefix_str[batch_idx] + decoded_token
             print(
                 f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
 
@@ -375,8 +367,6 @@ class TestQWenLoadWeights(CustomTestCase):
             [seq_len - 1 for seq_len in new_seq_lens], dtype=jnp.int32)
         # update input ids
         forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
-        # update total tokens
-        forward_batch.total_tokens = len(new_input_ids)
         # update forward mode
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE
