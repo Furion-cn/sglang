@@ -119,7 +119,7 @@ class QWen3MoeAttention(nnx.Module):
             print(f"  - c_attn weight shape: {c_attn_weight.shape}")
             print(f"  - c_attn weight sharding: {c_attn_weight.sharding}")
         
-        q, k, v = self._proj_qkv(positions, hidden_states, self.q_size, self.kv_size, self.head_dim)
+        q, k, v = self._proj_qkv(positions, hidden_states)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         
@@ -139,16 +139,15 @@ class QWen3MoeAttention(nnx.Module):
         print(f"[DP Debug Layer {self.layer_id}] DP attention completed")
         return output
     
-    @nnx.jit(static_argnames=['q_size', 'kv_size', 'head_dim'])
-    def _proj_qkv(self, positions, hidden_states, q_size, kv_size, head_dim):
+    def _proj_qkv(self, positions, hidden_states):
         qkv, _ = self.c_attn(hidden_states)
-        q, k, v = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
+        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
 
-        q_by_head = q.reshape(-1, head_dim)
+        q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.reshape(q.shape)
 
-        k_by_head = k.reshape(-1, head_dim)
+        k_by_head = k.reshape(-1, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.reshape(k.shape)
 
