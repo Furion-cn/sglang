@@ -3,6 +3,7 @@ from sglang.srt.jax.layers.logits_processor import LogitsProcessor
 from flax import nnx
 from jax import numpy as jnp
 from jax import jax
+from jax.sharding import PartitionSpec as P
 
 from transformers import PretrainedConfig
 from sglang.srt.jax.layers.layernorm import RMSNorm
@@ -18,7 +19,7 @@ from sglang.srt.jax.utils import (
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
-from jax.sharding import Mesh, PartitionSpec as P
+from jax.sharding import Mesh
 from jax.experimental.shard_map import shard_map
 import numpy as np
 
@@ -91,8 +92,8 @@ class QWen3MoeAttention(nnx.Module):
         hidden_states = jax.lax.with_sharding_constraint(hidden_states, pspec)
         print(f"  - Input sharding after: {hidden_states.sharding}")
         
-        if hasattr(self.c_attn, 'kernel'):
-            c_attn_weight = self.c_attn.kernel
+        if hasattr(self.c_attn, 'weight'):
+            c_attn_weight = self.c_attn.weight
             print(f"  - c_attn weight shape: {c_attn_weight.shape}")
             print(f"  - c_attn weight sharding: {c_attn_weight.sharding}")
         
@@ -170,8 +171,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 self.expert_mesh = config.expert_mesh
             else:
                 devices = jax.devices()
-                config.expert_mesh = Mesh(devices, axis_names=('expert',))
-                self.expert_mesh = config.expert_mesh
+                self.expert_mesh = Mesh(devices, ('expert',))
                 
             
             if 'expert' not in self.expert_mesh.axis_names:
@@ -248,8 +248,17 @@ class QWen3MoeDecoderLayer(nnx.Module):
             router_logits = self.moe_gate(hidden_states)            
             global_tracer.print(router_logits, f"gate_final_output", f"moe_gate_layer_id_{self.layer_id}")
             
-            mlp_output = self.mlp(hidden_states, router_logits=router_logits)
+            print(f"[MoE Layer {self.layer_id}] Before MoE - hidden_states sharding: {hidden_states.sharding}")
+            hidden_states_for_moe = jax.lax.with_sharding_constraint(hidden_states, P(None))
+            router_logits_for_moe = jax.lax.with_sharding_constraint(router_logits, P(None))
+            print(f"[MoE Layer {self.layer_id}] After constraint - hidden_states sharding: {hidden_states_for_moe.sharding}")
+            
+            mlp_output = self.mlp(hidden_states_for_moe, router_logits=router_logits_for_moe)
             global_tracer.print(mlp_output, f"moe_output", f"moe_decoder_layer_id_{self.layer_id}")
+            
+            print(f"[MoE Layer {self.layer_id}] MoE output sharding: {mlp_output.sharding}")
+            mlp_output = jax.lax.with_sharding_constraint(mlp_output, P('data', None))
+            print(f"[MoE Layer {self.layer_id}] After DP constraint - output sharding: {mlp_output.sharding}")
                         
             hidden_states = mlp_output
         else:
