@@ -143,27 +143,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
             num_experts = getattr(config, 'num_experts', 128)
             num_experts_per_tok = getattr(config, 'num_experts_per_tok', 8)
             moe_intermediate_size = getattr(config, 'moe_intermediate_size', 768)
-            
-            if hasattr(config, 'expert_mesh') and config.expert_mesh is not None:
-                self.expert_mesh = config.expert_mesh
-            else:
-                devices = jax.devices()
-                config.expert_mesh = Mesh(devices, axis_names=('expert',))
-                self.expert_mesh = config.expert_mesh
-                
-            
-            if 'expert' not in self.expert_mesh.axis_names:
-                raise ValueError(f"expert_mesh must contain 'expert' axis, current axes: {self.expert_mesh.axis_names}")
-                
-            expert_parallel_size = self.expert_mesh.shape['expert']
-            
-            if num_experts % expert_parallel_size != 0:
-                raise ValueError(
-                    f"expert number ({num_experts}) must be divisible by expert parallel size ({expert_parallel_size})."
-                    f"suggest to adjust expert number to be a multiple of {expert_parallel_size},"
-                    f"or adjust device number."
-                )
-            
+            expert_parallel_size = self.mesh.shape.get('data', 1) * self.mesh.shape.get('tensor', 1)
             self.moe_gate = GateLogit(
                 input_size=config.hidden_size,
                 features=num_experts,
@@ -179,9 +159,9 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 num_experts=num_experts,
                 num_experts_per_tok=num_experts_per_tok,
                 intermediate_dim=moe_intermediate_size,
+                expert_parallel_size=expert_parallel_size,
                 weight_dtype=jnp.bfloat16,
                 dtype=jnp.bfloat16,
-                expert_axis_name='expert',
                 layer_id=layer_id,
                 rngs=rngs,
             )
@@ -307,7 +287,10 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 f"Missing weights for parameters: {sorted(missing_paths)}")
 
         update_state_recursive(model_state, flat_weights)
-        self._apply_sharding_constraints_with_mixed_meshes(model_state)
+        pspecs = nnx.get_partition_spec(model_state)
+        pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
+        nnx.update(self, pstate)
+        # self._apply_sharding_constraints_with_mixed_meshes(model_state)
 
     def _apply_sharding_constraints_with_mixed_meshes(self, model_state):
         import jax

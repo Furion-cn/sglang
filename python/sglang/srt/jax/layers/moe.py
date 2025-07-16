@@ -107,10 +107,10 @@ class Qwen3MoE(nnx.Module):
                  config,
                  num_experts: int,
                  num_experts_per_tok: int,
+                 expert_parallel_size: int,
                  intermediate_dim: int = 2048,
                  weight_dtype: jnp.dtype = jnp.bfloat16,
                  dtype: jnp.dtype = jnp.bfloat16,
-                 expert_axis_name: str = 'expert',
                  layer_id: int = 0,
                  rngs: nnx.Rngs = None):
         
@@ -120,21 +120,20 @@ class Qwen3MoE(nnx.Module):
         self.intermediate_dim = intermediate_dim
         self.weight_dtype = weight_dtype
         self.dtype = dtype
-        self.expert_axis_name = expert_axis_name
         self.layer_id = layer_id
+        self.expert_parallel_size = expert_parallel_size
         
         # Mesh setup
-        self.mesh = getattr(config, 'expert_mesh', None)
+        self.mesh = getattr(config, 'mesh', None)
         if self.mesh is None:
-            raise ValueError("Need expert_mesh in config")
+            raise ValueError("Need mesh in config")
         
-        self.expert_parallelism = self.mesh.shape.get(expert_axis_name, 1)
-        if num_experts % self.expert_parallelism != 0:
-            raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallelism({self.expert_parallelism})")
+        if num_experts % self.expert_parallel_size != 0:
+            raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallelism({self.expert_parallel_size})")
         
-        self.experts_per_device = num_experts // self.expert_parallelism
+        self.experts_per_device = num_experts // self.expert_parallel_size
         
-        expert_kernel_axes = (expert_axis_name, None, None)
+        expert_kernel_axes = (('data', 'tensor'), None, None)
         
         self.wi_0 = nnx.Param(
             nnx.with_partitioning(
@@ -271,9 +270,9 @@ class Qwen3MoE(nnx.Module):
             in_specs=(
                 P(None),                     # hidden_states  
                 P(None),                     # router_logits
-                P(self.expert_axis_name, None, None),  # w0_weights
-                P(self.expert_axis_name, None, None),  # w1_weights  
-                P(self.expert_axis_name, None, None),  # wo_weights
+                P(('data', 'tensor'), None, None),  # w0_weights
+                P(('data', 'tensor'), None, None),  # w1_weights  
+                P(('data', 'tensor'), None, None),  # wo_weights
             ),
             out_specs=P(None),
             check_rep=False,
