@@ -41,7 +41,6 @@ class LinearBase(nnx.Module):
                 rngs.params(), (input_size, output_size), params_dtype
             )
         )
-        jax.debug.visualize_array_sharding(self.weight.value)
         if use_bias:
             self.bias = nnx.Param(
                 nnx.with_partitioning(nnx.initializers.zeros_init(), (kernel_axes[-1],))(
@@ -52,7 +51,6 @@ class LinearBase(nnx.Module):
             self.bias = None
 
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, Optional[jax.Array]]:
-        jax.debug.visualize_array_sharding(self.weight.value)
         """Forward pass of the linear layer."""
         bias = self.bias if not self.skip_bias_add else None
         # Access the underlying JAX array using .value property
