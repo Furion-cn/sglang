@@ -51,7 +51,6 @@ class QWen3MoeAttention(nnx.Module):
             kernel_axes=(None, "tensor"),
             rngs=rngs,
         )
-        jax.debug.print("{c_attn_type}", c_attn_type=type(self.c_attn.weight))
         self.c_proj = LinearBase(
             input_size=num_heads * self.head_dim,
             output_size=hidden_size,
