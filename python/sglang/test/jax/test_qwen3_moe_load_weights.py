@@ -282,7 +282,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
-                    for i in range(3):  # Reduced iterations for MoE testing
+                    for i in range(10):  # Reduced iterations for MoE testing
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
@@ -408,51 +408,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             forward_batch.forward_mode = ForwardMode.DECODE
             
         return complete_sequences
-
-    def update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer):
-        # update out cache loc
-        out_cache_start_loc = jnp.max(forward_batch.cache_loc) + 1
-        forward_batch.out_cache_loc = jnp.arange(
-            out_cache_start_loc, out_cache_start_loc + forward_batch.batch_size, dtype=jnp.int32)
-            
-        cache_start_loc = 0
-        new_input_ids = []
-        new_seq_lens = []
-        new_cache_loc_list = []
-        for batch_idx, seq_len in enumerate(forward_batch.seq_lens):
-            new_seq_len = seq_len + 1
-            current_token_id = int(next_token_ids[batch_idx, 0])
-            new_input_ids.append(current_token_id)
-            new_seq_lens.append(new_seq_len)
-            decoded_token = tokenizer.decode(
-                [current_token_id])
-            
-            # update cache loc
-            old_cache_loc = forward_batch.cache_loc[
-                cache_start_loc:cache_start_loc + seq_len]
-            new_cache_loc_list.append(jnp.concatenate(
-                [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
-            cache_start_loc += seq_len
-            
-            print(
-                f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
-        
-        # update cache loc
-        forward_batch.cache_loc = jnp.concatenate(new_cache_loc_list, axis=0)
-        # update seq lens
-        forward_batch.seq_lens = jnp.array(new_seq_lens, dtype=jnp.int32)
-        # update extend start loc
-        forward_batch.extend_start_loc = jnp.cumsum(
-            jnp.concatenate([jnp.array([0]), forward_batch.seq_lens[:-1]]))
-        # update positions
-        forward_batch.positions = jnp.array(
-            [seq_len - 1 for seq_len in new_seq_lens], dtype=jnp.int32)
-        # update input ids
-        forward_batch.input_ids = jnp.array(new_input_ids, dtype=jnp.int32)
-
-        # update forward mode
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
-            forward_batch.forward_mode = ForwardMode.DECODE
 
 if __name__ == '__main__':
     unittest.main()
