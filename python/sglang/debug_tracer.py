@@ -492,27 +492,49 @@ class UnifiedDebugTracer:
     
     def _compute_jax_stats(self, tensor: jnp.ndarray, name: str, stage: str, extra_info: str) -> Dict[str, Any]:
         try:
-            # 安全的标准差计算，避免单元素时的NaN
-            # 统一使用总体标准差(ddof=0)以与PyTorch保持一致
-            if tensor.size > 1:
-                std_val = float(jnp.std(tensor, ddof=0).item())
-            else:
-                std_val = 0.0
+            try:
+                test_scalar = jnp.array(1.0)
+                _ = test_scalar.item()
+                can_concretize = True
+            except Exception:
+                can_concretize = False
             
-            stats = {
-                'framework': 'jax',
-                'name': name,
-                'stage': stage,
-                'shape': tuple(tensor.shape),
-                'dtype': str(tensor.dtype),
-                'min': float(jnp.min(tensor).item()),
-                'max': float(jnp.max(tensor).item()),
-                'mean': float(jnp.mean(tensor).item()),
-                'std': std_val,
-                'has_nan': bool(jnp.any(jnp.isnan(tensor)).item()),
-                'has_inf': bool(jnp.any(jnp.isinf(tensor)).item()),
-                'extra_info': extra_info
-            }
+            if can_concretize:
+                if tensor.size > 1:
+                    std_val = float(jnp.std(tensor, ddof=0).item())
+                else:
+                    std_val = 0.0
+                
+                stats = {
+                    'framework': 'jax',
+                    'name': name,
+                    'stage': stage,
+                    'shape': tuple(tensor.shape),
+                    'dtype': str(tensor.dtype),
+                    'min': float(jnp.min(tensor).item()),
+                    'max': float(jnp.max(tensor).item()),
+                    'mean': float(jnp.mean(tensor).item()),
+                    'std': std_val,
+                    'has_nan': bool(jnp.any(jnp.isnan(tensor)).item()),
+                    'has_inf': bool(jnp.any(jnp.isinf(tensor)).item()),
+                    'extra_info': extra_info
+                }
+            else:
+                stats = {
+                    'framework': 'jax',
+                    'name': name,
+                    'stage': stage,
+                    'shape': tuple(tensor.shape),
+                    'dtype': str(tensor.dtype),
+                    'min': 'traced',
+                    'max': 'traced', 
+                    'mean': 'traced',
+                    'std': 'traced',
+                    'has_nan': 'traced',
+                    'has_inf': 'traced',
+                    'extra_info': extra_info,
+                    'tracing_context': True
+                }
             
             # 改进的layer_id提取逻辑
             layer_id = 'unknown'
@@ -560,7 +582,7 @@ class UnifiedDebugTracer:
             
             stats['layer_id'] = layer_id
             stats['module_type'] = module_type
-            
+
         except Exception as e:
             stats = {
                 'framework': 'jax',
@@ -579,6 +601,16 @@ class UnifiedDebugTracer:
     def _print_stats(self, stats: Dict[str, Any], key: str):
         if 'error' in stats:
             print(f"[{stats['stage']}] {stats['name']}: shape={stats['shape']}, dtype={stats['dtype']}, error={stats['error']}")
+        elif stats.get('tracing_context', False):
+            # 在JAX追踪上下文中的特殊处理
+            framework = stats['framework'].upper()
+            extra = f" {stats.get('extra_info', '')}" if stats.get('extra_info') else ""
+            step_info = ""
+            if 'forward_step' in stats:
+                step_info = f"[Step {stats['forward_step']}]"
+            
+            print(f"{step_info}[{framework}][{stats['stage']}] {stats['name']}: shape={stats['shape']}, "
+                  f"dtype={stats['dtype']}, TRACED_CONTEXT{extra}")
         else:
             framework = stats['framework'].upper()
             extra = f" {stats.get('extra_info', '')}" if stats.get('extra_info') else ""
