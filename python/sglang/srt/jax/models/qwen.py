@@ -71,7 +71,6 @@ class QWenMLP(nnx.Module):
         return _mlp_forward(hidden_states, self.w1.weight.value, self.w2.weight.value, self.c_proj.weight.value)
 
 
-#@jax.jit
 def _mlp_forward(hidden_states: jax.Array, w1: jax.Array, w2: jax.Array, c_proj: jax.Array):
     a1 = jnp.dot(hidden_states, w1)
     a2 = jnp.dot(hidden_states, w2)
@@ -90,7 +89,10 @@ class QWenAttention(nnx.Module):
                  rope_theta: float = 10000,
                  rope_scaling: Optional[Dict[str, Any]] = None,
                  layer_id: int = 0,
-                 rngs: nnx.Rngs = None):
+                 rngs: nnx.Rngs = None,
+                 max_seq_len:int=None,
+                 max_batch_size:int=None,
+                 ):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         head_size = hidden_size // num_heads
@@ -124,7 +126,9 @@ class QWenAttention(nnx.Module):
         self.attn = Attention(
             num_heads=num_heads,
             scale=head_size**-0.5,
-            rngs=rngs
+            rngs=rngs,
+            max_seq_len=max_seq_len,
+            max_batch_size= max_batch_size,
         )
 
     @trace_function(stage="ATTENTION", include_args=False, include_output=True)
@@ -149,7 +153,10 @@ class QWenBlock(nnx.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  layer_id: int = 0,
-                 rngs: nnx.Rngs = None):
+                 rngs: nnx.Rngs = None,
+                 max_seq_len:int=None,
+                 max_batch_size:int=None,
+                 ):
         self.layer_id = layer_id
 
         self.ln_1 = RMSNorm(
@@ -168,6 +175,8 @@ class QWenBlock(nnx.Module):
             rope_scaling=rope_scaling,
             layer_id=layer_id,
             rngs=rngs,
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
         )
 
         self.ln_2 = RMSNorm(
@@ -223,7 +232,10 @@ class QWenModel(nnx.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 rngs: nnx.Rngs = None):
+                 rngs: nnx.Rngs = None,
+                 max_seq_len:int=None,
+                 max_batch_size:int=None,
+                 ):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
 
         self.embed_tokens = Embed(
@@ -237,6 +249,8 @@ class QWenModel(nnx.Module):
                 config,
                 layer_id=i,
                 rngs=rngs,
+                max_seq_len=max_seq_len,
+                max_batch_size=max_batch_size,
             )
             for i in range(config.num_hidden_layers)
         ]
@@ -268,7 +282,6 @@ class QWenModel(nnx.Module):
         global_tracer.print(
             hidden_states, "RMSNorm_final_output", "rmsnorm_final")
         
-
         return hidden_states,forward_batch
 
 
@@ -277,9 +290,12 @@ class QWenLMHeadJaxModel(nnx.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 rngs: nnx.Rngs = None):
+                 rngs: nnx.Rngs = None,
+                 max_seq_len:int=None,
+                 max_batch_size:int=None,
+                 ):
         self.config = config
-        self.transformer = QWenModel(config, rngs)
+        self.transformer = QWenModel(config, rngs,max_seq_len,max_batch_size)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLMHead(
             vocab_size, config.hidden_size, rngs=rngs)
@@ -307,7 +323,7 @@ class QWenLMHeadJaxModel(nnx.Module):
         pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
         nnx.update(self, pstate)
     
-    #@partial(jax.jit,static_argnames=('self','forward_mode','batch_size'))
+    @partial(jax.jit,static_argnames=('self','forward_mode','batch_size'))
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
@@ -327,7 +343,6 @@ class QWenLMHeadJaxModel(nnx.Module):
             forward_mode,
             batch_size,
         )
-
 
         if global_tracer.is_session_active():
             input_data = {

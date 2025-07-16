@@ -67,6 +67,11 @@ def _logits_processor_forward_extend(
     # Shape: [batch_size, hidden_size]
     last_hidden_states = hidden_states[last_token_indices]
 
+    #print(f"extend_start_loc.shape: {extend_start_loc.shape}, extend_start_loc: {extend_start_loc}") 
+    #print(f"seq_lens.shape: {seq_lens.shape}, seq_lens: {seq_lens}") 
+    #print(f"last_token_indices.shape: {last_token_indices.shape}, last_token_indices: {last_token_indices}") 
+    #print(f"last_hidden_states.shape: {last_hidden_states.shape}, last_hidden_states: {last_hidden_states}")
+
     return _lm_head_forward(
         last_hidden_states,
         embedding,
@@ -106,6 +111,8 @@ def _lm_head_forward(
     last_hidden_states, embedding = promote_dtype(
             (last_hidden_states, embedding), dtype=dtype
         )
+    #print(f"[_lm_head_forward] last_hidden_states.shape: {last_hidden_states.shape}, last_hidden_states: {last_hidden_states}")
+    #print(f"[_lm_head_forward] embedding.T.shape: {embedding.T.shape}, embedding.T: {embedding.T},")
     logits=jnp.dot(last_hidden_states, embedding.T)
     logits = logits[:,
                     :vocab_size] if logits.ndim > 1 else logits[:vocab_size]
