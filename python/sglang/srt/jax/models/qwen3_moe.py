@@ -140,6 +140,10 @@ class QWen3MoeDecoderLayer(nnx.Module):
             self.is_moe_layer = False
             self.moe_gate = None
         else:
+            self.mesh = getattr(config, 'mesh', None)
+            if self.mesh is None:
+                raise ValueError("Need mesh in config")      
+                  
             num_experts = getattr(config, 'num_experts', 128)
             num_experts_per_tok = getattr(config, 'num_experts_per_tok', 8)
             moe_intermediate_size = getattr(config, 'moe_intermediate_size', 768)
@@ -159,6 +163,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 num_experts=num_experts,
                 num_experts_per_tok=num_experts_per_tok,
                 intermediate_dim=moe_intermediate_size,
+                mesh=self.mesh,
                 expert_parallel_size=expert_parallel_size,
                 weight_dtype=jnp.bfloat16,
                 dtype=jnp.bfloat16,

@@ -108,6 +108,7 @@ class Qwen3MoE(nnx.Module):
                  num_experts: int,
                  num_experts_per_tok: int,
                  expert_parallel_size: int,
+                 mesh: Mesh,
                  intermediate_dim: int = 2048,
                  weight_dtype: jnp.dtype = jnp.bfloat16,
                  dtype: jnp.dtype = jnp.bfloat16,
@@ -122,12 +123,7 @@ class Qwen3MoE(nnx.Module):
         self.dtype = dtype
         self.layer_id = layer_id
         self.expert_parallel_size = expert_parallel_size
-        
-        # Mesh setup
-        self.mesh = getattr(config, 'mesh', None)
-        if self.mesh is None:
-            raise ValueError("Need mesh in config")
-        
+        self.mesh = mesh
         if num_experts % self.expert_parallel_size != 0:
             raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallelism({self.expert_parallel_size})")
         
