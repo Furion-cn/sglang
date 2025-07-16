@@ -64,7 +64,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             dcn_parallelism=[1, 1, 1, 1]
         )
         
-        self.expert_mesh = Mesh(devices, axis_names=('expert',))
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig("cpu")
         self.jax_loader = JAXModelLoader(self.load_config)
@@ -204,16 +203,13 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 model_override_args="{}"
             )
             
-            def custom_load_model_with_expert_mesh(*args, **kwargs):
+            def custom_load_model_with_mesh(*args, **kwargs):
                 mesh = kwargs.get('mesh')
                 model_config = kwargs.get('model_config')
                 
                 with mesh:
                     model_config.hf_config.mesh = mesh
-                    model_config.hf_config.expert_mesh = self.expert_mesh
-                    
-                    print(f"设置主mesh: {mesh}")
-                    print(f"设置expert mesh: {self.expert_mesh}")
+                    print(f"设置 mesh: {mesh}")
                     
                     model = self.jax_loader._initialize_jax_model(model_config)
                     pytree = self.jax_loader._get_jax_pytree(model_config)
@@ -226,7 +222,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 print("\n🔄 Loading Qwen3 MoE model with JAXModelLoader...")
                 
-                model = custom_load_model_with_expert_mesh(
+                model = custom_load_model_with_mesh(
                     model_config=model_config,
                     device_config=self.device_config,
                     mesh=self.mesh,

@@ -209,7 +209,7 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
     
-    #@nnx.jit
+    @nnx.jit
     def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):        
         def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
             data_index = jax.lax.axis_index('data')
