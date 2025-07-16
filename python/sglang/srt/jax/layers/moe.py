@@ -128,11 +128,6 @@ class Qwen3MoE(nnx.Module):
             raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallel_size ({self.expert_parallel_size})")
         
         self.experts_per_device = num_experts // self.expert_parallel_size
-        # 从data和tensor轴计算expert shard ID
-        data_index = jax.lax.axis_index('data')
-        tensor_index = jax.lax.axis_index('tensor') 
-        tensor_size = jax.lax.axis_size('tensor')
-        self.expert_shard_id = data_index * tensor_size + tensor_index
         expert_kernel_axes = (('data', 'tensor'), None, None)
         
         self.wi_0 = nnx.Param(
@@ -217,6 +212,11 @@ class Qwen3MoE(nnx.Module):
     #@nnx.jit
     def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):        
         def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
+            data_index = jax.lax.axis_index('data')
+            tensor_index = jax.lax.axis_index('tensor') 
+            tensor_size = jax.lax.axis_size('tensor')
+            expert_shard_id = data_index * tensor_size + tensor_index
+            
             # topk
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.bfloat16), axis=-1).astype(self.dtype)
@@ -238,7 +238,7 @@ class Qwen3MoE(nnx.Module):
             # EP Dispatch
             if self.expert_parallel_size > 1:
                 x, local_group_sizes, selected_experts = self._expert_all_to_all_dispatch(
-                    x, group_sizes, selected_experts, self.expert_shard_id
+                    x, group_sizes, selected_experts, expert_shard_id
                 )
             else:
                 local_group_sizes = group_sizes
@@ -252,7 +252,7 @@ class Qwen3MoE(nnx.Module):
             if self.expert_parallel_size > 1:
                 original_size = total_tokens * self.num_experts_per_tok
                 intermediate_output = self._expert_all_to_all_collect(
-                    intermediate_output, group_sizes, self.expert_shard_id, original_size
+                    intermediate_output, group_sizes, expert_shard_id, original_size
                 )
             
             # Unpermute
@@ -434,7 +434,7 @@ class Qwen3MoE(nnx.Module):
         
         communicated_data = jax.lax.ragged_all_to_all(
             data, output_shape, input_offsets, send_sizes,
-            output_offsets, recv_sizes, axis_name=self.expert_axis_name,
+            output_offsets, recv_sizes, axis_name=('data', 'tensor'),
         )
         
         x, local_group_sizes, selected_experts = self._local_permute_for_ragged(
@@ -485,7 +485,7 @@ class Qwen3MoE(nnx.Module):
         # Sum the buffers from all devices. Since each buffer is zero outside its
         # assigned slice, this sum is equivalent to a concatenation.
         result = jax.lax.psum(
-            local_result_buffer, axis_name=self.expert_axis_name
+            local_result_buffer, axis_name=('data', 'tensor')
         )
         
         return result
@@ -508,7 +508,7 @@ class Qwen3MoE(nnx.Module):
         # 执行ragged_all_to_all
         result = jax.lax.ragged_all_to_all(
             data, output_shape, input_offsets, send_sizes,
-            output_offsets, recv_sizes, axis_name=self.expert_axis_name,
+            output_offsets, recv_sizes, axis_name=('data', 'tensor'),
         )
         
         global_tracer.print(result, f"ragged_collect_output", f"moe_combine_layer_id_{self.layer_id}")
