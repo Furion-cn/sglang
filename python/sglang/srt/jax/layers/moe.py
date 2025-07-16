@@ -128,7 +128,11 @@ class Qwen3MoE(nnx.Module):
             raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallel_size ({self.expert_parallel_size})")
         
         self.experts_per_device = num_experts // self.expert_parallel_size
-        
+        # 从data和tensor轴计算expert shard ID
+        data_index = jax.lax.axis_index('data')
+        tensor_index = jax.lax.axis_index('tensor') 
+        tensor_size = jax.lax.axis_size('tensor')
+        self.expert_shard_id = data_index * tensor_size + tensor_index
         expert_kernel_axes = (('data', 'tensor'), None, None)
         
         self.wi_0 = nnx.Param(
@@ -213,8 +217,6 @@ class Qwen3MoE(nnx.Module):
     #@nnx.jit
     def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):        
         def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
-            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-            
             # topk
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
             top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.bfloat16), axis=-1).astype(self.dtype)
@@ -234,10 +236,9 @@ class Qwen3MoE(nnx.Module):
             )
             
             # EP Dispatch
-            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
             if self.expert_parallel_size > 1:
                 x, local_group_sizes, selected_experts = self._expert_all_to_all_dispatch(
-                    x, group_sizes, selected_experts, expert_shard_id
+                    x, group_sizes, selected_experts, self.expert_shard_id
                 )
             else:
                 local_group_sizes = group_sizes
@@ -251,7 +252,7 @@ class Qwen3MoE(nnx.Module):
             if self.expert_parallel_size > 1:
                 original_size = total_tokens * self.num_experts_per_tok
                 intermediate_output = self._expert_all_to_all_collect(
-                    intermediate_output, group_sizes, expert_shard_id, original_size
+                    intermediate_output, group_sizes, self.expert_shard_id, original_size
                 )
             
             # Unpermute
