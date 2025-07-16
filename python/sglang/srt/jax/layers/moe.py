@@ -107,10 +107,11 @@ class Qwen3MoE(nnx.Module):
                  config,
                  num_experts: int,
                  num_experts_per_tok: int,
+                 expert_parallel_size: int,
+                 mesh: Mesh,
                  intermediate_dim: int = 2048,
                  weight_dtype: jnp.dtype = jnp.bfloat16,
                  dtype: jnp.dtype = jnp.bfloat16,
-                 expert_axis_name: str = 'expert',
                  layer_id: int = 0,
                  rngs: nnx.Rngs = None):
         
@@ -120,21 +121,14 @@ class Qwen3MoE(nnx.Module):
         self.intermediate_dim = intermediate_dim
         self.weight_dtype = weight_dtype
         self.dtype = dtype
-        self.expert_axis_name = expert_axis_name
         self.layer_id = layer_id
+        self.expert_parallel_size = expert_parallel_size
+        self.mesh = mesh
+        if num_experts % self.expert_parallel_size != 0:
+            raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallel_size ({self.expert_parallel_size})")
         
-        # Mesh setup
-        self.mesh = getattr(config, 'expert_mesh', None)
-        if self.mesh is None:
-            raise ValueError("Need expert_mesh in config")
-        
-        self.expert_parallelism = self.mesh.shape.get(expert_axis_name, 1)
-        if num_experts % self.expert_parallelism != 0:
-            raise ValueError(f"num_experts({num_experts}) must be divisible by expert_parallelism({self.expert_parallelism})")
-        
-        self.experts_per_device = num_experts // self.expert_parallelism
-        
-        expert_kernel_axes = (expert_axis_name, None, None)
+        self.experts_per_device = num_experts // self.expert_parallel_size
+        expert_kernel_axes = (('data', 'tensor'), None, None)
         
         self.wi_0 = nnx.Param(
             nnx.with_partitioning(
@@ -207,7 +201,7 @@ class Qwen3MoE(nnx.Module):
         if router_logits.shape[0] != total_tokens:
             raise ValueError(f"router_logits shape {router_logits.shape} doesn't match inputs shape {inputs.shape}")
         
-        if self.expert_parallelism == 1:
+        if self.expert_parallel_size == 1:
             output = self._single_device_forward(inputs, router_logits)
         else:
             output = self._expert_parallel_forward_with_shard_map(inputs, router_logits)
@@ -215,10 +209,13 @@ class Qwen3MoE(nnx.Module):
         global_tracer.print(output, f"moe_final_output", f"moe_sparse_layer_id_{self.layer_id}")
         return output
     
-    #@nnx.jit
+    @nnx.jit
     def _expert_parallel_forward_with_shard_map(self, inputs, router_logits):        
         def _internal_moe_computation(hidden_states, router_logits, w0_weights, w1_weights, wo_weights):
-            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
+            data_index = jax.lax.axis_index('data')
+            tensor_index = jax.lax.axis_index('tensor') 
+            tensor_size = jax.lax.axis_size('tensor')
+            expert_shard_id = data_index * tensor_size + tensor_index
             
             # topk
             top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.num_experts_per_tok)
@@ -239,8 +236,7 @@ class Qwen3MoE(nnx.Module):
             )
             
             # EP Dispatch
-            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-            if self.expert_parallelism > 1:
+            if self.expert_parallel_size > 1:
                 x, local_group_sizes, selected_experts = self._expert_all_to_all_dispatch(
                     x, group_sizes, selected_experts, expert_shard_id
                 )
@@ -253,7 +249,7 @@ class Qwen3MoE(nnx.Module):
             )
             
             # EP Combine
-            if self.expert_parallelism > 1:
+            if self.expert_parallel_size > 1:
                 original_size = total_tokens * self.num_experts_per_tok
                 intermediate_output = self._expert_all_to_all_collect(
                     intermediate_output, group_sizes, expert_shard_id, original_size
@@ -271,9 +267,9 @@ class Qwen3MoE(nnx.Module):
             in_specs=(
                 P(None),                     # hidden_states  
                 P(None),                     # router_logits
-                P(self.expert_axis_name, None, None),  # w0_weights
-                P(self.expert_axis_name, None, None),  # w1_weights  
-                P(self.expert_axis_name, None, None),  # wo_weights
+                P(('data', 'tensor'), None, None),  # w0_weights
+                P(('data', 'tensor'), None, None),  # w1_weights  
+                P(('data', 'tensor'), None, None),  # wo_weights
             ),
             out_specs=P(None),
             check_rep=False,
@@ -426,19 +422,19 @@ class Qwen3MoE(nnx.Module):
     def _ragged_all_to_all_dispatch(self, data, global_group_sizes, sorted_experts, expert_shard_id):
         local_expert_size = self.experts_per_device
         reshaped_group_sizes = jnp.sum(
-            global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
+            global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1
         )
         
         input_offsets, send_sizes, output_offsets, recv_sizes = self._get_ragged_all_to_all_params(
             reshaped_group_sizes, expert_shard_id
         )
         
-        buffer_size = int(self.expert_parallelism * data.shape[0])
+        buffer_size = int(self.expert_parallel_size * data.shape[0])
         output_shape = jnp.zeros((buffer_size, data.shape[1]), dtype=data.dtype)
         
         communicated_data = jax.lax.ragged_all_to_all(
             data, output_shape, input_offsets, send_sizes,
-            output_offsets, recv_sizes, axis_name=self.expert_axis_name,
+            output_offsets, recv_sizes, axis_name=('data', 'tensor'),
         )
         
         x, local_group_sizes, selected_experts = self._local_permute_for_ragged(
@@ -458,7 +454,7 @@ class Qwen3MoE(nnx.Module):
         """
         # Calculate the number of tokens to be handled by each device.
         reshaped_group_sizes = global_group_sizes.reshape(
-            self.expert_parallelism, self.experts_per_device
+            self.expert_parallel_size, self.experts_per_device
         )
         tokens_per_device = jnp.sum(reshaped_group_sizes, axis=1)
 
@@ -489,7 +485,7 @@ class Qwen3MoE(nnx.Module):
         # Sum the buffers from all devices. Since each buffer is zero outside its
         # assigned slice, this sum is equivalent to a concatenation.
         result = jax.lax.psum(
-            local_result_buffer, axis_name=self.expert_axis_name
+            local_result_buffer, axis_name=('data', 'tensor')
         )
         
         return result
@@ -498,7 +494,7 @@ class Qwen3MoE(nnx.Module):
         """TPU/GPU: 使用ragged_all_to_all进行collection"""
         local_expert_size = self.experts_per_device
         reshaped_group_sizes = jnp.sum(
-            global_group_sizes.reshape(self.expert_parallelism, local_expert_size), axis=1
+            global_group_sizes.reshape(self.expert_parallel_size, local_expert_size), axis=1
         )
         
         # 计算ragged_all_to_all的参数（transpose版本用于collection）
@@ -512,18 +508,18 @@ class Qwen3MoE(nnx.Module):
         # 执行ragged_all_to_all
         result = jax.lax.ragged_all_to_all(
             data, output_shape, input_offsets, send_sizes,
-            output_offsets, recv_sizes, axis_name=self.expert_axis_name,
+            output_offsets, recv_sizes, axis_name=('data', 'tensor'),
         )
         
         global_tracer.print(result, f"ragged_collect_output", f"moe_combine_layer_id_{self.layer_id}")
         return result
     
     def _get_ragged_all_to_all_params(self, group_sizes, shard_id):
-        input_offsets = jnp.zeros(self.expert_parallelism, dtype=jnp.int32)
-        send_sizes = jnp.repeat(group_sizes[shard_id], self.expert_parallelism)
+        input_offsets = jnp.zeros(self.expert_parallel_size, dtype=jnp.int32)
+        send_sizes = jnp.repeat(group_sizes[shard_id], self.expert_parallel_size)
         
         output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(group_sizes[:-1])))[shard_id]
-        output_offsets = jnp.repeat(output_offset, self.expert_parallelism)
+        output_offsets = jnp.repeat(output_offset, self.expert_parallel_size)
         
         recv_sizes = group_sizes
         

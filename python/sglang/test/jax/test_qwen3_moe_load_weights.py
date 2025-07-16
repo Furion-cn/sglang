@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import jax
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,7 +64,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             dcn_parallelism=[1, 1, 1, 1]
         )
         
-        self.expert_mesh = Mesh(devices, axis_names=('expert',))
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig("cpu")
         self.jax_loader = JAXModelLoader(self.load_config)
@@ -203,16 +203,13 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 model_override_args="{}"
             )
             
-            def custom_load_model_with_expert_mesh(*args, **kwargs):
+            def custom_load_model_with_mesh(*args, **kwargs):
                 mesh = kwargs.get('mesh')
                 model_config = kwargs.get('model_config')
                 
                 with mesh:
                     model_config.hf_config.mesh = mesh
-                    model_config.hf_config.expert_mesh = self.expert_mesh
-                    
-                    print(f"设置主mesh: {mesh}")
-                    print(f"设置expert mesh: {self.expert_mesh}")
+                    print(f"设置 mesh: {mesh}")
                     
                     model = self.jax_loader._initialize_jax_model(model_config)
                     pytree = self.jax_loader._get_jax_pytree(model_config)
@@ -225,14 +222,13 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 print("\n🔄 Loading Qwen3 MoE model with JAXModelLoader...")
                 
-                model = custom_load_model_with_expert_mesh(
+                model = custom_load_model_with_mesh(
                     model_config=model_config,
                     device_config=self.device_config,
                     mesh=self.mesh,
                 )
 
                 print("✅ Qwen3 MoE model loaded successfully!")
-
                 self.assertIsInstance(model, Qwen3MoeForCausalLMJaxModel)
                 self.assertIsNotNone(model.config)
 
@@ -268,14 +264,25 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
                     model.config, input_texts, tokenizer)
 
+                # 初始化完整序列历史，用于累积生成的token
+                complete_sequences = []
+                for batch_idx in range(len(input_texts)):
+                    # 获取每个序列的初始token
+                    start_idx = sum(actual_seq_lens[:batch_idx])
+                    end_idx = start_idx + actual_seq_lens[batch_idx]
+                    initial_tokens = [int(token) for token in input_ids_array[start_idx:end_idx]]
+                    complete_sequences.append(initial_tokens)
+
                 print(f"Input text batch: {input_texts}")
                 print(f"Batch size: {len(input_texts)}")
                 print(f"Actual sequence lengths: {actual_seq_lens}")
                 print(f"Input tokens shape: {input_ids_array.shape}")
                 print(f"Input tokens: {input_ids_array}")
+                print(f"Initial complete sequences: {complete_sequences}")
+                
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
-                    for i in range(3):  # Reduced iterations for MoE testing
+                    for i in range(10):  # Reduced iterations for MoE testing
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
                                   forward_batch.positions, forward_batch)
@@ -295,25 +302,28 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                                 vocab_size=model.config.vocab_size,
                             ))
 
-                        self.update_forward_batch(
-                            forward_batch, next_token_ids, tokenizer)
+                        complete_sequences = self.update_forward_batch_with_sequences(
+                            forward_batch, next_token_ids, tokenizer, complete_sequences)
 
                 # Decode complete results for each sequence
                 print(f"\n=== Qwen3 MoE Complete Generation Results ===")
-                start_idx = 0
                 for batch_idx in range(len(input_texts)):
-                    # Extract tokens for each sequence from flattened array
-                    seq_len = actual_seq_lens[batch_idx]
-                    end_idx = start_idx + seq_len
-                    full_sequence = [int(token)
-                                     for token in input_ids_array[start_idx:end_idx]]
+                    full_sequence = complete_sequences[batch_idx]
                     decoded_full = tokenizer.decode(full_sequence)
+                    original_len = actual_seq_lens[batch_idx]
+                    original_tokens = full_sequence[:original_len]
+                    generated_tokens = full_sequence[original_len:]
+                    
+                    original_text = tokenizer.decode(original_tokens)
+                    generated_text = tokenizer.decode(generated_tokens) if generated_tokens else ""
+                    
                     print(f"Sequence {batch_idx}: {full_sequence}")
-                    print(f"Decoded text {batch_idx}: '{decoded_full}'")
-                    print(
-                        f"Original question {batch_idx}: '{input_texts[batch_idx]}'")
-                    print(f"Actual length {batch_idx}: {seq_len}")
-                    start_idx = end_idx
+                    print(f"Original tokens {batch_idx}: {original_tokens}")
+                    print(f"Generated tokens {batch_idx}: {generated_tokens}")
+                    print(f"Complete decoded text {batch_idx}: '{decoded_full}'")
+                    print(f"Original question {batch_idx}: '{original_text}'")
+                    print(f"Generated answer {batch_idx}: '{generated_text}'")
+                    print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
                     print()
 
                 print("\n🔴 Ending debug tracer session...")
@@ -351,7 +361,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
     def _batch_tokenize(self, input_text: List[str]) -> List[Sequence]:
         return [Sequence(self.tokenizer, text) for text in input_text]
 
-    def update_forward_batch(self, forward_batch: ForwardBatch, next_token_ids, tokenizer):
+    def update_forward_batch_with_sequences(self, forward_batch: ForwardBatch, next_token_ids, tokenizer, complete_sequences):
         # update out cache loc
         out_cache_start_loc = jnp.max(forward_batch.cache_loc) + 1
         forward_batch.out_cache_loc = jnp.arange(
@@ -361,13 +371,15 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         new_input_ids = []
         new_seq_lens = []
         new_cache_loc_list = []
+        
         for batch_idx, seq_len in enumerate(forward_batch.seq_lens):
             new_seq_len = seq_len + 1
             current_token_id = int(next_token_ids[batch_idx, 0])
             new_input_ids.append(current_token_id)
             new_seq_lens.append(new_seq_len)
-            decoded_token = tokenizer.decode(
-                [current_token_id])
+            decoded_token = tokenizer.decode([current_token_id])
+            
+            complete_sequences[batch_idx].append(current_token_id)
             
             # update cache loc
             old_cache_loc = forward_batch.cache_loc[
@@ -376,8 +388,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 [old_cache_loc, forward_batch.out_cache_loc[batch_idx:batch_idx+1]], axis=0))
             cache_start_loc += seq_len
             
-            print(
-                f"Batch {batch_idx}: token_id={current_token_id}, decoded={decoded_token}")
+            print(f"Batch {batch_idx}: token_id={current_token_id}, decoded='{decoded_token}'")
         
         # update cache loc
         forward_batch.cache_loc = jnp.concatenate(new_cache_loc_list, axis=0)
@@ -395,6 +406,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         # update forward mode
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE
+            
+        return complete_sequences
 
 if __name__ == '__main__':
     unittest.main()

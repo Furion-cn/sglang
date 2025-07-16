@@ -20,7 +20,6 @@ from sglang.srt.jax.models.qwen3 import Qwen3MLP
 from sglang.srt.jax.layers.moe import GateLogit, Qwen3MoE
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
-import numpy as np
 
 class QWen3MoeAttention(nnx.Module):
     def __init__(self,
@@ -85,7 +84,6 @@ class QWen3MoeAttention(nnx.Module):
         output, _ = self.c_proj(attn_output)
         return output
     
-    #@nnx.jit
     def _proj_qkv(self, positions, hidden_states):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
@@ -139,36 +137,20 @@ class QWen3MoeDecoderLayer(nnx.Module):
             self.is_moe_layer = False
             self.moe_gate = None
         else:
+            self.mesh = getattr(config, 'mesh', None)
+            if self.mesh is None:
+                raise ValueError("Need mesh in config")      
+                  
             num_experts = getattr(config, 'num_experts', 128)
             num_experts_per_tok = getattr(config, 'num_experts_per_tok', 8)
             moe_intermediate_size = getattr(config, 'moe_intermediate_size', 768)
-            
-            if hasattr(config, 'expert_mesh') and config.expert_mesh is not None:
-                self.expert_mesh = config.expert_mesh
-            else:
-                devices = jax.devices()
-                config.expert_mesh = Mesh(devices, axis_names=('expert',))
-                self.expert_mesh = config.expert_mesh
-                
-            
-            if 'expert' not in self.expert_mesh.axis_names:
-                raise ValueError(f"expert_mesh must contain 'expert' axis, current axes: {self.expert_mesh.axis_names}")
-                
-            expert_parallel_size = self.expert_mesh.shape['expert']
-            
-            if num_experts % expert_parallel_size != 0:
-                raise ValueError(
-                    f"expert number ({num_experts}) must be divisible by expert parallel size ({expert_parallel_size})."
-                    f"suggest to adjust expert number to be a multiple of {expert_parallel_size},"
-                    f"or adjust device number."
-                )
-            
+            expert_parallel_size = self.mesh.shape.get('data', 1) * self.mesh.shape.get('tensor', 1)
             self.moe_gate = GateLogit(
                 input_size=config.hidden_size,
                 features=num_experts,
                 model_name=getattr(config, 'model_name', 'qwen3_moe'),
                 use_bias=False,
-                kernel_axes=(None, 'expert'), 
+                kernel_axes=(None, ('data', 'tensor')), 
                 dtype=jnp.bfloat16,
                 layer_id=layer_id,
                 rngs=rngs
@@ -178,9 +160,10 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 num_experts=num_experts,
                 num_experts_per_tok=num_experts_per_tok,
                 intermediate_dim=moe_intermediate_size,
+                mesh=self.mesh,
+                expert_parallel_size=expert_parallel_size,
                 weight_dtype=jnp.bfloat16,
                 dtype=jnp.bfloat16,
-                expert_axis_name='expert',
                 layer_id=layer_id,
                 rngs=rngs,
             )
@@ -306,107 +289,9 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
                 f"Missing weights for parameters: {sorted(missing_paths)}")
 
         update_state_recursive(model_state, flat_weights)
-        self._apply_sharding_constraints_with_mixed_meshes(model_state)
-
-    def _apply_sharding_constraints_with_mixed_meshes(self, model_state):
-        import jax
-        from jax.sharding import PartitionSpec as P
-        
-        expert_mesh = getattr(self.config, 'expert_mesh', None)
-        
-        if expert_mesh is None:
-            pspecs = nnx.get_partition_spec(model_state)
-            pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
-            nnx.update(self, pstate)
-            return
-        
-        print(f"apply mix mesh constraint...")
-        print(f"Expert mesh: {expert_mesh}")
-        
         pspecs = nnx.get_partition_spec(model_state)
-        
-        moe_layer_ids = set()
-        for i, layer in enumerate(self.model.layers):
-            if hasattr(layer, 'is_moe_layer') and layer.is_moe_layer:
-                moe_layer_ids.add(i)
-        
-        print(f"MoE layer ids: {moe_layer_ids}")
-        
-        def is_moe_parameter(path):
-            for layer_id in moe_layer_ids:
-                layer_path = f"model/layers/{layer_id}"
-                if layer_path in path:
-                    if any(component in path for component in ['mlp', 'moe_gate']):
-                        return True
-            return False
-        
-        def get_moe_partition_spec(path, original_pspec):
-            if 'moe_gate' in path:
-                return P(None, 'expert')
-            elif 'mlp' in path:
-                if len(original_pspec.axis_names) >= 2:
-                    return P('expert', *(original_pspec.axis_names[1:]))
-                else:
-                    return P('expert', None)
-            else:
-                return original_pspec
-        
-        def deep_override(specs, state, path=""):
-            if isinstance(specs, dict) and isinstance(state, dict):
-                result = {}
-                for key in specs:
-                    if key in state:
-                        current_path = f"{path}/{key}" if path else key
-                        result[key] = deep_override(specs[key], state[key], current_path)
-                    else:
-                        result[key] = specs[key]
-                return result
-            elif isinstance(specs, P) and hasattr(state, 'shape'):
-                if is_moe_parameter(path):
-                    new_pspec = get_moe_partition_spec(path, specs)
-                    print(f"rewrite: {path} -> {new_pspec}")
-                    return new_pspec
-                else:
-                    return specs
-            else:
-                return specs
-        
-        modified_pspecs = deep_override(pspecs, model_state)
-        
-        try:
-            def apply_mixed_constraints(state, specs, path=""):
-                if isinstance(state, dict) and isinstance(specs, dict):
-                    result = {}
-                    for key in state:
-                        if key in specs:
-                            current_path = f"{path}/{key}" if path else key
-                            result[key] = apply_mixed_constraints(state[key], specs[key], current_path)
-                        else:
-                            result[key] = state[key]
-                    return result
-                elif hasattr(state, 'shape') and isinstance(specs, P):
-                    if is_moe_parameter(path):
-                        with expert_mesh:
-                            return jax.lax.with_sharding_constraint(state, specs)
-                    else:
-                        return jax.lax.with_sharding_constraint(state, specs)
-                else:
-                    return state
-            
-            constrained_state = apply_mixed_constraints(model_state, modified_pspecs)
-            nnx.update(self, constrained_state)
-            print("mix mesh constraint applied")
-            
-        except Exception as e:
-            print(f"mix mesh constraint failed: {e}")
-            try:
-                pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
-                nnx.update(self, pstate)
-                print("fallback to standard constraint")
-            except Exception as fallback_e:
-                print(f"standard constraint failed: {fallback_e}")
-                nnx.update(self, model_state)
-                print("use unconstrainted model state")
+        pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
+        nnx.update(self, pstate)
 
     @trace_function(stage="MOE_CAUSAL_LM_FORWARD", include_args=False, include_output=True)
     def __call__(self,
