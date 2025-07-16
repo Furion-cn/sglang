@@ -151,7 +151,7 @@ class QWen3MoeDecoderLayer(nnx.Module):
                 features=num_experts,
                 model_name=getattr(config, 'model_name', 'qwen3_moe'),
                 use_bias=False,
-                kernel_axes=(None, 'expert'), 
+                kernel_axes=(None, ('data', 'tensor')), 
                 dtype=jnp.bfloat16,
                 layer_id=layer_id,
                 rngs=rngs
