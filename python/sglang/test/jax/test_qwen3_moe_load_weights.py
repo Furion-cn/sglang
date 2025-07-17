@@ -71,6 +71,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
     """Test cases for Qwen3MoeForCausalLMJaxModel using JAXModelLoader"""
 
     def setUp(self):
+        os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=4'
         """Set up test fixtures"""
         self.test_model_path = os.environ.get(
             'MODEL_PATH', '/tmp/test_qwen_moe_jax_model')
