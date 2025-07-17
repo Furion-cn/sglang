@@ -112,12 +112,12 @@ class QWen3MoeAttention(nnx.Module):
         q_by_head = q.reshape(length, self.num_q_heads, self.head_dim)
         q_by_head = q_by_head.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.reshape(length, self.num_q_heads, self.head_dim)
+        q = q_by_head.reshape(length, self.num_q_heads* self.head_dim)
 
         k_by_head = k.reshape(length, self.num_kv_heads, self.head_dim)
         k_by_head = k_by_head.reshape(-1, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.reshape(length, self.num_kv_heads, self.head_dim)
+        k = k_by_head.reshape(length, self.num_kv_heads*self.head_dim)
 
         return q, k, v
 
