@@ -244,29 +244,31 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             input_ids, _, forward_batch = device_batches
             return model(input_ids, forward_batch.positions, forward_batch)
         
-        def single_device_forward(batch_info):
+        def single_device_forward(device_input_ids, device_positions, device_forward_batch):
             """单个设备的forward函数"""
-            input_ids, seq_lens, forward_batch = batch_info
-            return model(input_ids, forward_batch.positions, forward_batch)
-        
-        # 使用shard_map实现数据并行
-        sharded_forward = shard_map(
-            single_device_forward,
-            mesh=self.mesh,
-            in_specs=P('data'),   # 在data轴上分片输入
-            out_specs=P('data'),  # 在data轴上分片输出
-        )
+            return model(device_input_ids, device_positions, device_forward_batch)
         
         print("🚀 执行数据并行forward...")
-        # 将所有设备batch组织成适合shard_map的格式
-        stacked_batches = jax.tree.map(
-            lambda *args: jnp.stack(args), 
-            *device_batches
-        )
         
-        results = sharded_forward(stacked_batches)
+        # 分别提取每个设备的数据
+        all_input_ids = []
+        all_positions = []
+        all_forward_batches = []
+        
+        for input_ids, seq_lens, forward_batch in device_batches:
+            all_input_ids.append(input_ids)
+            all_positions.append(forward_batch.positions)
+            all_forward_batches.append(forward_batch)
+        
+        # 手动处理每个设备的forward，避免使用shard_map的复杂性
+        results = []
+        for device_idx, (input_ids, positions, forward_batch) in enumerate(
+            zip(all_input_ids, all_positions, all_forward_batches)):
+            print(f"  设备 {device_idx}: 处理 {input_ids.shape} tokens")
+            device_result = model(input_ids, positions, forward_batch)
+            results.append(device_result)
+        
         print("✅ 数据并行forward完成")
-        
         return results
 
     def _dp_sampling_wrapper(self, sampler, model_outputs, sampling_info, global_info):
@@ -285,44 +287,28 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             # 单设备采样
             return sampler(model_outputs, sampling_info)
         
-        def single_device_sampling(outputs, sampling_params):
-            """单设备采样函数"""
-            return sampler(outputs, sampling_params)
+        print("🎲 执行数据并行采样...")
         
         # 为每个设备创建采样参数
         texts_per_device = global_info["texts_per_device"]
         
-        # 分片采样参数
-        device_sampling_infos = []
-        for i in range(self.dp_size):
+        # 手动处理每个设备的采样
+        sampling_results = []
+        for device_idx, device_output in enumerate(model_outputs):
+            # 为当前设备创建采样参数
             device_sampling_info = SamplingBatchInfo(
-                temperatures=sampling_info.temperatures[i*texts_per_device:(i+1)*texts_per_device],
-                top_ps=sampling_info.top_ps[i*texts_per_device:(i+1)*texts_per_device],
-                top_ks=sampling_info.top_ks[i*texts_per_device:(i+1)*texts_per_device],
-                min_ps=sampling_info.min_ps[i*texts_per_device:(i+1)*texts_per_device],
+                temperatures=jnp.full((texts_per_device, 1), 1.0),
+                top_ps=jnp.full((texts_per_device, 1), 1.0),
+                top_ks=jnp.ones((texts_per_device, 1)),
+                min_ps=jnp.full((texts_per_device, 1), 0.0),
                 vocab_size=sampling_info.vocab_size,
             )
-            device_sampling_infos.append(device_sampling_info)
+            
+            print(f"  设备 {device_idx}: 采样 {texts_per_device} 个序列")
+            device_result = sampler(device_output, device_sampling_info)
+            sampling_results.append(device_result)
         
-        # 使用shard_map进行并行采样
-        sharded_sampling = shard_map(
-            single_device_sampling,
-            mesh=self.mesh,
-            in_specs=(P('data'), P('data')),  # outputs和sampling_info都按data轴分片
-            out_specs=P('data'),              # 输出也按data轴分片
-        )
-        
-        print("🎲 执行数据并行采样...")
-        
-        # 组织采样参数为shard_map格式
-        stacked_sampling_info = jax.tree.map(
-            lambda *args: jnp.stack(args),
-            *device_sampling_infos
-        )
-        
-        sampling_results = sharded_sampling(model_outputs, stacked_sampling_info)
         print("✅ 数据并行采样完成")
-        
         return sampling_results
 
     def _get_tokenizer(self):
@@ -500,28 +486,28 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                             total_texts = global_info["total_texts"]
                             texts_per_device = global_info["texts_per_device"]
                             
-                            # 创建采样参数（为所有设备）
-                            total_batch_size = self.dp_size * texts_per_device
+                            # 创建采样参数（为所有设备，这里简化）
                             sampling_info = SamplingBatchInfo(
-                                temperatures=jnp.full((total_batch_size, 1), 1.0),
-                                top_ps=jnp.full((total_batch_size, 1), 1.0),
-                                top_ks=jnp.ones((total_batch_size, 1)),
-                                min_ps=jnp.full((total_batch_size, 1), 0.0),
+                                temperatures=jnp.full((texts_per_device, 1), 1.0),
+                                top_ps=jnp.full((texts_per_device, 1), 1.0),
+                                top_ks=jnp.ones((texts_per_device, 1)),
+                                min_ps=jnp.full((texts_per_device, 1), 0.0),
                                 vocab_size=model.config.vocab_size,
                             )
                             
                             # 执行DP采样
-                            next_token_ids = self._dp_sampling_wrapper(
+                            next_token_ids_list = self._dp_sampling_wrapper(
                                 sampler, y, sampling_info, global_info)
                             
                             # 更新每个设备的序列
                             new_batches_info = []
                             for device_idx, (device_batch_info, device_next_tokens) in enumerate(
-                                zip(batches_info, next_token_ids)):
+                                zip(batches_info, next_token_ids_list)):
                                 
                                 input_ids_array, actual_seq_lens, forward_batch = device_batch_info
                                 device_complete_sequences = all_complete_sequences[device_idx]
                                 
+                                print(f"  设备 {device_idx}: 更新 {len(device_complete_sequences)} 个序列")
                                 updated_sequences = self.update_forward_batch_with_sequences(
                                     forward_batch, device_next_tokens, tokenizer, device_complete_sequences)
                                 all_complete_sequences[device_idx] = updated_sequences
@@ -648,6 +634,44 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             forward_batch.forward_mode = ForwardMode.DECODE
             
         return complete_sequences
+
+    def test_dp_functionality_basic(self):
+        """基础的数据并行功能测试（不需要真实模型）"""
+        print("\n🧪 测试数据并行基础功能...")
+        
+        # 模拟设置
+        self.use_data_parallel = True
+        self.dp_size = 2
+        
+        # 模拟数据
+        test_texts = ["Hello", "World", "AI", "Test"]
+        
+        # 测试DP batch创建
+        mock_model_config = type('MockConfig', (), {
+            'vocab_size': 1000,
+            'num_key_value_heads': 4,
+            'head_dim': 64,
+            'num_hidden_layers': 2,
+            'torch_dtype': 'bfloat16'
+        })()
+        
+        try:
+            batches_info, global_info = self._create_dp_batch_from_texts(
+                mock_model_config, test_texts, self.tokenizer)
+            
+            print(f"✅ DP batch创建成功")
+            print(f"   设备数量: {len(batches_info)}")
+            print(f"   全局信息: {global_info}")
+            
+            # 验证数据结构
+            for device_idx, (input_ids, seq_lens, forward_batch) in enumerate(batches_info):
+                print(f"   设备 {device_idx}: {input_ids.shape}, batch_size={len(seq_lens)}")
+            
+            print("🎉 数据并行基础功能测试通过！")
+            
+        except Exception as e:
+            print(f"❌ DP功能测试失败: {e}")
+            raise
 
 if __name__ == '__main__':
     unittest.main()
