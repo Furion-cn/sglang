@@ -319,7 +319,7 @@ class Qwen3ForCausalLMJaxModel(nnx.Module):
                  forward_mode: str,
                  batch_size: int,
                  ):
-        hidden_states = self.model(input_ids, positions, forward_batch, forward_mode, batch_size)
+        hidden_states, forward_batch = self.model(input_ids, positions, forward_batch, forward_mode, batch_size)
         result = self.logits_processor(
             hidden_states, 
             EmbedCls(
