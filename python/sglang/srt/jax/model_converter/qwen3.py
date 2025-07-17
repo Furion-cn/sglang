@@ -298,7 +298,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     for layer_idx in range(base_num_decoder_layers):
         # 动态构建 attention 权重结构
         attn_structure = {
-            "qkv_proj": {"weight": None},
+            "q_proj": {"weight": None},
+            "k_proj": {"weight": None},
+            "v_proj": {"weight": None},
             "o_proj": {"weight": None},
             "q_norm": {"weight": None},
             "k_norm": {"weight": None},
@@ -306,7 +308,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         
         # 只有当模型有 attention bias 时才添加 bias 字段
         if has_attention_bias:
-            attn_structure["qkv_proj"]["bias"] = None
+            attn_structure["q_proj"]["bias"] = None
+            attn_structure["k_proj"]["bias"] = None
+            attn_structure["v_proj"]["bias"] = None
             attn_structure["o_proj"]["bias"] = None
             
         jax_weights["model"]["layers"][layer_idx] = {
@@ -341,13 +345,16 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             converter_logging.log(f"Layer {layer_idx}: Q shape {q_weight.shape}, K shape {k_weight.shape}, V shape {v_weight.shape}")
             
             # 按照 [Q, K, V] 的顺序合并权重
-            qkv_weight = np.concatenate([q_weight, k_weight, v_weight], axis=0)  # [total_proj_dim, hidden_size]
+            jax_q_weight = q_weight.transpose()
+            jax_k_weight = k_weight.transpose()
+            jax_v_weight = v_weight.transpose()
             
             # 转置以匹配 JAX 模型的期望格式 [hidden_size, total_proj_dim]
-            qkv_weight = qkv_weight.transpose()
             
-            jax_weights["model"]["layers"][layer_idx]["self_attn"]["qkv_proj"]["weight"] = qkv_weight
-            converter_logging.log(f"✅ Layer {layer_idx}: Combined QKV weight shape {qkv_weight.shape}")
+            jax_weights["model"]["layers"][layer_idx]["self_attn"]["q_proj"]["weight"] = jax_q_weight
+            jax_weights["model"]["layers"][layer_idx]["self_attn"]["k_proj"]["weight"] = jax_k_weight
+            jax_weights["model"]["layers"][layer_idx]["self_attn"]["v_proj"]["weight"] = jax_v_weight
+            converter_logging.log(f"✅ Layer {layer_idx}: Combined QKV weight shape {jax_q_weight.shape}")
         else:
             missing_keys = []
             if q_proj_key not in chkpt_vars:
@@ -371,9 +378,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                 v_bias = chkpt_vars[v_bias_key].to(torch.float32).numpy().astype(CAST_DTYPE)
                 
                 # 合并 bias
-                qkv_bias = np.concatenate([q_bias, k_bias, v_bias], axis=0)
-                jax_weights["model"]["layers"][layer_idx]["self_attn"]["qkv_proj"]["bias"] = qkv_bias
-                converter_logging.log(f"✅ Layer {layer_idx}: Combined QKV bias shape {qkv_bias.shape}")
+                jax_weights["model"]["layers"][layer_idx]["self_attn"]["q_proj"]["bias"] = q_bias
+                jax_weights["model"]["layers"][layer_idx]["self_attn"]["k_proj"]["bias"] = k_bias
+                jax_weights["model"]["layers"][layer_idx]["self_attn"]["v_proj"]["bias"] = v_bias
+                converter_logging.log(f"✅ Layer {layer_idx}: QKV bias shape {q_bias.shape}, {k_bias.shape}, {v_bias.shape}")
             elif has_attention_bias:
                 converter_logging.log(f"❌ QKV bias not found for layer {layer_idx}")
             
@@ -588,17 +596,17 @@ def compare_weights(original_weights: dict, converted_weights: dict, model_param
                     
                 # 处理分离的 Q、K、V 权重 - 从 qkv_proj 中拆分
                 elif jax_key.endswith("self_attn.q_proj.weight"):
-                    return _extract_q_weight_from_qkv(layer_weights, model_params)
+                    return layer_weights.get("self_attn", {}).get("q_proj", {}).get("weight")
                 elif jax_key.endswith("self_attn.k_proj.weight"):
-                    return _extract_k_weight_from_qkv(layer_weights, model_params)
+                    return layer_weights.get("self_attn", {}).get("k_proj", {}).get("weight")
                 elif jax_key.endswith("self_attn.v_proj.weight"):
-                    return _extract_v_weight_from_qkv(layer_weights, model_params)
+                    return layer_weights.get("self_attn", {}).get("v_proj", {}).get("weight")
                 elif jax_key.endswith("self_attn.q_proj.bias"):
-                    return _extract_q_bias_from_qkv(layer_weights, model_params)
+                    return layer_weights.get("self_attn", {}).get("q_proj", {}).get("bias")
                 elif jax_key.endswith("self_attn.k_proj.bias"):
-                    return _extract_k_bias_from_qkv(layer_weights, model_params)
+                    return layer_weights.get("self_attn", {}).get("k_proj", {}).get("bias")
                 elif jax_key.endswith("self_attn.v_proj.bias"):
-                    return _extract_v_bias_from_qkv(layer_weights, model_params)
+                    return layer_weights.get("self_attn", {}).get("v_proj", {}).get("bias")
                     
                 elif "self_attn.o_proj.weight" in jax_key:
                     jax_weight = layer_weights.get("self_attn", {}).get("o_proj", {}).get("weight")
