@@ -41,6 +41,8 @@ class QWen3MoeAttention(nnx.Module):
         self.q_size = num_heads * self.head_dim
         self.kv_size = num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
+        self.num_q_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         
         self.q_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
@@ -106,13 +108,16 @@ class QWen3MoeAttention(nnx.Module):
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
 
-        q_by_head = q.reshape(-1, self.head_dim)
+        length = q.shape[0]
+        q_by_head = q.reshape(length, self.num_q_heads, self.head_dim)
+        q_by_head = q_by_head.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.reshape(q.shape)
+        q = q_by_head.reshape(length, self.num_q_heads, self.head_dim)
 
-        k_by_head = k.reshape(-1, self.head_dim)
+        k_by_head = k.reshape(length, self.num_kv_heads, self.head_dim)
+        k_by_head = k_by_head.reshape(-1, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.reshape(k.shape)
+        k = k_by_head.reshape(length, self.num_kv_heads, self.head_dim)
 
         return q, k, v
 
