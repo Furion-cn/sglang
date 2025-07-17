@@ -16,7 +16,7 @@ from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.jax.layers.sampler import Sampler
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool,create_kv_cache
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_EXTEND,FORWARD_MODE_DECODE
-from sglang.srt.jax.models.qwen3 import QWen3ForCausalLMJaxModel
+from sglang.srt.jax.models.qwen3 import Qwen3ForCausalLMJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
@@ -105,7 +105,7 @@ class TestQwen3DenseModel(unittest.TestCase):
 
         # Load the model using JAXModelLoader
         with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
-            mock_arch.return_value = (QWen3ForCausalLMJaxModel, None)
+            mock_arch.return_value = (Qwen3ForCausalLMJaxModel, None)
 
             model = self.jax_loader.load_model(
                 model_config=model_config,
@@ -453,7 +453,7 @@ class TestQwen3DenseModel(unittest.TestCase):
             # Forward pass
             # note: donate_argnums is necessary because 'jaxlib._jax.XlaRuntimeError: RESOURCE_EXHAUSTED' will meet without it.
             @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
-            def _forward_extend(model:QWen3ForCausalLMJaxModel,forward_batch,batch_size):
+            def _forward_extend(model:Qwen3ForCausalLMJaxModel,forward_batch,batch_size):
                 #print(f"model: {model}")
                 #print(f"batch_size: {batch_size}")
                 #return None,None
@@ -462,7 +462,7 @@ class TestQwen3DenseModel(unittest.TestCase):
 
             #@partial(jax.jit,donate_argnums=(0,2))
             @nnx.jit(static_argnums=(2,),donate_argnums=(1,))
-            def _forward_decode(model:QWen3ForCausalLMJaxModel,forward_batch,batch_size):
+            def _forward_decode(model:Qwen3ForCausalLMJaxModel,forward_batch,batch_size):
                 #print("nothing to do")
                 #return
                 return model(forward_batch.input_ids,
