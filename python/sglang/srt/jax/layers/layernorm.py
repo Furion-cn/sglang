@@ -26,7 +26,7 @@ class RMSNorm(nnx.Module):
         return rmsnorm_forward(x, residual, self.weight, self.variance_epsilon)
 
 
-@partial(jax.jit, static_argnames=["epsilon"])
+# @partial(jax.jit, static_argnames=["epsilon"])
 def rmsnorm_forward(x, residual, weight, epsilon) -> Union[jax.Array, Tuple[jax.Array, jax.Array]]:
     orig_dtype = x.dtype
     x_f32 = jnp.asarray(x, jnp.float32)
