@@ -247,39 +247,93 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         
         print("🚀 执行数据并行forward...")
         
-        # 分别提取每个设备的数据
-        all_input_ids = []
-        all_positions = []
-        all_forward_batches = []
-        
-        for input_ids, seq_lens, forward_batch in device_batches:
-            all_input_ids.append(input_ids)
-            all_positions.append(forward_batch.positions)
-            all_forward_batches.append(forward_batch)
-        
         # 使用JAX的pmap实现真正的数据并行
         from jax import pmap
         
-        def single_device_forward(args):
+        def single_device_forward(input_ids, positions, seq_lens, cache_loc, out_cache_loc, extend_start_loc, forward_mode, batch_size):
             """单个设备的forward函数，用于pmap"""
-            device_input_ids, device_positions, device_forward_batch = args
-            return model(device_input_ids, device_positions, device_forward_batch)
+            # 在pmap内部重新组装ForwardBatch
+            forward_batch = ForwardBatch(
+                forward_mode=forward_mode,
+                batch_size=batch_size,
+                input_ids=input_ids,
+                seq_lens=seq_lens,
+                cache_loc=cache_loc,
+                out_cache_loc=out_cache_loc,
+                positions=positions,
+                extend_start_loc=extend_start_loc,
+                token_to_kv_pool=None  # 暂时设为None，或者用全局变量
+            )
+            return model(input_ids, positions, forward_batch)
         
-        # 准备pmap的输入数据
-        pmap_inputs = list(zip(all_input_ids, all_positions, all_forward_batches))
+        # 提取所有数据并padding到相同形状
+        all_input_ids = []
+        all_positions = []
+        all_seq_lens = []
+        all_cache_loc = []
+        all_out_cache_loc = []
+        all_extend_start_loc = []
+        all_forward_mode = []
+        all_batch_size = []
         
-        # 打印设备信息
-        for device_idx, (input_ids, positions, forward_batch) in enumerate(pmap_inputs):
-            print(f"  设备 {device_idx}: 处理 {input_ids.shape} tokens")
+        max_tokens = max(batch[0].shape[0] for batch in device_batches)
+        max_batch_size = max(len(batch[2].seq_lens) for batch in device_batches)
         
-        # 使用pmap并行执行
+        for device_idx, (input_ids, seq_lens, forward_batch) in enumerate(device_batches):
+            # Padding input_ids和positions
+            current_tokens = input_ids.shape[0]
+            padding_needed = max_tokens - current_tokens
+            
+            padded_input_ids = jnp.pad(input_ids, (0, padding_needed), mode='constant', constant_values=0)
+            padded_positions = jnp.pad(forward_batch.positions, (0, padding_needed), mode='constant', constant_values=0)
+            padded_cache_loc = jnp.pad(forward_batch.cache_loc, (0, padding_needed), mode='constant', constant_values=0)
+            
+            # Padding seq_lens和extend_start_loc
+            current_batch_size = len(seq_lens)
+            padding_needed_batch = max_batch_size - current_batch_size
+            
+            padded_seq_lens = jnp.pad(seq_lens, (0, padding_needed_batch), mode='constant', constant_values=0)
+            padded_extend_start_loc = jnp.pad(forward_batch.extend_start_loc, (0, padding_needed_batch), mode='constant', constant_values=0)
+            
+            # 处理out_cache_loc（可能为None）
+            if forward_batch.out_cache_loc is not None:
+                padded_out_cache_loc = jnp.pad(forward_batch.out_cache_loc, (0, padding_needed), mode='constant', constant_values=0)
+            else:
+                padded_out_cache_loc = jnp.zeros(max_tokens, dtype=jnp.int32)
+            
+            all_input_ids.append(padded_input_ids)
+            all_positions.append(padded_positions)
+            all_seq_lens.append(padded_seq_lens)
+            all_cache_loc.append(padded_cache_loc)
+            all_out_cache_loc.append(padded_out_cache_loc)
+            all_extend_start_loc.append(padded_extend_start_loc)
+            all_forward_mode.append(forward_batch.forward_mode)
+            all_batch_size.append(forward_batch.batch_size)
+            
+            print(f"  设备 {device_idx}: 处理 {input_ids.shape} tokens (padding到 {max_tokens})")
+        
+        # 堆叠成数组
+        stacked_input_ids = jnp.stack(all_input_ids)
+        stacked_positions = jnp.stack(all_positions)
+        stacked_seq_lens = jnp.stack(all_seq_lens)
+        stacked_cache_loc = jnp.stack(all_cache_loc)
+        stacked_out_cache_loc = jnp.stack(all_out_cache_loc)
+        stacked_extend_start_loc = jnp.stack(all_extend_start_loc)
+        stacked_forward_mode = jnp.array(all_forward_mode)
+        stacked_batch_size = jnp.array(all_batch_size)
+        
+        # 使用pmap并行执行 - 这是真正的并行，不使用for循环
         with self.mesh:
-            # 确保所有设备都在同一个mesh中
-            results = pmap(single_device_forward, devices=self.mesh.local_devices[:self.dp_size])(pmap_inputs)
-        
-        # 将pmap结果转换为列表格式，以便后续处理
-        if hasattr(results, '__iter__') and not isinstance(results, (list, tuple)):
-            results = list(results)
+            results = pmap(single_device_forward, devices=self.mesh.local_devices[:self.dp_size])(
+                stacked_input_ids,
+                stacked_positions,
+                stacked_seq_lens,
+                stacked_cache_loc,
+                stacked_out_cache_loc,
+                stacked_extend_start_loc,
+                stacked_forward_mode,
+                stacked_batch_size
+            )
         
         print("✅ 数据并行forward完成")
         print(f"   返回结果类型: {type(results)}, 长度: {len(results)}")
@@ -309,33 +363,73 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         # 使用JAX的pmap实现真正的数据并行采样
         from jax import pmap
         
-        def single_device_sampling(args):
+        def single_device_sampling(device_output, temperatures, top_ps, top_ks, min_ps, vocab_size):
             """单个设备的采样函数，用于pmap"""
-            device_output, device_sampling_info = args
+            # 在pmap内部重新组装SamplingBatchInfo
+            device_sampling_info = SamplingBatchInfo(
+                temperatures=temperatures,
+                top_ps=top_ps,
+                top_ks=top_ks,
+                min_ps=min_ps,
+                vocab_size=vocab_size,
+            )
             return sampler(device_output, device_sampling_info)
         
-        # 准备pmap的输入数据
-        pmap_inputs = []
+        # 提取所有数据并padding到相同形状
+        all_device_outputs = []
+        all_temperatures = []
+        all_top_ps = []
+        all_top_ks = []
+        all_min_ps = []
+        all_vocab_size = []
+        
+        # 找到最大的输出形状
+        max_output_shape = max(output.shape for output in model_outputs)
+        
         for device_idx, device_output in enumerate(model_outputs):
-            # 为当前设备创建采样参数
-            device_sampling_info = SamplingBatchInfo(
-                temperatures=jnp.full((texts_per_device, 1), 1.0),
-                top_ps=jnp.full((texts_per_device, 1), 1.0),
-                top_ks=jnp.ones((texts_per_device, 1)),
-                min_ps=jnp.full((texts_per_device, 1), 0.0),
-                vocab_size=sampling_info.vocab_size,
-            )
-            pmap_inputs.append((device_output, device_sampling_info))
+            # Padding device_output到相同形状
+            current_shape = device_output.shape
+            padding_needed = [max_output_shape[i] - current_shape[i] for i in range(len(current_shape))]
+            
+            if any(p > 0 for p in padding_needed):
+                padded_output = jnp.pad(device_output, [(0, p) for p in padding_needed], mode='constant', constant_values=0)
+            else:
+                padded_output = device_output
+            
+            # 创建采样参数
+            temperatures = jnp.full((texts_per_device, 1), 1.0)
+            top_ps = jnp.full((texts_per_device, 1), 1.0)
+            top_ks = jnp.ones((texts_per_device, 1))
+            min_ps = jnp.full((texts_per_device, 1), 0.0)
+            vocab_size = sampling_info.vocab_size
+            
+            all_device_outputs.append(padded_output)
+            all_temperatures.append(temperatures)
+            all_top_ps.append(top_ps)
+            all_top_ks.append(top_ks)
+            all_min_ps.append(min_ps)
+            all_vocab_size.append(vocab_size)
+            
             print(f"  设备 {device_idx}: 采样 {texts_per_device} 个序列")
         
-        # 使用pmap并行执行
-        with self.mesh:
-            # 确保所有设备都在同一个mesh中
-            sampling_results = pmap(single_device_sampling, devices=self.mesh.local_devices[:self.dp_size])(pmap_inputs)
+        # 堆叠成数组
+        stacked_device_outputs = jnp.stack(all_device_outputs)
+        stacked_temperatures = jnp.stack(all_temperatures)
+        stacked_top_ps = jnp.stack(all_top_ps)
+        stacked_top_ks = jnp.stack(all_top_ks)
+        stacked_min_ps = jnp.stack(all_min_ps)
+        stacked_vocab_size = jnp.array(all_vocab_size)
         
-        # 将pmap结果转换为列表格式，以便后续处理
-        if hasattr(sampling_results, '__iter__') and not isinstance(sampling_results, (list, tuple)):
-            sampling_results = list(sampling_results)
+        # 使用pmap并行执行 - 这是真正的并行，不使用for循环
+        with self.mesh:
+            sampling_results = pmap(single_device_sampling, devices=self.mesh.local_devices[:self.dp_size])(
+                stacked_device_outputs,
+                stacked_temperatures,
+                stacked_top_ps,
+                stacked_top_ks,
+                stacked_min_ps,
+                stacked_vocab_size
+            )
         
         print("✅ 数据并行采样完成")
         print(f"   返回结果类型: {type(sampling_results)}, 长度: {len(sampling_results)}")
