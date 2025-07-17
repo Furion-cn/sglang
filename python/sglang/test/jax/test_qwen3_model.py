@@ -169,7 +169,7 @@ class TestQwen3DenseModel(unittest.TestCase):
             head_num=model_config.num_key_value_heads,
             head_dim=model_config.head_dim,
             layer_num=model_config.num_hidden_layers,
-            dtype=jnp.bfloat16 if model_config.bf16 else jnp.float32,
+            dtype=jnp.bfloat16,
         )
 
         # Create ForwardBatch
