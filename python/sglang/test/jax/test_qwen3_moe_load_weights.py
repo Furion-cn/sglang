@@ -488,7 +488,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                         complete_sequences.append(initial_tokens)
 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
-                with self.mesh, jax_trace_context(jax_profiling_dir):
+                with self.mesh:
                     for i in range(5):  # 减少迭代次数
                         print(f"\n🔄 生成步骤 {i+1}")
                         
