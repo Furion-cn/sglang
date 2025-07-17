@@ -298,7 +298,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     for layer_idx in range(base_num_decoder_layers):
         # 动态构建 attention 权重结构
         attn_structure = {
-            "qkv_proj": {"weight": None},
+            "q_proj": {"weight": None},
+            "k_proj": {"weight": None},
+            "v_proj": {"weight": None},
             "o_proj": {"weight": None},
             "q_norm": {"weight": None},
             "k_norm": {"weight": None},
@@ -338,16 +340,14 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             k_weight = chkpt_vars[k_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE)  # [num_kv_heads*head_dim, hidden_size]
             v_weight = chkpt_vars[v_proj_key].to(torch.float32).numpy().astype(CAST_DTYPE)  # [num_kv_heads*head_dim, hidden_size]
             
-            converter_logging.log(f"Layer {layer_idx}: Q shape {q_weight.shape}, K shape {k_weight.shape}, V shape {v_weight.shape}")
+            jax_q_weight = q_weight.transpose()
+            jax_k_weight = k_weight.transpose()
+            jax_v_weight = v_weight.transpose()
             
-            # 按照 [Q, K, V] 的顺序合并权重
-            qkv_weight = np.concatenate([q_weight, k_weight, v_weight], axis=0)  # [total_proj_dim, hidden_size]
-            
-            # 转置以匹配 JAX 模型的期望格式 [hidden_size, total_proj_dim]
-            qkv_weight = qkv_weight.transpose()
-            
-            jax_weights["model"]["layers"][layer_idx]["self_attn"]["qkv_proj"]["weight"] = qkv_weight
-            converter_logging.log(f"✅ Layer {layer_idx}: Combined QKV weight shape {qkv_weight.shape}")
+            jax_weights["model"]["layers"][layer_idx]["self_attn"]["q_proj"]["weight"] = jax_q_weight
+            jax_weights["model"]["layers"][layer_idx]["self_attn"]["k_proj"]["weight"] = jax_k_weight
+            jax_weights["model"]["layers"][layer_idx]["self_attn"]["v_proj"]["weight"] = jax_v_weight
+            converter_logging.log(f"✅ Layer {layer_idx}: Combined QKV weight shape {jax_q_weight.shape}")
         else:
             missing_keys = []
             if q_proj_key not in chkpt_vars:
