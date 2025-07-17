@@ -100,9 +100,9 @@ class QWen3MoeAttention(nnx.Module):
         return output
     
     def _proj_qkv(self, positions, hidden_states):
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
