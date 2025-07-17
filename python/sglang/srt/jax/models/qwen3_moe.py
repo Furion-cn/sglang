@@ -95,6 +95,7 @@ class QWen3MoeAttention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         q, k, v = self._proj_qkv(positions, hidden_states)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
@@ -113,7 +114,6 @@ class QWen3MoeAttention(nnx.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.reshape(k.shape)
 
-        q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
 class QWen3MoeDecoderLayer(nnx.Module):
