@@ -245,10 +245,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             input_ids, _, forward_batch = device_batches
             return model(input_ids, forward_batch.positions, forward_batch)
         
-        def single_device_forward(device_input_ids, device_positions, device_forward_batch):
-            """单个设备的forward函数"""
-            return model(device_input_ids, device_positions, device_forward_batch)
-        
         print("🚀 执行数据并行forward...")
         
         # 分别提取每个设备的数据
@@ -261,15 +257,32 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             all_positions.append(forward_batch.positions)
             all_forward_batches.append(forward_batch)
         
-        # 手动处理每个设备的forward，避免使用shard_map的复杂性
-        results = []
-        for device_idx, (input_ids, positions, forward_batch) in enumerate(
-            zip(all_input_ids, all_positions, all_forward_batches)):
+        # 使用JAX的pmap实现真正的数据并行
+        from jax import pmap
+        
+        def single_device_forward(args):
+            """单个设备的forward函数，用于pmap"""
+            device_input_ids, device_positions, device_forward_batch = args
+            return model(device_input_ids, device_positions, device_forward_batch)
+        
+        # 准备pmap的输入数据
+        pmap_inputs = list(zip(all_input_ids, all_positions, all_forward_batches))
+        
+        # 打印设备信息
+        for device_idx, (input_ids, positions, forward_batch) in enumerate(pmap_inputs):
             print(f"  设备 {device_idx}: 处理 {input_ids.shape} tokens")
-            device_result = model(input_ids, positions, forward_batch)
-            results.append(device_result)
+        
+        # 使用pmap并行执行
+        with self.mesh:
+            # 确保所有设备都在同一个mesh中
+            results = pmap(single_device_forward, devices=self.mesh.local_devices[:self.dp_size])(pmap_inputs)
+        
+        # 将pmap结果转换为列表格式，以便后续处理
+        if hasattr(results, '__iter__') and not isinstance(results, (list, tuple)):
+            results = list(results)
         
         print("✅ 数据并行forward完成")
+        print(f"   返回结果类型: {type(results)}, 长度: {len(results)}")
         return results
 
     def _dp_sampling_wrapper(self, sampler, model_outputs, sampling_info, global_info):
@@ -293,8 +306,16 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         # 为每个设备创建采样参数
         texts_per_device = global_info["texts_per_device"]
         
-        # 手动处理每个设备的采样
-        sampling_results = []
+        # 使用JAX的pmap实现真正的数据并行采样
+        from jax import pmap
+        
+        def single_device_sampling(args):
+            """单个设备的采样函数，用于pmap"""
+            device_output, device_sampling_info = args
+            return sampler(device_output, device_sampling_info)
+        
+        # 准备pmap的输入数据
+        pmap_inputs = []
         for device_idx, device_output in enumerate(model_outputs):
             # 为当前设备创建采样参数
             device_sampling_info = SamplingBatchInfo(
@@ -304,12 +325,20 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 min_ps=jnp.full((texts_per_device, 1), 0.0),
                 vocab_size=sampling_info.vocab_size,
             )
-            
+            pmap_inputs.append((device_output, device_sampling_info))
             print(f"  设备 {device_idx}: 采样 {texts_per_device} 个序列")
-            device_result = sampler(device_output, device_sampling_info)
-            sampling_results.append(device_result)
+        
+        # 使用pmap并行执行
+        with self.mesh:
+            # 确保所有设备都在同一个mesh中
+            sampling_results = pmap(single_device_sampling, devices=self.mesh.local_devices[:self.dp_size])(pmap_inputs)
+        
+        # 将pmap结果转换为列表格式，以便后续处理
+        if hasattr(sampling_results, '__iter__') and not isinstance(sampling_results, (list, tuple)):
+            sampling_results = list(sampling_results)
         
         print("✅ 数据并行采样完成")
+        print(f"   返回结果类型: {type(sampling_results)}, 长度: {len(sampling_results)}")
         return sampling_results
 
     def _get_tokenizer(self):
