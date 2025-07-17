@@ -2,11 +2,14 @@ from functools import partial
 from typing import Dict, Tuple
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
 
 from sglang.srt.jax.mem_cache.memory_pool import KVCache
+
+
 
 
 class ReqToHashKVCachePool(KVCache):
@@ -166,8 +169,14 @@ def kv_cache_update(
         out_shape=out_shape,
         input_output_aliases={len(scalar_prefetches) + 1: 0},
     )
+    
+    cur_mesh = jax.sharding.get_abstract_mesh()
+    if not cur_mesh.empty:
+        kernel = shard_map(kernel, mesh=jax.sharding.get_abstract_mesh(
+        ), in_specs=P(None,), out_specs=P(None,), check_rep=False)
 
     return kernel(*scalar_prefetches, new_kv, kv_cache)[0]
+
 
 
 def _get_slot_mapping(

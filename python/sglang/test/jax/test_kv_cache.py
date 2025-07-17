@@ -5,6 +5,8 @@ import jax.numpy as jnp
 from sglang.test.test_utils import CustomTestCase
 import random
 from sglang.srt.jax.mem_cache.hash_kvcache import update_kv_cache
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 
 
 class TestKVCache(CustomTestCase):
@@ -71,28 +73,35 @@ class TestKVCache(CustomTestCase):
             v_cache = v_cache.at[cache_loc].set(v[k_start_loc[i]:k_start_loc[i]+seq_len, :, :])
         return k_cache, v_cache
 
-    def test_kv_cache_update_prefill(self):
+    def test_kv_cache_update_prefill_without_mesh(self):
         test_loop = random.randint(1, self.layer_num)
         for layer_idx in range(test_loop):
-            # test_output
             k, v, k_cache, v_cache, kv_cache_start_loc, k_seq_lens, k_start_loc = self.generate_test_data(
                 layer_idx, is_prefill=True)
-            k_cache, v_cache = update_kv_cache(k, v, k_cache, v_cache, k_seq_lens, k_start_loc, kv_cache_start_loc)
-            # expected data
-            expected_k_cache, expected_v_cache = self.expected_at_set_update_kv_cache(k, v, k_cache, v_cache, kv_cache_start_loc, k_seq_lens, k_start_loc)
-            self.assertTrue(jnp.allclose(k_cache, expected_k_cache))
-            self.assertTrue(jnp.allclose(v_cache, expected_v_cache))
-
-    def test_kv_cache_update_decode(self):
-        test_loop = random.randint(1, self.layer_num)
-        for layer_idx in range(test_loop):
+            k_cache_dump, v_cache_dump = k_cache.copy(), v_cache.copy()
             # test_output
-            k, v, k_cache, v_cache, kv_cache_start_loc, k_seq_lens, k_start_loc = self.generate_test_data(
-                layer_idx, is_prefill=False)
             k_cache, v_cache = update_kv_cache(k, v, k_cache, v_cache, k_seq_lens, k_start_loc, kv_cache_start_loc)
             # expected data
             expected_k_cache, expected_v_cache = self.expected_at_set_update_kv_cache(
-                k, v, k_cache, v_cache, kv_cache_start_loc, k_seq_lens, k_start_loc)
+                k, v, k_cache_dump, v_cache_dump, kv_cache_start_loc, k_seq_lens, k_start_loc)
+            self.assertTrue(jnp.allclose(k_cache, expected_k_cache))
+            self.assertTrue(jnp.allclose(v_cache, expected_v_cache))
+
+    def test_kv_cache_update_decode_with_mesh(self):
+        mesh = jax.make_mesh((2, 1, 1), ('x', 'y', 'z'))
+        sharding= jax.sharding.NamedSharding(mesh, P('x',))
+        jax.sharding.set_mesh(mesh)
+        test_loop = random.randint(1, self.layer_num)
+        for layer_idx in range(test_loop):
+            k, v, k_cache, v_cache, kv_cache_start_loc, k_seq_lens, k_start_loc = self.generate_test_data(
+                layer_idx, is_prefill=False)
+            k_cache_dump, v_cache_dump = k_cache.copy(), v_cache.copy()
+            k, v = jax.device_put(k, sharding), jax.device_put(v, sharding)
+            # test_output
+            k_cache, v_cache = update_kv_cache(k, v, k_cache, v_cache, k_seq_lens, k_start_loc, kv_cache_start_loc)
+            # expected data
+            expected_k_cache, expected_v_cache = self.expected_at_set_update_kv_cache(
+                k, v, k_cache_dump, v_cache_dump, kv_cache_start_loc, k_seq_lens, k_start_loc)
             self.assertTrue(jnp.allclose(k_cache, expected_k_cache))
             self.assertTrue(jnp.allclose(v_cache, expected_v_cache))
 
