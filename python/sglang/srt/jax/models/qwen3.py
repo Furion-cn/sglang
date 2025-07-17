@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 from sglang.debug_tracer import global_tracer, trace_function
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.jax.layers.attention import Attention
-from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
+from sglang.srt.jax.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding, EmbedCls
 from sglang.srt.jax.layers.layernorm import RMSNorm
 from sglang.srt.jax.layers.linear import LinearBase
 from sglang.srt.jax.layers.logits_processor import LogitsProcessor
@@ -20,7 +20,6 @@ from sglang.srt.jax.utils import (
     get_expected_param_paths,
     update_state_recursive,
 )
-from sglang.srt.jax.layers.embeddings import EmbedCls
 
 class QWen3Attention(nnx.Module):
     def __init__(self,
@@ -321,7 +320,9 @@ class Qwen3ForCausalLMJaxModel(nnx.Module):
                  batch_size: int,
                  ):
         hidden_states = self.model(input_ids, positions, forward_batch, forward_mode, batch_size)
-        result = self.logits_processor(hidden_states, EmbedCls(
+        result = self.logits_processor(
+            hidden_states, 
+            EmbedCls(
                 embedding=self.lm_head.embedding.value,
                 promote_dtype=self.lm_head.promote_dtype,
                 dtype=self.lm_head.dtype,
@@ -330,6 +331,6 @@ class Qwen3ForCausalLMJaxModel(nnx.Module):
             forward_mode,
             batch_size,
         )
-        return result
+        return result, forward_batch
 
 EntryClass = Qwen3ForCausalLMJaxModel
