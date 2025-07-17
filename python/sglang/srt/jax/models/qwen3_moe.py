@@ -102,18 +102,133 @@ class QWen3MoeAttention(nnx.Module):
     
     @nnx.jit
     def _proj_qkv(self, positions, hidden_states):
+        print(f"🔍 DEBUG: 开始 _proj_qkv")
+        print(f"🔍 hidden_states 形状: {hidden_states.shape}")
+        try:
+            print(f"🔍 hidden_states 分片: {hidden_states.sharding}")
+        except:
+            print(f"🔍 hidden_states 分片: 无法获取")
+            
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
+        
+        print(f"🔍 q_proj 输出形状: {q.shape}")
+        try:
+            print(f"🔍 q_proj 输出分片: {q.sharding}")
+        except:
+            print(f"🔍 q_proj 输出分片: 无法获取")
 
+        # 检查 q_norm 权重
+        print(f"🔍 q_norm 权重形状: {self.q_norm.weight.value.shape}")
+        try:
+            print(f"🔍 q_norm 权重分片: {self.q_norm.weight.value.sharding}")
+        except:
+            print(f"🔍 q_norm 权重分片: 无法获取")
+
+        print(f"🔍 准备 reshape，head_dim = {self.head_dim}")
+        
+        # 生成 reshape 的 HLO
+        try:
+            def debug_reshape_step(x):
+                return x.reshape(-1, self.head_dim)
+            
+            compiled_reshape = jax.jit(debug_reshape_step).lower(q).compile()
+            hlo_reshape_text = compiled_reshape.as_text()
+            
+            print(f"🔍 RESHAPE HLO:")
+            print("="*50)
+            print(hlo_reshape_text)
+            print("="*50)
+            
+            if "all-gather" in hlo_reshape_text:
+                print(f"🚨 在 RESHAPE 中发现 all-gather！")
+                lines = hlo_reshape_text.split('\n')
+                for i, line in enumerate(lines):
+                    if "all-gather" in line.lower():
+                        print(f"🚨 第{i+1}行: {line.strip()}")
+            else:
+                print(f"✅ RESHAPE 没有 all-gather")
+                
+        except Exception as e:
+            print(f"🔍 生成 RESHAPE HLO 失败: {e}")
+        
         q_by_head = q.reshape(-1, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.reshape(q.shape)
+        print(f"🔍 reshape 后形状: {q_by_head.shape}")
+        try:
+            print(f"🔍 reshape 后分片: {q_by_head.sharding}")
+        except:
+            print(f"🔍 reshape 后分片: 无法获取")
 
+        # 这是关键步骤！记录 q_norm 调用
+        print(f"🔍 开始 q_norm...")
+        
+        # 生成这一步的HLO
+        try:
+            def debug_norm_step(x):
+                return self.q_norm(x)
+            
+            compiled_norm = jax.jit(debug_norm_step).lower(q_by_head).compile()
+            hlo_text = compiled_norm.as_text()
+            
+            print(f"🔍 Q_NORM HLO:")
+            print("="*50)
+            print(hlo_text)
+            print("="*50)
+            
+            if "all-gather" in hlo_text:
+                print(f"🚨 在 Q_NORM 中发现 all-gather！")
+                lines = hlo_text.split('\n')
+                for i, line in enumerate(lines):
+                    if "all-gather" in line.lower():
+                        print(f"🚨 第{i+1}行: {line.strip()}")
+            else:
+                print(f"✅ Q_NORM 没有 all-gather")
+                
+        except Exception as e:
+            print(f"🔍 生成 Q_NORM HLO 失败: {e}")
+        
+        q_by_head = self.q_norm(q_by_head)
+        print(f"🔍 q_norm 后形状: {q_by_head.shape}")
+        try:
+            print(f"🔍 q_norm 后分片: {q_by_head.sharding}")
+        except:
+            print(f"🔍 q_norm 后分片: 无法获取")
+            
+        # 生成 reshape back 的 HLO
+        try:
+            def debug_reshape_back_step(x, target_shape):
+                return x.reshape(target_shape)
+            
+            compiled_reshape_back = jax.jit(debug_reshape_back_step).lower(q_by_head, q.shape).compile()
+            hlo_reshape_back_text = compiled_reshape_back.as_text()
+            
+            print(f"🔍 RESHAPE BACK HLO:")
+            print("="*50)
+            print(hlo_reshape_back_text)
+            print("="*50)
+            
+            if "all-gather" in hlo_reshape_back_text:
+                print(f"🚨 在 RESHAPE BACK 中发现 all-gather！")
+                lines = hlo_reshape_back_text.split('\n')
+                for i, line in enumerate(lines):
+                    if "all-gather" in line.lower():
+                        print(f"🚨 第{i+1}行: {line.strip()}")
+            else:
+                print(f"✅ RESHAPE BACK 没有 all-gather")
+                
+        except Exception as e:
+            print(f"🔍 生成 RESHAPE BACK HLO 失败: {e}")
+            
+        q = q_by_head.reshape(q.shape)
+        print(f"🔍 最终 q 形状: {q.shape}")
+
+        # 对 k 做同样的处理（简化版）
         k_by_head = k.reshape(-1, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.reshape(k.shape)
 
+        print(f"🔍 _proj_qkv 完成")
         return q, k, v
 
 class QWen3MoeDecoderLayer(nnx.Module):
