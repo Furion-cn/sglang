@@ -259,7 +259,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         
         print("🚀 执行数据并行forward...")
         # 将所有设备batch组织成适合shard_map的格式
-        stacked_batches = jax.tree_map(
+        stacked_batches = jax.tree.map(
             lambda *args: jnp.stack(args), 
             *device_batches
         )
@@ -315,7 +315,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         print("🎲 执行数据并行采样...")
         
         # 组织采样参数为shard_map格式
-        stacked_sampling_info = jax.tree_map(
+        stacked_sampling_info = jax.tree.map(
             lambda *args: jnp.stack(args),
             *device_sampling_infos
         )
