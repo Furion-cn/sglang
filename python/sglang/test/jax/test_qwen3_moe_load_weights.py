@@ -3,10 +3,27 @@
 Qwen3MoeForCausalLMJaxModel JAXModelLoader Integration Tests
 
 Usage:
+    # 标准测试（纯TP）
     python -m unittest test_qwen3_moe_load_weights.TestQwen3MoeLoadWeights
+    
+    # 数据并行测试（外置DP）
+    USE_DATA_PARALLEL=1 DP_SIZE=2 python -m unittest test_qwen3_moe_load_weights.TestQwen3MoeLoadWeights.test_load_model_with_jax_loader
+    
+    # DP + TP混合（2个设备DP，2个设备TP）
+    USE_DATA_PARALLEL=1 DP_SIZE=2 python -m unittest test_qwen3_moe_load_weights.TestQwen3MoeLoadWeights.test_load_model_with_jax_loader
+    
+    # 纯DP模式（4个设备都做DP）
+    USE_DATA_PARALLEL=1 DP_SIZE=4 python -m unittest test_qwen3_moe_load_weights.TestQwen3MoeLoadWeights.test_load_model_with_jax_loader
     
     # Test with specific model path:
     MODEL_PATH=/path/to/jax/qwen3_moe/model python -m unittest test_qwen3_moe_load_weights.TestQwen3MoeLoadWeights.test_load_model_with_jax_loader
+
+Environment Variables:
+    MODEL_PATH: 模型路径
+    USE_DATA_PARALLEL: 是否启用数据并行 (0/1)
+    DP_SIZE: 数据并行的设备数量
+    ENABLE_DEBUG_TRACER: 是否启用debug追踪 (0/1)
+    JAX_TRACE_PROFILING_DIR: JAX profiling输出目录
 """
 
 import os
@@ -31,6 +48,8 @@ from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 
 class Sequence:
     def __init__(self, tokenizer, input_text: str):
@@ -59,10 +78,40 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         from jax.sharding import Mesh
         
         devices = jax.devices()        
+        
+        # 支持DP的mesh配置
+        # 选项1: 纯DP (4个设备做数据并行)
+        # self.mesh = create_device_mesh(
+        #     ici_parallelism=[4, 1, 1, 1],  # data=4, tensor=1
+        #     dcn_parallelism=[1, 1, 1, 1]
+        # )
+        
+        # 选项2: DP + TP混合 (2个设备DP, 2个设备TP)
+        # self.mesh = create_device_mesh(
+        #     ici_parallelism=[2, 2, 1, 1],  # data=2, tensor=2
+        #     dcn_parallelism=[1, 1, 1, 1]
+        # )
+        
+        # 当前配置: 纯TP
         self.mesh = create_device_mesh(
             ici_parallelism=[1, 4, 1, 1],
             dcn_parallelism=[1, 1, 1, 1]
         )
+        
+        # DP配置选择
+        self.use_data_parallel = os.environ.get("USE_DATA_PARALLEL", "0") == "1"
+        self.dp_size = int(os.environ.get("DP_SIZE", "1"))
+        
+        if self.use_data_parallel and self.dp_size > 1:
+            print(f"🔄 启用数据并行，DP size: {self.dp_size}")
+            # 重新配置mesh支持DP
+            total_devices = len(devices)
+            tp_size = total_devices // self.dp_size
+            self.mesh = create_device_mesh(
+                ici_parallelism=[self.dp_size, tp_size, 1, 1],
+                dcn_parallelism=[1, 1, 1, 1]
+            )
+            print(f"📐 Mesh配置: data={self.dp_size}, tensor={tp_size}")
         
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig("cpu")
@@ -134,6 +183,147 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         )
 
         return input_ids_array, actual_seq_lens, forward_batch
+
+    def _create_dp_batch_from_texts(self, model_config, texts, tokenizer):
+        """创建支持数据并行的batch（外置DP版本）
+        
+        Args:
+            texts: List[str] 输入文本
+            tokenizer: tokenizer
+            
+        Returns:
+            tuple: (sharded_batches, global_batch_info)
+        """
+        if not self.use_data_parallel or self.dp_size <= 1:
+            # 如果不使用DP，回退到常规方法
+            result = self._create_batch_from_texts(model_config, texts, tokenizer)
+            return result, {"total_texts": len(texts), "texts_per_device": len(texts)}
+        
+        print(f"🔄 创建DP batch，DP size: {self.dp_size}")
+        
+        # 确保batch size能被DP size整除
+        total_texts = len(texts)
+        if total_texts % self.dp_size != 0:
+            # 填充到能整除的数量
+            padding_needed = self.dp_size - (total_texts % self.dp_size)
+            texts = texts + [""] * padding_needed
+            print(f"📝 填充 {padding_needed} 个空文本，总数: {len(texts)}")
+        
+        # 分割文本到各个DP设备
+        texts_per_device = len(texts) // self.dp_size
+        device_text_groups = []
+        for i in range(self.dp_size):
+            start_idx = i * texts_per_device
+            end_idx = start_idx + texts_per_device
+            device_text_groups.append(texts[start_idx:end_idx])
+        
+        # 为每个设备创建独立的batch
+        device_batches = []
+        for device_texts in device_text_groups:
+            input_ids, seq_lens, forward_batch = self._create_batch_from_texts(
+                model_config, device_texts, tokenizer)
+            device_batches.append((input_ids, seq_lens, forward_batch))
+        
+        print(f"📊 创建了 {len(device_batches)} 个设备batch")
+        return device_batches, {"total_texts": total_texts, "texts_per_device": texts_per_device}
+
+    def _dp_forward_wrapper(self, model, batches_info):
+        """外置数据并行的forward包装器（模仿vLLM风格）
+        
+        Args:
+            model: JAX模型
+            batches_info: 各设备的batch信息
+            
+        Returns:
+            各设备的输出结果
+        """
+        device_batches, global_info = batches_info
+        
+        if not self.use_data_parallel or self.dp_size <= 1:
+            # 单设备模式
+            input_ids, _, forward_batch = device_batches
+            return model(input_ids, forward_batch.positions, forward_batch)
+        
+        def single_device_forward(batch_info):
+            """单个设备的forward函数"""
+            input_ids, seq_lens, forward_batch = batch_info
+            return model(input_ids, forward_batch.positions, forward_batch)
+        
+        # 使用shard_map实现数据并行
+        sharded_forward = shard_map(
+            single_device_forward,
+            mesh=self.mesh,
+            in_specs=P('data'),   # 在data轴上分片输入
+            out_specs=P('data'),  # 在data轴上分片输出
+        )
+        
+        print("🚀 执行数据并行forward...")
+        # 将所有设备batch组织成适合shard_map的格式
+        stacked_batches = jax.tree_map(
+            lambda *args: jnp.stack(args), 
+            *device_batches
+        )
+        
+        results = sharded_forward(stacked_batches)
+        print("✅ 数据并行forward完成")
+        
+        return results
+
+    def _dp_sampling_wrapper(self, sampler, model_outputs, sampling_info, global_info):
+        """外置数据并行的采样包装器
+        
+        Args:
+            sampler: 采样器
+            model_outputs: 模型输出（分片的）
+            sampling_info: 采样参数
+            global_info: 全局batch信息
+            
+        Returns:
+            采样结果（分片的）
+        """
+        if not self.use_data_parallel or self.dp_size <= 1:
+            # 单设备采样
+            return sampler(model_outputs, sampling_info)
+        
+        def single_device_sampling(outputs, sampling_params):
+            """单设备采样函数"""
+            return sampler(outputs, sampling_params)
+        
+        # 为每个设备创建采样参数
+        texts_per_device = global_info["texts_per_device"]
+        
+        # 分片采样参数
+        device_sampling_infos = []
+        for i in range(self.dp_size):
+            device_sampling_info = SamplingBatchInfo(
+                temperatures=sampling_info.temperatures[i*texts_per_device:(i+1)*texts_per_device],
+                top_ps=sampling_info.top_ps[i*texts_per_device:(i+1)*texts_per_device],
+                top_ks=sampling_info.top_ks[i*texts_per_device:(i+1)*texts_per_device],
+                min_ps=sampling_info.min_ps[i*texts_per_device:(i+1)*texts_per_device],
+                vocab_size=sampling_info.vocab_size,
+            )
+            device_sampling_infos.append(device_sampling_info)
+        
+        # 使用shard_map进行并行采样
+        sharded_sampling = shard_map(
+            single_device_sampling,
+            mesh=self.mesh,
+            in_specs=(P('data'), P('data')),  # outputs和sampling_info都按data轴分片
+            out_specs=P('data'),              # 输出也按data轴分片
+        )
+        
+        print("🎲 执行数据并行采样...")
+        
+        # 组织采样参数为shard_map格式
+        stacked_sampling_info = jax.tree_map(
+            lambda *args: jnp.stack(args),
+            *device_sampling_infos
+        )
+        
+        sampling_results = sharded_sampling(model_outputs, stacked_sampling_info)
+        print("✅ 数据并行采样完成")
+        
+        return sampling_results
 
     def _get_tokenizer(self):
         """Get tokenizer from local path if available, otherwise from Hugging Face"""
@@ -255,76 +445,126 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 # Multiple questions to simulate batch > 1 scenario
                 # Use simpler prompts for MoE testing
                 input_texts = [
-                    # "The capital of France is",
-                    # "What is 2+2?",
-                    # "Hello, my name is"
                     "1+1=?",
+                    "2+2=?",
+                    "Hello world",
+                    "What is AI?",
                 ]
 
-                input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
+                print(f"🎯 Input texts: {input_texts}")
+                print(f"🔧 Use data parallel: {self.use_data_parallel}")
+                print(f"📊 DP size: {self.dp_size}")
+
+                # 使用DP版本的batch创建
+                batches_info, global_info = self._create_dp_batch_from_texts(
                     model.config, input_texts, tokenizer)
 
-                # 初始化完整序列历史，用于累积生成的token
-                complete_sequences = []
-                for batch_idx in range(len(input_texts)):
-                    # 获取每个序列的初始token
-                    start_idx = sum(actual_seq_lens[:batch_idx])
-                    end_idx = start_idx + actual_seq_lens[batch_idx]
-                    initial_tokens = [int(token) for token in input_ids_array[start_idx:end_idx]]
-                    complete_sequences.append(initial_tokens)
+                if self.use_data_parallel and self.dp_size > 1:
+                    print(f"📋 DP模式 - 设备batch数量: {len(batches_info)}")
+                    # 初始化每个设备的完整序列历史
+                    all_complete_sequences = []
+                    all_actual_seq_lens = []
+                    
+                    for device_idx, (input_ids_array, actual_seq_lens, forward_batch) in enumerate(batches_info):
+                        print(f"设备 {device_idx}: batch_size={len(actual_seq_lens)}, tokens={input_ids_array.shape}")
+                        
+                        device_complete_sequences = []
+                        for batch_idx in range(len(actual_seq_lens)):
+                            start_idx = sum(actual_seq_lens[:batch_idx])
+                            end_idx = start_idx + actual_seq_lens[batch_idx]
+                            initial_tokens = [int(token) for token in input_ids_array[start_idx:end_idx]]
+                            device_complete_sequences.append(initial_tokens)
+                        
+                        all_complete_sequences.append(device_complete_sequences)
+                        all_actual_seq_lens.append(actual_seq_lens)
+                else:
+                    # 单设备模式
+                    input_ids_array, actual_seq_lens, forward_batch = batches_info
+                    complete_sequences = []
+                    for batch_idx in range(len(actual_seq_lens)):
+                        start_idx = sum(actual_seq_lens[:batch_idx])
+                        end_idx = start_idx + actual_seq_lens[batch_idx]
+                        initial_tokens = [int(token) for token in input_ids_array[start_idx:end_idx]]
+                        complete_sequences.append(initial_tokens)
 
-                print(f"Input text batch: {input_texts}")
-                print(f"Batch size: {len(input_texts)}")
-                print(f"Actual sequence lengths: {actual_seq_lens}")
-                print(f"Input tokens shape: {input_ids_array.shape}")
-                print(f"Input tokens: {input_ids_array}")
-                print(f"Initial complete sequences: {complete_sequences}")
-                
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
-                    for i in range(10):  # Reduced iterations for MoE testing
-                        # Use existing forward_batch, no need to recreate
-                        y = model(forward_batch.input_ids,
-                                  forward_batch.positions, forward_batch)
+                    for i in range(5):  # 减少迭代次数
+                        print(f"\n🔄 生成步骤 {i+1}")
+                        
+                        # 使用DP forward包装器
+                        y = self._dp_forward_wrapper(model, (batches_info, global_info))
 
-                        # The LogitsProcessor now automatically extracts the last token logits
-                        # y.next_token_logits shape: [batch_size, vocab_size]
-
-                        # Sample next token for each sequence in the batch
-                        next_token_ids = sampler(
-                            y,  # Pass the LogitsProcessorOutput directly
-                            sampling_info=SamplingBatchInfo(
-                                temperatures=jnp.full(
-                                    (len(input_texts), 1), 1.0),
-                                top_ps=jnp.full((len(input_texts), 1), 1.0),
-                                top_ks=jnp.ones((len(input_texts), 1)),
-                                min_ps=jnp.full((len(input_texts), 1), 0.0),
+                        if self.use_data_parallel and self.dp_size > 1:
+                            # DP模式下的采样
+                            total_texts = global_info["total_texts"]
+                            texts_per_device = global_info["texts_per_device"]
+                            
+                            # 创建采样参数（为所有设备）
+                            total_batch_size = self.dp_size * texts_per_device
+                            sampling_info = SamplingBatchInfo(
+                                temperatures=jnp.full((total_batch_size, 1), 1.0),
+                                top_ps=jnp.full((total_batch_size, 1), 1.0),
+                                top_ks=jnp.ones((total_batch_size, 1)),
+                                min_ps=jnp.full((total_batch_size, 1), 0.0),
                                 vocab_size=model.config.vocab_size,
-                            ))
+                            )
+                            
+                            # 执行DP采样
+                            next_token_ids = self._dp_sampling_wrapper(
+                                sampler, y, sampling_info, global_info)
+                            
+                            # 更新每个设备的序列
+                            new_batches_info = []
+                            for device_idx, (device_batch_info, device_next_tokens) in enumerate(
+                                zip(batches_info, next_token_ids)):
+                                
+                                input_ids_array, actual_seq_lens, forward_batch = device_batch_info
+                                device_complete_sequences = all_complete_sequences[device_idx]
+                                
+                                updated_sequences = self.update_forward_batch_with_sequences(
+                                    forward_batch, device_next_tokens, tokenizer, device_complete_sequences)
+                                all_complete_sequences[device_idx] = updated_sequences
+                                
+                                new_batches_info.append((
+                                    forward_batch.input_ids, actual_seq_lens, forward_batch))
+                            
+                            batches_info = new_batches_info
+                            
+                        else:
+                            # 单设备模式
+                            sampling_info = SamplingBatchInfo(
+                                temperatures=jnp.full((len(complete_sequences), 1), 1.0),
+                                top_ps=jnp.full((len(complete_sequences), 1), 1.0),
+                                top_ks=jnp.ones((len(complete_sequences), 1)),
+                                min_ps=jnp.full((len(complete_sequences), 1), 0.0),
+                                vocab_size=model.config.vocab_size,
+                            )
+                            
+                            next_token_ids = sampler(y, sampling_info)
+                            complete_sequences = self.update_forward_batch_with_sequences(
+                                forward_batch, next_token_ids, tokenizer, complete_sequences)
 
-                        complete_sequences = self.update_forward_batch_with_sequences(
-                            forward_batch, next_token_ids, tokenizer, complete_sequences)
-
-                # Decode complete results for each sequence
-                print(f"\n=== Qwen3 MoE Complete Generation Results ===")
-                for batch_idx in range(len(input_texts)):
-                    full_sequence = complete_sequences[batch_idx]
-                    decoded_full = tokenizer.decode(full_sequence)
-                    original_len = actual_seq_lens[batch_idx]
-                    original_tokens = full_sequence[:original_len]
-                    generated_tokens = full_sequence[original_len:]
-                    
-                    original_text = tokenizer.decode(original_tokens)
-                    generated_text = tokenizer.decode(generated_tokens) if generated_tokens else ""
-                    
-                    print(f"Sequence {batch_idx}: {full_sequence}")
-                    print(f"Original tokens {batch_idx}: {original_tokens}")
-                    print(f"Generated tokens {batch_idx}: {generated_tokens}")
-                    print(f"Complete decoded text {batch_idx}: '{decoded_full}'")
-                    print(f"Original question {batch_idx}: '{original_text}'")
-                    print(f"Generated answer {batch_idx}: '{generated_text}'")
-                    print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
-                    print()
+                # 输出结果
+                print(f"\n=== Qwen3 MoE DP Complete Generation Results ===")
+                print(f"🔧 使用数据并行: {self.use_data_parallel}")
+                
+                if self.use_data_parallel and self.dp_size > 1:
+                    # DP模式结果展示
+                    for device_idx, device_sequences in enumerate(all_complete_sequences):
+                        print(f"\n📱 设备 {device_idx} 结果:")
+                        for batch_idx, full_sequence in enumerate(device_sequences):
+                            global_batch_idx = device_idx * len(device_sequences) + batch_idx
+                            if global_batch_idx < len(input_texts):  # 排除填充的空文本
+                                original_text = input_texts[global_batch_idx]
+                                decoded_full = tokenizer.decode(full_sequence)
+                                print(f"  序列 {batch_idx} (全局 {global_batch_idx}): '{original_text}' -> '{decoded_full}'")
+                else:
+                    # 单设备模式结果展示
+                    for batch_idx, full_sequence in enumerate(complete_sequences):
+                        original_text = input_texts[batch_idx]
+                        decoded_full = tokenizer.decode(full_sequence)
+                        print(f"  序列 {batch_idx}: '{original_text}' -> '{decoded_full}'")
 
                 print("\n🔴 Ending debug tracer session...")
                 if self.enable_debug_tracer:
