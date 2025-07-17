@@ -197,13 +197,17 @@ class QWen3MoeAttention(nnx.Module):
             
         # 生成 reshape back 的 HLO
         try:
-            def debug_reshape_back_step(x, target_shape):
-                return x.reshape(target_shape)
+            # 保存原始形状（静态值）
+            original_shape = q.shape
             
-            compiled_reshape_back = jax.jit(debug_reshape_back_step).lower(q_by_head, q.shape).compile()
+            def debug_reshape_back_step(x):
+                # 使用静态已知的形状
+                return x.reshape(original_shape)
+            
+            compiled_reshape_back = jax.jit(debug_reshape_back_step).lower(q_by_head).compile()
             hlo_reshape_back_text = compiled_reshape_back.as_text()
             
-            print(f"🔍 RESHAPE BACK HLO:")
+            print(f"🔍 RESHAPE BACK HLO (目标形状: {original_shape}):")
             print("="*50)
             print(hlo_reshape_back_text)
             print("="*50)
