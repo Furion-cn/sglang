@@ -20,6 +20,7 @@ from sglang.srt.jax.utils import (
     get_expected_param_paths,
     update_state_recursive,
 )
+from sglang.srt.jax.layers.embeddings import EmbedCls
 
 class QWen3Attention(nnx.Module):
     def __init__(self,
@@ -45,9 +46,23 @@ class QWen3Attention(nnx.Module):
         self.q_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
 
-        self.qkv_proj = LinearBase(
+        self.q_proj = LinearBase(
             input_size=hidden_size,
-            output_size=(num_heads + 2 * num_kv_heads) * self.head_dim,
+            output_size=num_heads * self.head_dim,
+            use_bias=attention_bias,
+            kernel_axes=(None, "tensor"),
+            rngs=rngs,
+        )
+        self.k_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
+            use_bias=attention_bias,
+            kernel_axes=(None, "tensor"),
+            rngs=rngs,
+        )
+        self.v_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
             use_bias=attention_bias,
             kernel_axes=(None, "tensor"),
             rngs=rngs,
@@ -80,14 +95,15 @@ class QWen3Attention(nnx.Module):
         positions: jax.Array,
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
+        layer_id: int,
+        forward_mode:str,
     ) -> jax.Array:
-        qkv, _ = self.qkv_proj(hidden_states)
-        global_tracer.print(qkv, f"qkv_proj_output", f"attention_layer_id_{self.layer_id}")
-        
-        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
-        global_tracer.print(q, f"q_split_output", f"attention_layer_id_{self.layer_id}")
-        global_tracer.print(k, f"k_split_output", f"attention_layer_id_{self.layer_id}")
-        global_tracer.print(v, f"v_split_output", f"attention_layer_id_{self.layer_id}")
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
+        global_tracer.print(q, f"q_proj_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(k, f"k_proj_output", f"attention_layer_id_{self.layer_id}")
+        global_tracer.print(v, f"v_proj_output", f"attention_layer_id_{self.layer_id}")
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
@@ -101,11 +117,11 @@ class QWen3Attention(nnx.Module):
         q, k = self.rotary_emb(positions, q, k)
         global_tracer.print(q, f"rotary_emb_output_q", f"attention_layer_id_{self.layer_id}")
         global_tracer.print(k, f"rotary_emb_output_k", f"attention_layer_id_{self.layer_id}")
-        attn_output = self.attn(q, k, v, forward_batch=forward_batch, is_causal=True)
+        attn_output, forward_batch = self.attn(q, k, v, forward_batch=forward_batch, layer_id=layer_id, is_causal=True,forward_mode=forward_mode)
         global_tracer.print(attn_output, f"attn_output", f"attention_layer_id_{self.layer_id}")
 
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, forward_batch
     
 class Qwen3MLP(nnx.Module):
     def __init__(
@@ -202,25 +218,28 @@ class QWen3DecoderLayer(nnx.Module):
         positions: jax.Array,
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
+        forward_mode: str,
         residual: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, jax.Array]:
+    ) -> Tuple[jax.Array, jax.Array, ForwardBatch]:
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         
-        hidden_states = self.self_attn(
+        hidden_states, forward_batch = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
+            layer_id=self.layer_id,
+            forward_mode=forward_mode,
         )
         
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         global_tracer.print(hidden_states, f"post_attention_layernorm_output", f"decoder_layer_id_{self.layer_id}")
         hidden_states = self.mlp(hidden_states)
         
-        return hidden_states, residual
+        return hidden_states, residual, forward_batch
 
 class QWen3Model(nnx.Module):
     def __init__(self,
@@ -252,13 +271,15 @@ class QWen3Model(nnx.Module):
                  input_ids: jax.Array,
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
+                 forward_mode: str,
+                 batch_size: int,
                  ):
         residual = None
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
-            hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
+            hidden_states, residual, forward_batch = layer(positions, hidden_states, forward_batch, forward_mode, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        return hidden_states, forward_batch
 
 class Qwen3ForCausalLMJaxModel(nnx.Module):
     def __init__(self,
@@ -296,9 +317,19 @@ class Qwen3ForCausalLMJaxModel(nnx.Module):
                  input_ids: jax.Array,
                  positions: jax.Array,
                  forward_batch: ForwardBatch,
+                 forward_mode: str,
+                 batch_size: int,
                  ):
-        hidden_states = self.model(input_ids, positions, forward_batch)
-        result = self.logits_processor(hidden_states, self.lm_head, forward_batch)
+        hidden_states = self.model(input_ids, positions, forward_batch, forward_mode, batch_size)
+        result = self.logits_processor(hidden_states, EmbedCls(
+                embedding=self.lm_head.embedding.value,
+                promote_dtype=self.lm_head.promote_dtype,
+                dtype=self.lm_head.dtype,
+                ), 
+            forward_batch,
+            forward_mode,
+            batch_size,
+        )
         return result
 
 EntryClass = Qwen3ForCausalLMJaxModel
