@@ -288,12 +288,17 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             padded_positions = jnp.pad(forward_batch.positions, (0, padding_needed), mode='constant', constant_values=0)
             padded_cache_loc = jnp.pad(forward_batch.cache_loc, (0, padding_needed), mode='constant', constant_values=0)
             
-            # Padding seq_lens和extend_start_loc
+            # Padding seq_lens和extend_start_loc - 确保是JAX array
             current_batch_size = len(seq_lens)
             padding_needed_batch = max_batch_size - current_batch_size
             
-            padded_seq_lens = jnp.pad(seq_lens, (0, padding_needed_batch), mode='constant', constant_values=0)
-            padded_extend_start_loc = jnp.pad(forward_batch.extend_start_loc, (0, padding_needed_batch), mode='constant', constant_values=0)
+            # 转换seq_lens为JAX array
+            seq_lens_array = jnp.array(seq_lens, dtype=jnp.int32)
+            padded_seq_lens = jnp.pad(seq_lens_array, (0, padding_needed_batch), mode='constant', constant_values=0)
+            
+            # 转换extend_start_loc为JAX array
+            extend_start_loc_array = jnp.array(forward_batch.extend_start_loc, dtype=jnp.int32)
+            padded_extend_start_loc = jnp.pad(extend_start_loc_array, (0, padding_needed_batch), mode='constant', constant_values=0)
             
             # 处理out_cache_loc（可能为None）
             if forward_batch.out_cache_loc is not None:
