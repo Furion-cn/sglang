@@ -45,9 +45,23 @@ class QWen3Attention(nnx.Module):
         self.q_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
 
-        self.qkv_proj = LinearBase(
+        self.q_proj = LinearBase(
             input_size=hidden_size,
-            output_size=(num_heads + 2 * num_kv_heads) * self.head_dim,
+            output_size=num_heads * self.head_dim,
+            use_bias=attention_bias,
+            kernel_axes=(None, "tensor"),
+            rngs=rngs,
+        )
+        self.k_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
+            use_bias=attention_bias,
+            kernel_axes=(None, "tensor"),
+            rngs=rngs,
+        )
+        self.v_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
             use_bias=attention_bias,
             kernel_axes=(None, "tensor"),
             rngs=rngs,
@@ -81,13 +95,9 @@ class QWen3Attention(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
     ) -> jax.Array:
-        qkv, _ = self.qkv_proj(hidden_states)
-        global_tracer.print(qkv, f"qkv_proj_output", f"attention_layer_id_{self.layer_id}")
-        
-        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
-        global_tracer.print(q, f"q_split_output", f"attention_layer_id_{self.layer_id}")
-        global_tracer.print(k, f"k_split_output", f"attention_layer_id_{self.layer_id}")
-        global_tracer.print(v, f"v_split_output", f"attention_layer_id_{self.layer_id}")
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)

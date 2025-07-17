@@ -15,7 +15,7 @@
 """Embedding Layers."""
 
 from functools import partial
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +42,7 @@ class Embed(nnx.Module):
         dtype: Optional[jnp.dtype] = None,
         param_dtype: jnp.dtype = jnp.bfloat16,
         promote_dtype: PromoteDtypeFn = dtypes.promote_dtype,
+        kernel_axes: Optional[Sequence[str]] = None,
         rngs: nnx.Rngs = None,
     ):
         """
@@ -58,7 +59,7 @@ class Embed(nnx.Module):
         None
         """
         self.embedding = nnx.Param(
-            nnx.with_partitioning(default_embed_init, (None, "tensor"))(
+            nnx.with_partitioning(default_embed_init, kernel_axes)(
                 rngs.params(), (num_embeddings, features), param_dtype
             )
         )

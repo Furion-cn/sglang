@@ -44,9 +44,24 @@ class QWen3MoeAttention(nnx.Module):
         
         self.q_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, epsilon=rms_norm_eps, rngs=rngs)
-        self.c_attn = LinearBase(
+
+        self.q_proj = LinearBase(
             input_size=hidden_size,
-            output_size=(num_heads + 2 * num_kv_heads) * self.head_dim,
+            output_size=num_heads * self.head_dim,
+            use_bias=attention_bias,
+            kernel_axes=(None, "tensor"),
+            rngs=rngs,
+        )
+        self.k_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
+            use_bias=attention_bias,
+            kernel_axes=(None, "tensor"),
+            rngs=rngs,
+        )
+        self.v_proj = LinearBase(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
             use_bias=attention_bias,
             kernel_axes=(None, "tensor"),
             rngs=rngs,
@@ -80,13 +95,16 @@ class QWen3MoeAttention(nnx.Module):
         forward_batch: ForwardBatch,
     ) -> jax.Array:
         q, k, v = self._proj_qkv(positions, hidden_states)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch, self.layer_id, is_causal=True)
         output, _ = self.c_proj(attn_output)
         return output
     
+    @nnx.jit
     def _proj_qkv(self, positions, hidden_states):
-        qkv, _ = self.c_attn(hidden_states)
-        q, k, v = jnp.split(qkv, [self.q_size, self.q_size + self.kv_size], axis=-1)
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
 
         q_by_head = q.reshape(-1, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
@@ -96,7 +114,6 @@ class QWen3MoeAttention(nnx.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.reshape(k.shape)
 
-        q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
 class QWen3MoeDecoderLayer(nnx.Module):
