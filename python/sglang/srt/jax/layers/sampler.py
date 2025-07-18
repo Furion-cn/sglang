@@ -34,22 +34,23 @@ class Sampler(nnx.Module):
         logits = jnp.reshape(logits_output.next_token_logits,
                              (-1, logits_output.next_token_logits.shape[-1]))
 
-        if sampling_info.is_all_greedy:
-            # Use torch.argmax if all requests use greedy sampling
-            batch_next_token_ids = jnp.argmax(logits, -1).reshape(-1, 1)
-        else:
-            # Post process logits
-            probs = jnp.divide(logits, sampling_info.temperatures)
-            _, new_rng = jax.random.split(self.rngs.params())
-            # A slower fallback implementation with torch native operations.
-            batch_next_token_ids = top_k_top_p_min_p_sampling_from_probs_torch(
-                probs,
-                sampling_info.top_ks,
-                sampling_info.top_ps,
-                sampling_info.min_ps,
-                sampling_info.need_min_p_sampling,
-                new_rng
-            )
+        # if sampling_info.is_all_greedy:
+        #     # Use torch.argmax if all requests use greedy sampling
+        #     batch_next_token_ids = jnp.argmax(logits, -1).reshape(-1, 1)
+        # else:
+        #     # Post process logits
+        #     probs = jnp.divide(logits, sampling_info.temperatures)
+        #     _, new_rng = jax.random.split(self.rngs.params())
+        #     # A slower fallback implementation with torch native operations.
+        #     batch_next_token_ids = top_k_top_p_min_p_sampling_from_probs_torch(
+        #         probs,
+        #         sampling_info.top_ks,
+        #         sampling_info.top_ps,
+        #         sampling_info.min_ps,
+        #         sampling_info.need_min_p_sampling,
+        #         new_rng
+        #     )
+        batch_next_token_ids = jnp.argmax(logits, -1).reshape(-1, 1)
         return batch_next_token_ids
 
 def top_k_top_p_min_p_sampling_from_probs_torch(
