@@ -58,11 +58,26 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         import jax
         from jax.sharding import Mesh
         
+        self.dp_size = int(os.environ.get('DP_SIZE', '1'))
+        print(f"🔧 Setup: DP_SIZE={self.dp_size}")
+        
         devices = jax.devices()        
-        self.mesh = create_device_mesh(
-            ici_parallelism=[1, 4, 1, 1],
-            dcn_parallelism=[1, 1, 1, 1]
-        )
+        
+        if self.dp_size > 1:
+            print(f"🔧 Setting up mesh for data parallelism (DP_SIZE={self.dp_size})")
+            self.mesh = create_device_mesh(
+                ici_parallelism=[self.dp_size, len(devices) // self.dp_size, 1, 1],
+                dcn_parallelism=[1, 1, 1, 1]
+            )
+        else:
+            print(f"🔧 Setting up mesh for standard mode (DP_SIZE={self.dp_size})")
+            self.mesh = create_device_mesh(
+                ici_parallelism=[1, 4, 1, 1],
+                dcn_parallelism=[1, 1, 1, 1]
+            )
+        
+        print(f"🔧 Mesh configuration: {self.mesh.devices.shape}")
+        print(f"🔧 Mesh axis names: {self.mesh.axis_names}")
         
         self.load_config = LoadConfig(load_format=LoadFormat.JAX)
         self.device_config = DeviceConfig("cpu")
@@ -135,6 +150,177 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
         return input_ids_array, actual_seq_lens, forward_batch
 
+    def _create_batch_from_texts_dp(self, model_config, texts, tokenizer):
+        """Create batch with data parallelism - keep batch and sequence dimensions separate,
+        then shard and distribute to devices using JAX primitives
+
+        Args:
+            texts: List[str] input texts to process
+            tokenizer: tokenizer to use for encoding
+
+        Returns:
+            tuple: (sharded_forward_batch, device_count)
+        """
+        print(f"\n🔄 开始创建真正的DP批次，输入文本数量: {len(texts)}")
+        
+        # 第一步：分词，保持每个序列分离
+        tokenized_inputs = []
+        actual_seq_lens = []
+        max_seq_len = 0
+        
+        for i, text in enumerate(texts):
+            tokens = tokenizer.encode(text)
+            tokenized_inputs.append(tokens)
+            actual_seq_lens.append(len(tokens))
+            max_seq_len = max(max_seq_len, len(tokens))
+            print(f"  序列 {i}: 长度={len(tokens)}, tokens={tokens[:5]}...")
+
+        batch_size = len(texts)
+        device_count = self.mesh.devices.shape[0]  # data维度的设备数
+        
+        # 确保batch_size能被device_count整除
+        if batch_size % device_count != 0:
+            raise ValueError(f"batch_size ({batch_size}) 必须能被 device_count ({device_count}) 整除")
+            
+        seqs_per_device = batch_size // device_count
+        print(f"  批次大小: {batch_size}, 最大序列长度: {max_seq_len}")
+        print(f"  设备数量: {device_count}, 每设备序列数: {seqs_per_device}")
+
+        # 第二步：创建填充的2D数组，保持 [batch_size, max_seq_len] 形状
+        pad_token_id = getattr(tokenizer, 'pad_token_id', 0) or 0
+        
+        # 创建2D数组: [batch_size, max_seq_len]
+        input_ids_2d_list = []
+        positions_2d_list = []
+        attention_mask_list = []
+        
+        for i, tokens in enumerate(tokenized_inputs):
+            seq_len = len(tokens)
+            # 填充input_ids
+            row_ids = jnp.array(tokens + [pad_token_id] * (max_seq_len - seq_len), dtype=jnp.int32)
+            input_ids_2d_list.append(row_ids)
+            
+            # 填充positions
+            row_positions = jnp.array(list(range(seq_len)) + [0] * (max_seq_len - seq_len), dtype=jnp.int32)
+            positions_2d_list.append(row_positions)
+            
+            # 填充attention mask
+            row_mask = jnp.array([True] * seq_len + [False] * (max_seq_len - seq_len), dtype=jnp.bool_)
+            attention_mask_list.append(row_mask)
+
+        input_ids_2d = jnp.stack(input_ids_2d_list)  # [batch_size, max_seq_len]
+        positions_2d = jnp.stack(positions_2d_list)  # [batch_size, max_seq_len]
+        attention_mask = jnp.stack(attention_mask_list)  # [batch_size, max_seq_len]
+        seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)  # [batch_size]
+        
+        print(f"  2D数组形状: input_ids={input_ids_2d.shape}, positions={positions_2d.shape}")
+        
+        # 第三步：创建JAX sharding策略
+        from jax.sharding import NamedSharding, PartitionSpec as P
+        
+        # 数据并行sharding策略
+        batch_sharding = NamedSharding(self.mesh, P('data'))          # 只分片batch维度: [batch_size]
+        batch_seq_sharding = NamedSharding(self.mesh, P('data', None)) # 分片batch，复制seq: [batch_size, seq_len]
+        replicated_sharding = NamedSharding(self.mesh, P(None))       # 完全复制
+        
+        print(f"  数据分片策略: batch_seq={batch_seq_sharding}")
+        
+        # 第四步：使用device_put分片所有数据
+        print(f"  🔄 开始数据分片和设备放置...")
+        
+        sharded_input_ids_2d = jax.device_put(input_ids_2d, batch_seq_sharding)
+        sharded_positions_2d = jax.device_put(positions_2d, batch_seq_sharding)
+        sharded_attention_mask = jax.device_put(attention_mask, batch_seq_sharding)
+        sharded_seq_lens = jax.device_put(seq_lens, batch_sharding)
+        
+        print(f"  ✅ 2D数据分片完成!")
+        
+        # 第五步：在设备上并行扁平化（移除padding）
+        def flatten_on_device(input_ids_2d, positions_2d, attention_mask, seq_lens):
+            """在每个设备上扁平化数据，移除padding"""
+            # input_ids_2d: [seqs_per_device, max_seq_len]
+            # 输出: [total_valid_tokens_on_device]
+            
+            # 扁平化并根据mask过滤
+            input_ids_flat = input_ids_2d[attention_mask]
+            positions_flat = positions_2d[attention_mask]
+            
+            # 计算extend_start_loc (每个设备内部的)
+            extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
+            
+            return input_ids_flat, positions_flat, extend_start_loc
+        
+        # 使用pmap在所有设备上并行执行扁平化
+        print(f"  🔄 在设备上并行扁平化...")
+        (sharded_input_ids_flat, 
+         sharded_positions_flat, 
+         sharded_extend_start_loc) = jax.pmap(
+            flatten_on_device, 
+            axis_name='data'
+        )(sharded_input_ids_2d, sharded_positions_2d, sharded_attention_mask, sharded_seq_lens)
+        
+        print(f"  ✅ 扁平化完成! 扁平化后形状: {sharded_input_ids_flat.shape}")
+        
+        # 第六步：创建其他ForwardBatch所需的分片数据
+        def create_cache_and_batch_data(seq_lens):
+            """在每个设备上创建cache_loc等数据"""
+            total_tokens = jnp.sum(seq_lens)
+            cache_loc = jnp.arange(total_tokens, dtype=jnp.int32)
+            batch_size_device = len(seq_lens)
+            return cache_loc, batch_size_device, total_tokens
+        
+        (sharded_cache_loc, 
+         sharded_batch_sizes, 
+         sharded_total_tokens) = jax.pmap(
+            create_cache_and_batch_data,
+            axis_name='data'
+        )(sharded_seq_lens)
+        
+        # 第七步：创建KV缓存池 (在每个设备上复制)
+        cache_pool = ReqToHashKVCachePool(
+            head_num=model_config.num_key_value_heads,
+            head_dim=model_config.head_dim,
+            layer_num=model_config.num_hidden_layers,
+            dtype=jnp.bfloat16 if model_config.torch_dtype == "bfloat16" else jnp.float32,
+            max_seq_len=128,
+            max_batch_size=20,
+        )
+        # cache_pool需要在每个设备上复制
+        sharded_cache_pool = jax.device_put(cache_pool, replicated_sharding)
+        
+        # 第八步：直接在设备上创建ForwardBatch对象
+        def create_forward_batch_on_device(input_ids, positions, seq_lens, cache_loc, 
+                                          extend_start_loc, batch_size, token_to_kv_pool):
+            """在每个设备上创建ForwardBatch"""
+            return ForwardBatch(
+                forward_mode=ForwardMode.EXTEND,
+                batch_size=batch_size,
+                input_ids=input_ids,
+                seq_lens=seq_lens,
+                positions=positions,
+                cache_loc=cache_loc,
+                out_cache_loc=None,
+                extend_start_loc=extend_start_loc,
+                token_to_kv_pool=token_to_kv_pool,
+            )
+        
+        print(f"  🔄 在设备上创建ForwardBatch对象...")
+        
+        # 使用pmap在每个设备上创建ForwardBatch
+        sharded_forward_batch = jax.pmap(create_forward_batch_on_device, axis_name='data')(
+            sharded_input_ids_flat,
+            sharded_positions_flat, 
+            sharded_seq_lens,
+            sharded_cache_loc,
+            sharded_extend_start_loc,
+            sharded_batch_sizes,
+            sharded_cache_pool
+        )
+        
+        print(f"  ✅ DP批次创建完成! ForwardBatch已在所有设备上准备就绪")
+        
+        return sharded_forward_batch, device_count
+
     def _get_tokenizer(self):
         """Get tokenizer from local path if available, otherwise from Hugging Face"""
         model_path = Path(self.test_model_path)
@@ -182,9 +368,12 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         if not os.path.exists(self.test_model_path):
             self.skipTest(
                 f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
-
         from sglang.debug_tracer import global_tracer
-
+        
+        if self.dp_size > 1:
+            self.test_load_model_with_jax_loader_dp()
+            return
+        
         try:
             hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
                 self.test_model_path, None
@@ -255,9 +444,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 # Multiple questions to simulate batch > 1 scenario
                 # Use simpler prompts for MoE testing
                 input_texts = [
-                    # "The capital of France is",
-                    # "What is 2+2?",
-                    # "Hello, my name is"
                     "1+1=?",
                 ]
 
@@ -344,6 +530,211 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     pass
             self.fail(f"JAXModelLoader integration test for Qwen3 MoE failed: {e}")
 
+    def test_load_model_with_jax_loader_dp(self):
+        """Test loading Qwen3 MoE model using JAXModelLoader with Data Parallelism"""
+        try:
+            hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
+                self.test_model_path, None
+            )
+
+            if not hf_weights_files:
+                self.skipTest(
+                    f"No .msgpack files found in {self.test_model_path}")
+
+            print(f"\n=== 🚀 Testing JAX Data Parallelism with DP_SIZE={self.dp_size} ===")
+            print(f"Model path: {self.test_model_path}")
+            print(f"Device configuration: {self.mesh.devices.shape}")
+
+            model_config = ModelConfig(
+                model_path=self.test_model_path,
+                model_override_args="{}"
+            )
+            
+            def custom_load_model_with_mesh(*args, **kwargs):
+                mesh = kwargs.get('mesh')
+                model_config = kwargs.get('model_config')
+                
+                with mesh:
+                    model_config.hf_config.mesh = mesh
+                    print(f"设置 mesh: {mesh}")
+                    
+                    model = self.jax_loader._initialize_jax_model(model_config)
+                    pytree = self.jax_loader._get_jax_pytree(model_config)
+                    self.jax_loader._load_pytree_weights(model, pytree)
+                    
+                    return model
+
+            with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
+                mock_arch.return_value = (Qwen3MoeForCausalLMJaxModel, None)
+
+                print("\n🔄 Loading Qwen3 MoE model...")
+                
+                model = custom_load_model_with_mesh(
+                    model_config=model_config,
+                    device_config=self.device_config,
+                    mesh=self.mesh,
+                )
+
+                print("✅ Model loaded successfully!")
+                
+                # 准备DP测试数据，序列数量必须能被dp_size整除
+                base_texts = ["1+1=?", "2+2=?", "3+3=?", "4+4=?"]
+                # 确保有足够的序列用于dp_size个设备
+                input_texts = base_texts[:self.dp_size] if len(base_texts) >= self.dp_size else base_texts * ((self.dp_size // len(base_texts)) + 1)
+                input_texts = input_texts[:self.dp_size]  # 精确匹配dp_size
+                
+                tokenizer = self._get_tokenizer()
+                
+                print(f"\n📊 DP Configuration:")
+                print(f"  Input sequences: {len(input_texts)}")
+                print(f"  Device count: {self.mesh.devices.shape[0]}")
+                print(f"  Sequences per device: {len(input_texts) // self.mesh.devices.shape[0]}")
+                print(f"  Input texts: {input_texts}")
+                
+                # 使用DP批次创建方法
+                sharded_forward_batch, device_count = self._create_batch_from_texts_dp(
+                    model.config, input_texts, tokenizer)
+
+                # 创建真正的并行前向传播+采样函数
+                def dp_forward_and_sample(forward_batch, temps, top_ps, top_ks, min_ps):
+                    """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
+                    # 1. 模型前向传播
+                    outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
+                    
+                    # 2. 直接在同一个pmap中采样
+                    local_sampling_info = SamplingBatchInfo(
+                        temperatures=temps,
+                        top_ps=top_ps,
+                        top_ks=top_ks,
+                        min_ps=min_ps,
+                        vocab_size=model.config.vocab_size,
+                    )
+                    next_token_ids = sampler(outputs, sampling_info=local_sampling_info)
+                    
+                    return outputs, next_token_ids
+
+                # 使用pmap实现真正的数据并行 - 一个函数搞定前向+采样！
+                print(f"\n🔄 Creating unified data parallel forward+sample function...")
+                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data')
+                
+                print(f"\n🚀 Starting real parallel execution...")
+                print(f"  Device count: {device_count}")
+                print(f"  Sequences per device: {len(input_texts) // device_count}")
+                
+                # 创建sampler用于token生成
+                sampler = Sampler(rngs=nnx.Rngs(0))
+                
+                if self.enable_debug_tracer:
+                    global_tracer.start_session()
+                
+                jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
+                with self.mesh, jax_trace_context(jax_profiling_dir):
+                    
+                    # 初始化完整序列历史，用于累积生成的token
+                    complete_sequences = []
+                    for batch_idx in range(len(input_texts)):
+                        # 从sharded_forward_batch中提取每个序列的初始token
+                        device_id = batch_idx // (len(input_texts) // device_count)
+                        local_batch_idx = batch_idx % (len(input_texts) // device_count)
+                        
+                        # 获取该序列在对应设备上的长度
+                        seq_len = int(sharded_forward_batch.seq_lens[device_id][local_batch_idx])
+                        
+                        # 计算该序列在扁平化数组中的起始位置
+                        if local_batch_idx == 0:
+                            start_idx = 0
+                        else:
+                            start_idx = int(sharded_forward_batch.extend_start_loc[device_id][local_batch_idx])
+                        
+                        end_idx = start_idx + seq_len
+                        initial_tokens = [int(token) for token in sharded_forward_batch.input_ids[device_id][start_idx:end_idx]]
+                        complete_sequences.append(initial_tokens)
+                    
+                    print(f"\n📝 Initial sequences for decode:")
+                    for i, seq in enumerate(complete_sequences):
+                        decoded = tokenizer.decode(seq)
+                        print(f"  Sequence {i}: {seq} -> '{decoded}'")
+                    
+                    # 准备分片的sampling参数
+                    seqs_per_device = len(input_texts) // device_count
+                    sampling_temps = jnp.full((device_count, seqs_per_device, 1), 1.0)
+                    sampling_top_ps = jnp.full((device_count, seqs_per_device, 1), 1.0)
+                    sampling_top_ks = jnp.ones((device_count, seqs_per_device, 1))
+                    sampling_min_ps = jnp.full((device_count, seqs_per_device, 1), 0.0)
+                    
+                    # 执行生成循环 - 一个pmap搞定前向+采样！
+                    for iteration in range(10):
+                        print(f"\n  🔄 DP parallel iteration {iteration + 1}/10")
+                        
+                        # 一次调用完成：前向传播 + 采样！
+                        outputs, next_token_ids = dp_forward_sample(
+                            sharded_forward_batch,
+                            sampling_temps,
+                            sampling_top_ps, 
+                            sampling_top_ks,
+                            sampling_min_ps
+                        )
+                        
+                        if iteration == 0:
+                            # 第一次迭代显示详细统计
+                            print(f"    ✅ All {device_count} devices executed forward+sample in parallel!")
+                            print(f"    📊 Output statistics:")
+                            print(f"      Output shape: {outputs.next_token_logits.shape}")
+                            print(f"      Sequences per device: {outputs.next_token_logits.shape[1]}")
+                            print(f"      Vocabulary size: {outputs.next_token_logits.shape[2]}")
+                            print(f"      Next tokens shape: {next_token_ids.shape}")
+                        
+                        # 更新complete_sequences和sharded_forward_batch
+                        complete_sequences = self.update_dp_forward_batch_with_sequences(
+                            sharded_forward_batch, next_token_ids, tokenizer, complete_sequences, device_count)
+                        
+                        # 每几次迭代显示进度
+                        if (iteration + 1) % 3 == 0:
+                            print(f"    🔄 Generated {iteration + 1} tokens...")
+                            for i, seq in enumerate(complete_sequences):
+                                decoded = tokenizer.decode(seq)
+                                print(f"      Sequence {i}: '{decoded}'")
+
+                # 显示最终生成结果
+                print(f"\n=== 🎉 JAX Data Parallelism Complete Generation Results ===")
+                for batch_idx in range(len(input_texts)):
+                    full_sequence = complete_sequences[batch_idx]
+                    decoded_full = tokenizer.decode(full_sequence)
+                    
+                    # 计算原始长度
+                    device_id = batch_idx // (len(input_texts) // device_count)
+                    local_batch_idx = batch_idx % (len(input_texts) // device_count)
+                    original_len = int(sharded_forward_batch.seq_lens[device_id][local_batch_idx])
+                    
+                    original_tokens = full_sequence[:original_len]
+                    generated_tokens = full_sequence[original_len:]
+                    
+                    original_text = tokenizer.decode(original_tokens)
+                    generated_text = tokenizer.decode(generated_tokens) if generated_tokens else ""
+                    
+                    print(f"Sequence {batch_idx}: {full_sequence}")
+                    print(f"Original tokens {batch_idx}: {original_tokens}")
+                    print(f"Generated tokens {batch_idx}: {generated_tokens}")
+                    print(f"Complete decoded text {batch_idx}: '{decoded_full}'")
+                    print(f"Original question {batch_idx}: '{original_text}'")
+                    print(f"Generated answer {batch_idx}: '{generated_text}'")
+                    print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
+
+                if self.enable_debug_tracer:
+                    debug_file = global_tracer.end_session()
+                    if debug_file:
+                        print(f"✅ Debug trace saved to: {debug_file}")
+
+        except Exception as e:
+            if 'global_tracer' in locals():
+                try:
+                    if self.enable_debug_tracer:
+                        global_tracer.end_session()
+                        print("🔴 Debug tracer session ended due to exception")
+                except:
+                    pass
+            self.fail(f"Data Parallelism test failed: {e}")
+
     def test_prepare_jax_weights_no_msgpack_files(self):
         """Test JAXModelLoader behavior when no msgpack files exist"""
         import tempfile
@@ -407,6 +798,79 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         if forward_batch.forward_mode == ForwardMode.EXTEND:
             forward_batch.forward_mode = ForwardMode.DECODE
             
+        return complete_sequences
+
+    def update_dp_forward_batch_with_sequences(self, sharded_forward_batch, next_token_ids, tokenizer, complete_sequences, device_count):
+        """更新数据并行的ForwardBatch和complete_sequences"""
+        # 更新complete_sequences
+        for batch_idx in range(len(complete_sequences)):
+            device_id = batch_idx // (len(complete_sequences) // device_count)
+            local_batch_idx = batch_idx % (len(complete_sequences) // device_count)
+            
+            current_token_id = int(next_token_ids[device_id, local_batch_idx, 0])
+            complete_sequences[batch_idx].append(current_token_id)
+            
+            decoded_token = tokenizer.decode([current_token_id])
+            if batch_idx < 2:  # 只显示前两个序列的详细信息
+                print(f"    Device {device_id}, Local batch {local_batch_idx}, Global batch {batch_idx}: token_id={current_token_id}, decoded='{decoded_token}'")
+        
+        # 更新sharded_forward_batch用于下一次迭代
+        # 这里需要在每个设备上更新ForwardBatch
+        def update_forward_batch_on_device(forward_batch, next_tokens):
+            """在每个设备上更新ForwardBatch"""
+            # 更新seq_lens
+            new_seq_lens = forward_batch.seq_lens + 1
+            
+            # 更新positions (对于decode模式，position是当前序列长度-1)
+            new_positions = new_seq_lens - 1
+            
+            # 更新input_ids (对于decode模式，input_ids是新生成的token)
+            new_input_ids = next_tokens[:, 0]  # 取第一个维度
+            
+            # 更新extend_start_loc
+            new_extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), new_seq_lens[:-1]]))
+            
+            # 更新cache_loc (添加新的cache位置)
+            batch_size = len(new_seq_lens)
+            if forward_batch.out_cache_loc is None:
+                # 第一次更新，创建out_cache_loc
+                max_cache_loc = jnp.max(forward_batch.cache_loc) if forward_batch.cache_loc.size > 0 else -1
+                new_out_cache_loc = jnp.arange(max_cache_loc + 1, max_cache_loc + 1 + batch_size, dtype=jnp.int32)
+            else:
+                # 后续更新，扩展cache_loc
+                new_out_cache_loc = jnp.max(forward_batch.cache_loc) + jnp.arange(1, batch_size + 1, dtype=jnp.int32)
+            
+            # 更新cache_loc，将out_cache_loc添加到cache_loc中
+            # 这里简化处理，实际实现可能需要更复杂的缓存管理
+            new_cache_loc = new_out_cache_loc
+            
+            return ForwardBatch(
+                forward_mode=ForwardMode.DECODE,  # 切换到DECODE模式
+                batch_size=forward_batch.batch_size,
+                input_ids=new_input_ids,
+                seq_lens=new_seq_lens,
+                positions=new_positions,
+                cache_loc=new_cache_loc,
+                out_cache_loc=None,  # decode模式下重置
+                extend_start_loc=new_extend_start_loc,
+                token_to_kv_pool=forward_batch.token_to_kv_pool,
+            )
+        
+        # 使用pmap在所有设备上更新ForwardBatch
+        dp_update = jax.pmap(update_forward_batch_on_device, axis_name='data')
+        
+        # 更新sharded_forward_batch
+        updated_batch = dp_update(sharded_forward_batch, next_token_ids)
+        
+        # 更新原始的sharded_forward_batch对象的属性
+        sharded_forward_batch.forward_mode = updated_batch.forward_mode
+        sharded_forward_batch.input_ids = updated_batch.input_ids
+        sharded_forward_batch.seq_lens = updated_batch.seq_lens
+        sharded_forward_batch.positions = updated_batch.positions
+        sharded_forward_batch.cache_loc = updated_batch.cache_loc
+        sharded_forward_batch.out_cache_loc = updated_batch.out_cache_loc
+        sharded_forward_batch.extend_start_loc = updated_batch.extend_start_loc
+        
         return complete_sequences
 
 if __name__ == '__main__':
