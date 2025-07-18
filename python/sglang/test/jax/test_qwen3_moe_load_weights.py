@@ -25,6 +25,7 @@ from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.jax.layers.sampler import Sampler
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.models.qwen3_moe import Qwen3MoeForCausalLMJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
@@ -77,6 +78,27 @@ def _forward_batch_unflatten(aux_data, children):
 
 jax.tree_util.register_pytree_node(
     ForwardBatch, _forward_batch_flatten, _forward_batch_unflatten
+)
+
+
+# Register LogitsProcessorOutput as a JAX PyTree. This allows it to be returned
+# from JIT-compiled functions. The `next_token_logits` is the only dynamic
+# JAX array (child), and there is no static metadata.
+def _logits_processor_output_flatten(output: LogitsProcessorOutput):
+    """Flattens the LogitsProcessorOutput for JAX transformations."""
+    children = (output.next_token_logits,)
+    aux_data = None
+    return children, aux_data
+
+def _logits_processor_output_unflatten(aux_data, children):
+    """Unflattens the LogitsProcessorOutput from JAX representations."""
+    (next_token_logits,) = children
+    return LogitsProcessorOutput(next_token_logits=next_token_logits)
+
+jax.tree_util.register_pytree_node(
+    LogitsProcessorOutput,
+    _logits_processor_output_flatten,
+    _logits_processor_output_unflatten,
 )
 
 
