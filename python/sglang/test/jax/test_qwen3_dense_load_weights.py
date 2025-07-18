@@ -12,6 +12,7 @@ Usage:
 import os
 import jax
 import unittest
+import dataclasses
 from pathlib import Path
 from unittest.mock import patch
 
@@ -296,9 +297,40 @@ class TestQwen3LoadWeights(CustomTestCase):
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
                     for i in range(10):
-                        # Stack forward_batch objects for pmap. This requires ForwardBatch to be a PyTree.
-                        # Assuming ForwardBatch is a dataclass or compatible PyTree.
-                        stacked_forward_batch = jax.tree_util.tree_map(lambda *x: jnp.stack(x), *forward_batch_list)
+                        # Pad the batches to have the same shape for pmap.
+                        # This is necessary because the packed format leads to different
+                        # lengths for arrays like input_ids and cache_loc across different
+                        # data parallel groups.
+                        padded_batch_list = []
+                        is_decode = forward_batch_list[0].forward_mode == ForwardMode.DECODE
+
+                        if is_decode:
+                            # In decode mode, only cache_loc needs padding as its length
+                            # depends on the sum of sequence lengths in the group.
+                            max_cache_loc_len = max(fb.cache_loc.shape[0] for fb in forward_batch_list)
+                            for fb in forward_batch_list:
+                                pad_len = max_cache_loc_len - fb.cache_loc.shape[0]
+                                padded_cache_loc = jnp.pad(fb.cache_loc, ((0, pad_len),))
+                                padded_batch_list.append(dataclasses.replace(fb, cache_loc=padded_cache_loc))
+                        else:  # EXTEND mode
+                            # In extend mode, input_ids, positions, and cache_loc all have
+                            # a length equal to the sum of sequence lengths.
+                            max_len = max(fb.input_ids.shape[0] for fb in forward_batch_list)
+                            for fb in forward_batch_list:
+                                pad_len = max_len - fb.input_ids.shape[0]
+                                pad_width = ((0, pad_len),)
+                                padded_input_ids = jnp.pad(fb.input_ids, pad_width)
+                                padded_positions = jnp.pad(fb.positions, pad_width)
+                                padded_cache_loc = jnp.pad(fb.cache_loc, pad_width)
+                                padded_batch_list.append(dataclasses.replace(
+                                    fb,
+                                    input_ids=padded_input_ids,
+                                    positions=padded_positions,
+                                    cache_loc=padded_cache_loc
+                                ))
+
+                        # Stack forward_batch objects for pmap.
+                        stacked_forward_batch = jax.tree_util.tree_map(lambda *x: jnp.stack(x), *padded_batch_list)
                         
                         # Create and stack sampling info
                         sampling_info_list = []
