@@ -25,7 +25,7 @@ from functools import partial
 from sglang.debug_tracer import global_tracer
 
 MAX_SEQ_LEN=128
-MAX_BATCH_SIZE=10
+MAX_BATCH_SIZE=20
 
 class TestQwenModel(unittest.TestCase):
     """Test cases for the Qwen model."""
@@ -33,6 +33,8 @@ class TestQwenModel(unittest.TestCase):
     def setUp(self):
         self.mesh = create_device_mesh(
             ici_parallelism=[-1, 1, 1, 1], dcn_parallelism=[1, 1, 1, 1])
+        # note: please do not remove it because mesh will be gained in shard_map in Attention for pallas.
+        jax.sharding.set_mesh(self.mesh)
         # Model path for local model and tokenizer
         self.test_model_path = os.environ.get(
             'MODEL_PATH', 'Qwen/Qwen-7B')  # Default to HuggingFace
@@ -107,6 +109,8 @@ class TestQwenModel(unittest.TestCase):
                 model_config=model_config,
                 device_config=self.device_config,
                 mesh=self.mesh,
+                max_seq_len=MAX_SEQ_LEN,
+                max_batch_size=MAX_BATCH_SIZE,
             )
 
             print("✅ Model loaded successfully!")
@@ -417,7 +421,6 @@ class TestQwenModel(unittest.TestCase):
                 }
 
             max_iterations = 15 if batch_size and batch_size > 10 else 30
-            #max_iterations = 11
             print(
                 f"\n🔄 Starting generation (max {max_iterations} iterations)...")
 
@@ -442,18 +445,8 @@ class TestQwenModel(unittest.TestCase):
                 if iteration % 5 == 0 or len(input_texts) <= 10:  # 减少大批量时的输出
                     print(f"--- Iteration {iteration + 1} ---")
                     print(f"Active requests: {forward_batch.batch_size}")
-                
-                import jax.tree_util as tree_util
-
-                # 检查 ForwardBatch 是否为 pytree
-                try:
-                    tree_util.tree_flatten(forward_batch)
-                    print("ForwardBatch is a valid pytree")
-                except Exception as e:
-                    print(f"ForwardBatch is not a valid pytree: {e}")
 
                 if iteration==0:
-                    #print(f"forward_batch.k_cache: {forward_batch.k_cache}")
                     y,forward_batch = _forward_extend(model,forward_batch,forward_batch.batch_size)
                 else:
                     y,forward_batch = _forward_decode(model,forward_batch,forward_batch.batch_size)

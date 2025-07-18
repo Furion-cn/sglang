@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 
 from sglang.srt.jax.mem_cache.memory_pool import KVCache
+from jax.sharding import PartitionSpec as P
 
 
 
@@ -71,41 +72,62 @@ def create_kv_cache(
     hidden_dim = head_num * head_dim
 
     k_cache = jnp.zeros(
-        (layer_num, max_tokens, hidden_dim),
+        (layer_num*max_tokens, head_num,head_dim),
         dtype=dtype
     )
     v_cache = jnp.zeros(
-        (layer_num, max_tokens, hidden_dim),
+        (layer_num*max_tokens, head_num,head_dim),
         dtype=dtype
     )
     return k_cache,v_cache
 
-def get_kv_buffer(k_cache,v_cache, layer_id: int) -> Tuple[jax.Array, jax.Array]:
-    return k_cache[layer_id], v_cache[layer_id]
+# def get_kv_buffer(k_cache,v_cache, layer_id: int) -> Tuple[jax.Array, jax.Array]:
+#     return k_cache[layer_id], v_cache[layer_id]
+def get_kv_buffer(k_cache,v_cache, start: int ,end:int) -> Tuple[jax.Array, jax.Array]:
+    return k_cache[start:end], v_cache[start:end]
 
 def set_kv_buffer(
-    layer_id: int,
-    loc: jax.Array,
-    cache_k: jax.Array,
-    cache_v: jax.Array,
+    #layer_id: int,
+    
+    #loc: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
     k_cache:jax.Array,
     v_cache:jax.Array,
+    seq_lens:jax.Array,
+    kv_start_loc: jax.Array,
+    kv_cache_start_loc:jax.Array,
 ):
-    # k_cache, v_cache = _set_kv_cache(
-    #     layer_id, loc, cache_k, cache_v,
-    #     k_cache, v_cache
-    # )
-    #print(f"[set_kv_buffer] loc.shape: {loc.shape}, cache_k.shape: {cache_k.shape}, cache_v.shape: {cache_v.shape}")
-    assert loc.shape[0] == cache_k.shape[0] == cache_v.shape[0], "Batch size mismatch"
-    # print(f"layer_id: {layer_id}, loc.shape: {loc.shape}, loc: {loc}")
-    # print(f"k_cache: {k_cache.shape}, k: {cache_k.shape}")
-    # print(f"v_cache: {v_cache.shape}, v: {cache_k.shape}")
+    # original impl
+    # assert loc.shape[0] == cache_k.shape[0] == cache_v.shape[0], "Batch size mismatch"
 
-    k_cache = k_cache.at[layer_id, loc].set(cache_k)
-    v_cache = v_cache.at[layer_id, loc].set(cache_v)
+    # k_cache = k_cache.at[layer_id, loc].set(cache_k)
+    # v_cache = v_cache.at[layer_id, loc].set(cache_v)
+
+    # update in-place
+    """
+    k: jax.Array,          # padding key (batch_size)
+    v: jax.Array,          # padding value
+    k_cache: jax.Array,
+    v_cache: jax.Array,
+    seq_lens: jax.Array,   # (batch_size, )
+    kv_start_loc: jax.Array,
+    kv_cache_start_loc: jax.Array,  # (batch_size, )
+    """
+    #k_cache_layer=k_cache[layer_id]
+    #v_cache_layer=v_cache[layer_id]
+
+    k_cache,v_cache=update_kv_cache(
+        k,
+        v,
+        k_cache,
+        v_cache,
+        seq_lens,
+        kv_start_loc,
+        kv_cache_start_loc,
+    )
 
     return k_cache, v_cache
-    # return k_cache,v_cache
 
 
 def cdiv(a: int, b: int) -> int:
@@ -163,7 +185,6 @@ def _kv_cache_update_kernel(
     for async_copy in async_copies:
         async_copy.wait()
 
-
 @partial(
     jax.jit,
     static_argnames=["page_size", "num_slices_per_block"],
@@ -179,52 +200,64 @@ def kv_cache_update(
     page_size: int = 1024,
     num_slices_per_block: int = 8,
 ):
-    assert slices.shape[1] % num_slices_per_block == 0, f"slices.shape[1]={slices.shape[1]} is not divisible by num_slices_per_block={num_slices_per_block}"
-    _, num_combined_kv_heads, head_dim = new_kv.shape
-    assert kv_cache.shape[1] == num_combined_kv_heads, f"kv_cache.shape[1]={kv_cache.shape[1]} is not equal to num_combined_kv_heads={num_combined_kv_heads}"
-    assert kv_cache.shape[2] == head_dim, f"kv_cache.shape[2]={kv_cache.shape[2]} is not equal to head_dim={head_dim}"
-    assert head_dim % 128 == 0, f"head_dim={head_dim} is not divisible by 128"
-    # TODO: Add dynamic check to make sure that the all the slice lengths are
-    # smaller or equal to page_size
-
-    in_specs = [
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
-    ]
-
-    out_specs = [pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY)]
-    out_shape = [jax.ShapeDtypeStruct(kv_cache.shape, dtype=kv_cache.dtype)]
-
-    scalar_prefetches = [slices]
-    scratch = pltpu.VMEM(
-        (num_slices_per_block, page_size, num_combined_kv_heads, head_dim),
-        new_kv.dtype,
-    )
-
-    scratch_shapes = [
-        scratch,
-        pltpu.SemaphoreType.DMA,
-    ]
-
-    kernel = pl.pallas_call(
-        _kv_cache_update_kernel,
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=len(scalar_prefetches),
-            in_specs=in_specs,
-            out_specs=out_specs,
-            grid=(cdiv(num_kv_update_slices[0], num_slices_per_block), ),
-            scratch_shapes=scratch_shapes,
-        ),
-        out_shape=out_shape,
-        input_output_aliases={len(scalar_prefetches) + 1: 0},
-    )
+    mesh=jax.sharding.get_abstract_mesh()
     
-    cur_mesh = jax.sharding.get_abstract_mesh()
-    if not cur_mesh.empty:
-        kernel = shard_map(kernel, mesh=jax.sharding.get_abstract_mesh(
-        ), in_specs=P(None,), out_specs=P(None,), check_rep=False)
 
-    return kernel(*scalar_prefetches, new_kv, kv_cache)[0]
+    @jax.shard_map(
+        mesh=mesh,
+        in_specs=(
+            P(None, None, None),   # new_kv
+            P(None, None),         # slices
+            P(None, None, None),   # kv_cache
+            P(None),               # num_kv_update_slices
+        ),
+        out_specs=P(None, None, None),
+        check_vma=False,
+    )
+    def _kv_cache_update_wrapper(new_kv, slices, kv_cache, num_kv_update_slices):
+        assert slices.shape[1] % num_slices_per_block == 0, f"slices.shape[1]={slices.shape[1]} is not divisible by num_slices_per_block={num_slices_per_block}"
+        _, num_combined_kv_heads, head_dim = new_kv.shape
+        assert kv_cache.shape[1] == num_combined_kv_heads, f"kv_cache.shape[1]={kv_cache.shape[1]} is not equal to num_combined_kv_heads={num_combined_kv_heads}"
+        assert kv_cache.shape[2] == head_dim, f"kv_cache.shape[2]={kv_cache.shape[2]} is not equal to head_dim={head_dim}"
+        assert head_dim % 128 == 0, f"head_dim={head_dim} is not divisible by 128"
+        # TODO: Add dynamic check to make sure that the all the slice lengths are
+        # smaller or equal to page_size
+
+        in_specs = [
+            pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+            pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        ]
+
+        out_specs = [pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY)]
+        out_shape = [jax.ShapeDtypeStruct(kv_cache.shape, dtype=kv_cache.dtype)]
+
+        scalar_prefetches = [slices]
+        scratch = pltpu.VMEM(
+            (num_slices_per_block, page_size, num_combined_kv_heads, head_dim),
+            new_kv.dtype,
+        )
+
+        scratch_shapes = [
+            scratch,
+            pltpu.SemaphoreType.DMA,
+        ]
+
+        kernel = pl.pallas_call(
+            _kv_cache_update_kernel,
+            grid_spec=pltpu.PrefetchScalarGridSpec(
+                num_scalar_prefetch=len(scalar_prefetches),
+                in_specs=in_specs,
+                out_specs=out_specs,
+                grid=(cdiv(num_kv_update_slices[0], num_slices_per_block), ),
+                scratch_shapes=scratch_shapes,
+            ),
+            out_shape=out_shape,
+            input_output_aliases={len(scalar_prefetches) + 1: 0},
+        )
+
+        return kernel(*scalar_prefetches, new_kv, kv_cache)[0]
+
+    return _kv_cache_update_wrapper(new_kv, slices, kv_cache, num_kv_update_slices)
 
 
 
@@ -250,7 +283,15 @@ NUM_SLICES_PER_BLOCK = 4
 PAGE_SIZE = 1024
 
 
-@jax.jit
+"""
+    layer_id: int,
+    loc: jax.Array,
+    cache_k: jax.Array,
+    cache_v: jax.Array,
+    k_cache:jax.Array,
+    v_cache:jax.Array,
+"""
+#@jax.jit
 def update_kv_cache(
     k: jax.Array,          # padding key (batch_size)
     v: jax.Array,          # padding value
