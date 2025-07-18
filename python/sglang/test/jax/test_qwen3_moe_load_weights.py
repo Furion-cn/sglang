@@ -214,6 +214,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)  # [batch_size]
         
         print(f"  2D数组形状: input_ids={input_ids_2d.shape}, positions={positions_2d.shape}")
+        print(f"  设备数量: {device_count}, 每设备序列数: {seqs_per_device}")
         
         # 第三步：创建JAX sharding策略
         from jax.sharding import NamedSharding, PartitionSpec as P
@@ -234,61 +235,62 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         sharded_seq_lens = jax.device_put(seq_lens, batch_sharding)
         
         print(f"  ✅ 2D数据分片完成!")
+        print(f"  分片后形状: input_ids={sharded_input_ids_2d.shape}, seq_lens={sharded_seq_lens.shape}")
         
         # 第五步：在设备上并行扁平化（移除padding）
         def flatten_on_device(input_ids_2d, positions_2d, attention_mask, seq_lens):
-            """在每个设备上扁平化数据，移除padding - JAX兼容版本"""
-            # input_ids_2d: [seqs_per_device, max_seq_len]
-            # 为了避免动态形状问题，我们使用固定大小的输出
+            """在每个设备上扁平化数据，移除padding - 固定形状版本"""
+            # 在pmap中，每个设备会收到数据，第一个维度(device轴)已经被消耗
             
-            batch_size, max_seq_len = input_ids_2d.shape
-            max_output_size = batch_size * max_seq_len  # 最大可能的输出大小
-            
-            # 创建输出数组
-            output_input_ids = jnp.zeros(max_output_size, dtype=jnp.int32)
-            output_positions = jnp.zeros(max_output_size, dtype=jnp.int32)
-            
-            # 使用scan来避免动态索引
-            def copy_valid_tokens(carry, x):
-                output_idx, out_ids, out_pos = carry
-                seq_idx, pos_in_seq = x
+            if input_ids_2d.ndim == 1:
+                # 每个设备只有一个序列: [max_seq_len]
+                seq_len = seq_lens  # 标量
+                max_seq_len = input_ids_2d.shape[0]
                 
-                # 检查这个位置是否有效
-                is_valid = pos_in_seq < seq_lens[seq_idx]
+                # 使用attention mask来过滤有效token
+                mask = jnp.arange(max_seq_len) < seq_len
                 
-                # 获取token和position
-                token_id = input_ids_2d[seq_idx, pos_in_seq]
-                position = positions_2d[seq_idx, pos_in_seq] 
+                # 创建固定大小的输出（使用最大长度）
+                valid_input_ids = jnp.where(mask, input_ids_2d, 0)
+                valid_positions = jnp.where(mask, positions_2d, 0)
+                extend_start_loc = jnp.array([0])
                 
-                # 条件更新输出数组
-                out_ids = out_ids.at[output_idx].set(
-                    jnp.where(is_valid, token_id, out_ids[output_idx])
-                )
-                out_pos = out_pos.at[output_idx].set(
-                    jnp.where(is_valid, position, out_pos[output_idx])
-                )
+                return valid_input_ids, valid_positions, extend_start_loc
                 
-                # 更新输出索引
-                new_output_idx = jnp.where(is_valid, output_idx + 1, output_idx)
+            elif input_ids_2d.ndim == 2:
+                # 每个设备有多个序列: [seqs_per_device, max_seq_len]
+                seqs_per_device, max_seq_len = input_ids_2d.shape
                 
-                return (new_output_idx, out_ids, out_pos), None
+                # 创建固定大小的输出（最大可能大小）
+                max_output_size = seqs_per_device * max_seq_len
+                valid_input_ids = jnp.zeros(max_output_size, dtype=jnp.int32)
+                valid_positions = jnp.zeros(max_output_size, dtype=jnp.int32)
+                
+                # 使用mask创建有效token的选择
+                output_idx = 0
+                for seq_idx in range(seqs_per_device):
+                    seq_len = seq_lens[seq_idx]
+                    for pos in range(max_seq_len):
+                        is_valid = pos < seq_len
+                        
+                        # 条件性地复制token
+                        valid_input_ids = valid_input_ids.at[output_idx].set(
+                            jnp.where(is_valid, input_ids_2d[seq_idx, pos], valid_input_ids[output_idx])
+                        )
+                        valid_positions = valid_positions.at[output_idx].set(
+                            jnp.where(is_valid, positions_2d[seq_idx, pos], valid_positions[output_idx])
+                        )
+                        
+                        # 条件性地递增索引
+                        output_idx = jnp.where(is_valid, output_idx + 1, output_idx)
+                
+                # 计算extend_start_loc
+                extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
+                
+                return valid_input_ids, valid_positions, extend_start_loc
             
-            # 创建所有(seq_idx, pos_in_seq)对
-            seq_indices = jnp.repeat(jnp.arange(batch_size), max_seq_len)
-            pos_indices = jnp.tile(jnp.arange(max_seq_len), batch_size)
-            indices_pairs = jnp.stack([seq_indices, pos_indices], axis=1)
-            
-            # 使用scan处理所有位置
-            (final_output_idx, final_input_ids, final_positions), _ = jax.lax.scan(
-                copy_valid_tokens,
-                (0, output_input_ids, output_positions),
-                indices_pairs
-            )
-            
-            # 计算extend_start_loc
-            extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
-            
-            return final_input_ids, final_positions, extend_start_loc
+            else:
+                raise ValueError(f"Unexpected input shape: {input_ids_2d.shape}")
         
         # 使用pmap在所有设备上并行执行扁平化
         print(f"  🔄 在设备上并行扁平化...")
