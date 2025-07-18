@@ -729,7 +729,13 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 # 使用pmap实现真正的数据并行 - 一个函数搞定前向+采样！
                 print(f"\n🔄 Creating unified data parallel forward+sample function...")
-                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data', static_broadcasted_argnums=(0,))
+                dp_forward_sample = jax.pmap(
+                    dp_forward_and_sample,
+                    axis_name='data',
+                    in_axes=(None, None, 0, 0, 0, 0, 0, 0),  # model_def, model_state, forward_batch, ...
+                    out_axes=((0, 0), 0),
+                    static_broadcasted_argnums=(0,)
+                )
                 
                 print(f"\n🚀 Starting real parallel execution...")
                 print(f"  Device count: {device_count}")
