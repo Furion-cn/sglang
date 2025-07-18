@@ -81,38 +81,18 @@ jax.tree_util.register_pytree_node(
 )
 
 # Register LogitsProcessorOutput as a JAX PyTree. This allows it to be returned
-# from JIT-compiled functions. The logits are dynamic JAX arrays (children),
-# while other attributes are treated as static metadata.
+# from JIT-compiled functions. The `next_token_logits` is the only dynamic
+# JAX array (child), and there is no static metadata.
 def _logits_processor_output_flatten(output: LogitsProcessorOutput):
     """Flattens the LogitsProcessorOutput for JAX transformations."""
     children = (output.next_token_logits,)
-    aux_data = (
-        output.batch_size,
-        output.req_pool,
-        output.skip_special_tokens,
-        output.logprobs,
-        output.encoder_output,
-    )
+    aux_data = None
     return children, aux_data
 
 def _logits_processor_output_unflatten(aux_data, children):
     """Unflattens the LogitsProcessorOutput from JAX representations."""
-    (
-        batch_size,
-        req_pool,
-        skip_special_tokens,
-        logprobs,
-        encoder_output,
-    ) = aux_data
     (next_token_logits,) = children
-    return LogitsProcessorOutput(
-        next_token_logits=next_token_logits,
-        batch_size=batch_size,
-        req_pool=req_pool,
-        skip_special_tokens=skip_special_tokens,
-        logprobs=logprobs,
-        encoder_output=encoder_output,
-    )
+    return LogitsProcessorOutput(next_token_logits=next_token_logits)
 
 jax.tree_util.register_pytree_node(
     LogitsProcessorOutput,
