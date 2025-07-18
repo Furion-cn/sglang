@@ -111,7 +111,7 @@ class QWen3Attention(nnx.Module):
         q, k = self.rotary_emb(positions, q, k)
         global_tracer.print(q, f"rotary_emb_output_q", f"attention_layer_id_{self.layer_id}")
         global_tracer.print(k, f"rotary_emb_output_k", f"attention_layer_id_{self.layer_id}")
-        attn_output = self.attn(q, k, v, forward_batch=forward_batch, is_causal=True)
+        attn_output = self.attn(q, k, v, forward_batch=forward_batch, layer_id=self.layer_id, is_causal=True)
         global_tracer.print(attn_output, f"attn_output", f"attention_layer_id_{self.layer_id}")
 
         output, _ = self.o_proj(attn_output)
