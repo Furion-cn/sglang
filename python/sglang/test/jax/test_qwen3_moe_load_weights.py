@@ -237,18 +237,58 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         
         # 第五步：在设备上并行扁平化（移除padding）
         def flatten_on_device(input_ids_2d, positions_2d, attention_mask, seq_lens):
-            """在每个设备上扁平化数据，移除padding"""
+            """在每个设备上扁平化数据，移除padding - JAX兼容版本"""
             # input_ids_2d: [seqs_per_device, max_seq_len]
-            # 输出: [total_valid_tokens_on_device]
+            # 为了避免动态形状问题，我们使用固定大小的输出
             
-            # 扁平化并根据mask过滤
-            input_ids_flat = input_ids_2d[attention_mask]
-            positions_flat = positions_2d[attention_mask]
+            batch_size, max_seq_len = input_ids_2d.shape
+            max_output_size = batch_size * max_seq_len  # 最大可能的输出大小
             
-            # 计算extend_start_loc (每个设备内部的)
+            # 创建输出数组
+            output_input_ids = jnp.zeros(max_output_size, dtype=jnp.int32)
+            output_positions = jnp.zeros(max_output_size, dtype=jnp.int32)
+            
+            # 使用scan来避免动态索引
+            def copy_valid_tokens(carry, x):
+                output_idx, out_ids, out_pos = carry
+                seq_idx, pos_in_seq = x
+                
+                # 检查这个位置是否有效
+                is_valid = pos_in_seq < seq_lens[seq_idx]
+                
+                # 获取token和position
+                token_id = input_ids_2d[seq_idx, pos_in_seq]
+                position = positions_2d[seq_idx, pos_in_seq] 
+                
+                # 条件更新输出数组
+                out_ids = out_ids.at[output_idx].set(
+                    jnp.where(is_valid, token_id, out_ids[output_idx])
+                )
+                out_pos = out_pos.at[output_idx].set(
+                    jnp.where(is_valid, position, out_pos[output_idx])
+                )
+                
+                # 更新输出索引
+                new_output_idx = jnp.where(is_valid, output_idx + 1, output_idx)
+                
+                return (new_output_idx, out_ids, out_pos), None
+            
+            # 创建所有(seq_idx, pos_in_seq)对
+            seq_indices = jnp.repeat(jnp.arange(batch_size), max_seq_len)
+            pos_indices = jnp.tile(jnp.arange(max_seq_len), batch_size)
+            indices_pairs = jnp.stack([seq_indices, pos_indices], axis=1)
+            
+            # 使用scan处理所有位置
+            (final_output_idx, final_input_ids, final_positions), _ = jax.lax.scan(
+                copy_valid_tokens,
+                (0, output_input_ids, output_positions),
+                indices_pairs
+            )
+            
+            # 计算extend_start_loc
             extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
             
-            return input_ids_flat, positions_flat, extend_start_loc
+            return final_input_ids, final_positions, extend_start_loc
         
         # 使用pmap在所有设备上并行执行扁平化
         print(f"  🔄 在设备上并行扁平化...")
@@ -365,14 +405,13 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
     def test_load_model_with_jax_loader(self):
         """Test loading Qwen3 MoE model using JAXModelLoader (integration test)"""
+        if self.dp_size > 1:
+            self.skipTest("DP_SIZE must be > 1 for data parallelism test. Set DP_SIZE environment variable.")
+        
         if not os.path.exists(self.test_model_path):
             self.skipTest(
                 f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
         from sglang.debug_tracer import global_tracer
-        
-        if self.dp_size > 1:
-            self.test_load_model_with_jax_loader_dp()
-            return
         
         try:
             hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
@@ -532,6 +571,14 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
     def test_load_model_with_jax_loader_dp(self):
         """Test loading Qwen3 MoE model using JAXModelLoader with Data Parallelism"""
+        if self.dp_size <= 1:
+            self.skipTest("DP_SIZE must be > 1 for data parallelism test. Set DP_SIZE environment variable.")
+        if not os.path.exists(self.test_model_path):
+            self.skipTest(
+                f"Model path {self.test_model_path} not found. Set MODEL_PATH environment variable.")
+
+        from sglang.debug_tracer import global_tracer
+
         try:
             hf_folder, hf_weights_files = self.jax_loader._prepare_jax_weights(
                 self.test_model_path, None
