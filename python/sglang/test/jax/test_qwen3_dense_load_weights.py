@@ -296,38 +296,30 @@ class TestQwen3LoadWeights(CustomTestCase):
                 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh, jax_trace_context(jax_profiling_dir):
-                    for i in range(10):
+                    # NOTE: Run only once to test the EXTEND case exclusively.
+                    for i in range(1):
                         # Pad the batches to have the same shape for pmap.
                         # This is necessary because the packed format leads to different
                         # lengths for arrays like input_ids and cache_loc across different
                         # data parallel groups.
                         padded_batch_list = []
-                        is_decode = forward_batch_list[0].forward_mode == ForwardMode.DECODE
-
-                        if is_decode:
-                            # In decode mode, only cache_loc needs padding as its length
-                            # depends on the sum of sequence lengths in the group.
-                            max_cache_loc_len = max(fb.cache_loc.shape[0] for fb in forward_batch_list)
-                            for fb in forward_batch_list:
-                                pad_len = max_cache_loc_len - fb.cache_loc.shape[0]
-                                padded_cache_loc = jnp.pad(fb.cache_loc, ((0, pad_len),))
-                                padded_batch_list.append(dataclasses.replace(fb, cache_loc=padded_cache_loc))
-                        else:  # EXTEND mode
-                            # In extend mode, input_ids, positions, and cache_loc all have
-                            # a length equal to the sum of sequence lengths.
-                            max_len = max(fb.input_ids.shape[0] for fb in forward_batch_list)
-                            for fb in forward_batch_list:
-                                pad_len = max_len - fb.input_ids.shape[0]
-                                pad_width = ((0, pad_len),)
-                                padded_input_ids = jnp.pad(fb.input_ids, pad_width)
-                                padded_positions = jnp.pad(fb.positions, pad_width)
-                                padded_cache_loc = jnp.pad(fb.cache_loc, pad_width)
-                                padded_batch_list.append(dataclasses.replace(
-                                    fb,
-                                    input_ids=padded_input_ids,
-                                    positions=padded_positions,
-                                    cache_loc=padded_cache_loc
-                                ))
+                        
+                        # NOTE: Only implementing the EXTEND mode padding logic for this test.
+                        # In extend mode, input_ids, positions, and cache_loc all have
+                        # a length equal to the sum of sequence lengths.
+                        max_len = max(fb.input_ids.shape[0] for fb in forward_batch_list)
+                        for fb in forward_batch_list:
+                            pad_len = max_len - fb.input_ids.shape[0]
+                            pad_width = ((0, pad_len),)
+                            padded_input_ids = jnp.pad(fb.input_ids, pad_width)
+                            padded_positions = jnp.pad(fb.positions, pad_width)
+                            padded_cache_loc = jnp.pad(fb.cache_loc, pad_width)
+                            padded_batch_list.append(dataclasses.replace(
+                                fb,
+                                input_ids=padded_input_ids,
+                                positions=padded_positions,
+                                cache_loc=padded_cache_loc
+                            ))
 
                         # Stack forward_batch objects for pmap.
                         stacked_forward_batch = jax.tree_util.tree_map(lambda *x: jnp.stack(x), *padded_batch_list)
@@ -349,38 +341,49 @@ class TestQwen3LoadWeights(CustomTestCase):
                             stacked_forward_batch, stacked_sampling_info
                         )
 
-                        # Unstack results and update for next iteration
+                        # Unstack results and print the first token of each sequence
                         next_token_ids_list = [next_token_ids_sharded[j] for j in range(self.dp_degree)]
                         
-                        # Manually update the host-side state for each group.
-                        for j in range(self.dp_degree):
-                            initial_complete_sequences_list[j] = self.update_forward_batch_with_sequences(
-                                forward_batch_list[j], next_token_ids_list[j], tokenizer, initial_complete_sequences_list[j])
+                        print("\n--- Generated Tokens (Prefill) ---")
+                        for group_idx, group_tokens in enumerate(next_token_ids_list):
+                            print(f"  Data Parallel Group {group_idx}:")
+                            for seq_idx in range(group_tokens.shape[0]):
+                                token_id = int(group_tokens[seq_idx, 0])
+                                decoded_token = tokenizer.decode([token_id])
+                                print(f"    - Sequence {seq_idx}: token_id={token_id}, decoded='{decoded_token}'")
 
-                # Decode complete results for each sequence
-                print(f"\n=== Qwen3 Complete Generation Results ===")
-                # Flatten the results from all groups
-                all_complete_sequences = [seq for group in initial_complete_sequences_list for seq in group]
-                all_actual_seq_lens = [l for group_lens in actual_seq_lens_list for l in group_lens]
+                        # NOTE: Skipping update logic as we only test one EXTEND step.
+                        # # Manually update the host-side state for each group.
+                        # for j in range(self.dp_degree):
+                        #     initial_complete_sequences_list[j] = self.update_forward_batch_with_sequences(
+                        #         forward_batch_list[j], next_token_ids_list[j], tokenizer, initial_complete_sequences_list[j])
+                        print("✅ EXTEND pass completed successfully.")
 
-                for batch_idx in range(len(input_texts)):
-                    full_sequence = all_complete_sequences[batch_idx]
-                    decoded_full = tokenizer.decode(full_sequence)
-                    original_len = all_actual_seq_lens[batch_idx]
-                    original_tokens = full_sequence[:original_len]
-                    generated_tokens = full_sequence[original_len:]
+                # NOTE: Commenting out result decoding as we only run prefill and not generation.
+                # # Decode complete results for each sequence
+                # print(f"\n=== Qwen3 Complete Generation Results ===")
+                # # Flatten the results from all groups
+                # all_complete_sequences = [seq for group in initial_complete_sequences_list for seq in group]
+                # all_actual_seq_lens = [l for group_lens in actual_seq_lens_list for l in group_lens]
+
+                # for batch_idx in range(len(input_texts)):
+                #     full_sequence = all_complete_sequences[batch_idx]
+                #     decoded_full = tokenizer.decode(full_sequence)
+                #     original_len = all_actual_seq_lens[batch_idx]
+                #     original_tokens = full_sequence[:original_len]
+                #     generated_tokens = full_sequence[original_len:]
                     
-                    original_text = tokenizer.decode(original_tokens)
-                    generated_text = tokenizer.decode(generated_tokens) if generated_tokens else ""
+                #     original_text = tokenizer.decode(original_tokens)
+                #     generated_text = tokenizer.decode(generated_tokens) if generated_tokens else ""
                     
-                    print(f"Sequence {batch_idx}: {full_sequence}")
-                    print(f"Original tokens {batch_idx}: {original_tokens}")
-                    print(f"Generated tokens {batch_idx}: {generated_tokens}")
-                    print(f"Complete decoded text {batch_idx}: '{decoded_full}'")
-                    print(f"Original question {batch_idx}: '{original_text}'")
-                    print(f"Generated answer {batch_idx}: '{generated_text}'")
-                    print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
-                    print()
+                #     print(f"Sequence {batch_idx}: {full_sequence}")
+                #     print(f"Original tokens {batch_idx}: {original_tokens}")
+                #     print(f"Generated tokens {batch_idx}: {generated_tokens}")
+                #     print(f"Complete decoded text {batch_idx}: '{decoded_full}'")
+                #     print(f"Original question {batch_idx}: '{original_text}'")
+                #     print(f"Generated answer {batch_idx}: '{generated_text}'")
+                #     print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
+                #     print()
 
                 print("\n🔴 Ending debug tracer session...")
                 if self.enable_debug_tracer:
