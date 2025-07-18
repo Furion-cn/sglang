@@ -68,8 +68,6 @@ def set_kv_cache(
     k_cache: jax.Array,
     v_cache: jax.Array
 ) -> Tuple[jax.Array, jax.Array]:
-    assert loc.shape[0] == k.shape[0] == v.shape[0], "Batch size mismatch"
-
     k_cache = k_cache.at[layer_id, loc].set(k)
     v_cache = v_cache.at[layer_id, loc].set(v)
 
