@@ -716,8 +716,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 # 创建sampler用于token生成
                 sampler = Sampler(rngs=nnx.Rngs(0))
                 
-                if self.enable_debug_tracer:
-                    global_tracer.start_session()
+                # if self.enable_debug_tracer:
+                #     global_tracer.start_session()
                 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh:
@@ -814,19 +814,19 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     print(f"Generated answer {batch_idx}: '{generated_text}'")
                     print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
 
-                if self.enable_debug_tracer:
-                    debug_file = global_tracer.end_session()
-                    if debug_file:
-                        print(f"✅ Debug trace saved to: {debug_file}")
+                # if self.enable_debug_tracer:
+                #     debug_file = global_tracer.end_session()
+                #     if debug_file:
+                #         print(f"✅ Debug trace saved to: {debug_file}")
 
         except Exception as e:
-            if 'global_tracer' in locals():
-                try:
-                    if self.enable_debug_tracer:
-                        global_tracer.end_session()
-                        print("🔴 Debug tracer session ended due to exception")
-                except:
-                    pass
+            # if 'global_tracer' in locals():
+            #     try:
+            #         if self.enable_debug_tracer:
+            #             global_tracer.end_session()
+            #             print("🔴 Debug tracer session ended due to exception")
+            #     except:
+            #         pass
             self.fail(f"Data Parallelism test failed: {e}")
 
     def test_prepare_jax_weights_no_msgpack_files(self):
