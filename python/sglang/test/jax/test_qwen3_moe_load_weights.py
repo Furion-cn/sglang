@@ -693,8 +693,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 # 分离模型定义和状态，以避免JAX捕获巨大的常量
                 model_def, model_state = nnx.split(model)
                 
-                # 将可变的State转换为不可变的、可哈希的元组，以便安全地作为静态参数传递
-                hashable_model_state = tuple(model_state.items())
+                # 手动将权重复制到所有设备上，而不是依赖pmap的静态参数广播
+                model_state = jax.device_put(model_state, self.mesh.devices)
                 
                 # 准备DP测试数据，序列数量必须能被dp_size整除
                 base_texts = ["1+1=?", "2+2=?", "3+3=?", "4+4=?"]
@@ -715,18 +715,15 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     model_config, input_texts, tokenizer)
 
                 # 创建真正的并行前向传播+采样函数
-                def dp_forward_and_sample(model_def, hashable_model_state, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
+                def dp_forward_and_sample(model_def, model_state, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
                     """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
-                    # 1. 从可哈希的元组恢复State
-                    model_state = nnx.State(hashable_model_state)
-                    
-                    # 2. 重新组合模型
+                    # 1. 重新组合模型
                     model = nnx.merge(model_def, model_state)
                     
-                    # 3. 模型前向传播
+                    # 2. 模型前向传播
                     outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
                     
-                    # 4. 直接在同一个pmap中采样
+                    # 3. 直接在同一个pmap中采样
                     key, new_key = jax.random.split(rng_key)
                     next_token_ids = jax.random.categorical(key, outputs.next_token_logits, axis=-1)
                     next_token_ids = next_token_ids[..., None]
@@ -738,9 +735,9 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 dp_forward_sample = jax.pmap(
                     dp_forward_and_sample,
                     axis_name='data',
-                    in_axes=(None, None, 0, 0, 0, 0, 0, 0),
+                    in_axes=(None, 0, 0, 0, 0, 0, 0, 0),  # model_def(static), model_state(sharded), forward_batch, ...
                     out_axes=((0, 0), 0),
-                    static_broadcasted_argnums=(0, 1)  # 将model_def和可哈希的state都标记为静态
+                    static_broadcasted_argnums=(0,)
                 )
                 
                 print(f"\n🚀 Starting real parallel execution...")
@@ -795,7 +792,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                         # 一次调用完成：前向传播 + 采样！
                         (outputs, next_token_ids), rng_keys = dp_forward_sample(
                             model_def,
-                            hashable_model_state,
+                            model_state,
                             sharded_forward_batch,
                             sampling_temps,
                             sampling_top_ps, 
