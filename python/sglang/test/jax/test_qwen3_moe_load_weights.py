@@ -672,7 +672,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     global_tracer.start_session()
                 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
-                with self.mesh, jax_trace_context(jax_profiling_dir):
+                with self.mesh:
                     
                     # 初始化完整序列历史，用于累积生成的token
                     complete_sequences = []
