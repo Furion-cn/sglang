@@ -390,7 +390,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             head_num=model_config.num_key_value_heads,
             head_dim=model_config.head_dim,
             layer_num=model_config.num_hidden_layers,
-            dtype=jnp.bfloat16 if model_config.torch_dtype == "bfloat16" else jnp.float32,
+            dtype=jnp.bfloat16,
             max_seq_len=128,
             max_batch_size=20,
         )
