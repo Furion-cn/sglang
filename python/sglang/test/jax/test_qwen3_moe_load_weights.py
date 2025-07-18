@@ -151,8 +151,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         return input_ids_array, actual_seq_lens, forward_batch
 
     def _create_batch_from_texts_dp(self, model_config, texts, tokenizer):
-        """Create batch with data parallelism - keep batch and sequence dimensions separate,
-        then shard and distribute to devices using JAX primitives
+        """Create batch with data parallelism - simplified version to avoid JAX tracing issues
 
         Args:
             texts: List[str] input texts to process
@@ -192,7 +191,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         # 创建2D数组: [batch_size, max_seq_len]
         input_ids_2d_list = []
         positions_2d_list = []
-        attention_mask_list = []
         
         for i, tokens in enumerate(tokenized_inputs):
             seq_len = len(tokens)
@@ -203,14 +201,9 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             # 填充positions
             row_positions = jnp.array(list(range(seq_len)) + [0] * (max_seq_len - seq_len), dtype=jnp.int32)
             positions_2d_list.append(row_positions)
-            
-            # 填充attention mask
-            row_mask = jnp.array([True] * seq_len + [False] * (max_seq_len - seq_len), dtype=jnp.bool_)
-            attention_mask_list.append(row_mask)
 
         input_ids_2d = jnp.stack(input_ids_2d_list)  # [batch_size, max_seq_len]
         positions_2d = jnp.stack(positions_2d_list)  # [batch_size, max_seq_len]
-        attention_mask = jnp.stack(attention_mask_list)  # [batch_size, max_seq_len]
         seq_lens = jnp.array(actual_seq_lens, dtype=jnp.int32)  # [batch_size]
         
         print(f"  2D数组形状: input_ids={input_ids_2d.shape}, positions={positions_2d.shape}")
@@ -231,94 +224,99 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
         
         sharded_input_ids_2d = jax.device_put(input_ids_2d, batch_seq_sharding)
         sharded_positions_2d = jax.device_put(positions_2d, batch_seq_sharding)
-        sharded_attention_mask = jax.device_put(attention_mask, batch_seq_sharding)
         sharded_seq_lens = jax.device_put(seq_lens, batch_sharding)
         
         print(f"  ✅ 2D数据分片完成!")
         print(f"  分片后形状: input_ids={sharded_input_ids_2d.shape}, seq_lens={sharded_seq_lens.shape}")
         
-        # 第五步：在设备上并行扁平化（移除padding）
-        def flatten_on_device(input_ids_2d, positions_2d, attention_mask, seq_lens):
-            """在每个设备上扁平化数据，移除padding - 固定形状版本"""
-            # 在pmap中，每个设备会收到数据，第一个维度(device轴)已经被消耗
+        # 第五步：在CPU上预计算所有需要的数据，避免pmap内部的复杂操作
+        print(f"  🔄 预计算批次数据...")
+        
+        # 为每个设备预计算扁平化的数据
+        device_input_ids = []
+        device_positions = []
+        device_seq_lens = []
+        device_cache_locs = []
+        device_extend_start_locs = []
+        
+        for device_id in range(device_count):
+            # 每个设备处理的序列范围
+            start_seq = device_id * seqs_per_device
+            end_seq = start_seq + seqs_per_device
             
-            if input_ids_2d.ndim == 1:
-                # 每个设备只有一个序列: [max_seq_len]
-                seq_len = seq_lens  # 标量
-                max_seq_len = input_ids_2d.shape[0]
-                
-                # 使用attention mask来过滤有效token
-                mask = jnp.arange(max_seq_len) < seq_len
-                
-                # 创建固定大小的输出（使用最大长度）
-                valid_input_ids = jnp.where(mask, input_ids_2d, 0)
-                valid_positions = jnp.where(mask, positions_2d, 0)
-                extend_start_loc = jnp.array([0])
-                
-                return valid_input_ids, valid_positions, extend_start_loc
-                
-            elif input_ids_2d.ndim == 2:
-                # 每个设备有多个序列: [seqs_per_device, max_seq_len]
-                seqs_per_device, max_seq_len = input_ids_2d.shape
-                
-                # 创建固定大小的输出（最大可能大小）
-                max_output_size = seqs_per_device * max_seq_len
-                valid_input_ids = jnp.zeros(max_output_size, dtype=jnp.int32)
-                valid_positions = jnp.zeros(max_output_size, dtype=jnp.int32)
-                
-                # 使用mask创建有效token的选择
-                output_idx = 0
-                for seq_idx in range(seqs_per_device):
-                    seq_len = seq_lens[seq_idx]
-                    for pos in range(max_seq_len):
-                        is_valid = pos < seq_len
-                        
-                        # 条件性地复制token
-                        valid_input_ids = valid_input_ids.at[output_idx].set(
-                            jnp.where(is_valid, input_ids_2d[seq_idx, pos], valid_input_ids[output_idx])
-                        )
-                        valid_positions = valid_positions.at[output_idx].set(
-                            jnp.where(is_valid, positions_2d[seq_idx, pos], valid_positions[output_idx])
-                        )
-                        
-                        # 条件性地递增索引
-                        output_idx = jnp.where(is_valid, output_idx + 1, output_idx)
-                
-                # 计算extend_start_loc
-                extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
-                
-                return valid_input_ids, valid_positions, extend_start_loc
+            device_seq_lens_list = actual_seq_lens[start_seq:end_seq]
+            device_seq_lens_array = jnp.array(device_seq_lens_list, dtype=jnp.int32)
             
-            else:
-                raise ValueError(f"Unexpected input shape: {input_ids_2d.shape}")
+            # 扁平化这个设备的数据
+            device_tokens = []
+            device_pos = []
+            for local_seq_idx, global_seq_idx in enumerate(range(start_seq, end_seq)):
+                seq_len = actual_seq_lens[global_seq_idx]
+                tokens = tokenized_inputs[global_seq_idx]
+                device_tokens.extend(tokens)
+                device_pos.extend(list(range(seq_len)))
+            
+            device_input_ids.append(jnp.array(device_tokens, dtype=jnp.int32))
+            device_positions.append(jnp.array(device_pos, dtype=jnp.int32))
+            device_seq_lens.append(device_seq_lens_array)
+            
+            # 创建cache_loc和extend_start_loc
+            total_tokens = sum(device_seq_lens_list)
+            device_cache_locs.append(jnp.arange(total_tokens, dtype=jnp.int32))
+            
+            extend_start_loc = jnp.cumsum(jnp.concatenate([jnp.array([0]), device_seq_lens_array[:-1]]))
+            device_extend_start_locs.append(extend_start_loc)
+            
+            print(f"    设备 {device_id}: {len(device_seq_lens_list)} 序列, {total_tokens} tokens")
         
-        # 使用pmap在所有设备上并行执行扁平化
-        print(f"  🔄 在设备上并行扁平化...")
-        (sharded_input_ids_flat, 
-         sharded_positions_flat, 
-         sharded_extend_start_loc) = jax.pmap(
-            flatten_on_device, 
-            axis_name='data'
-        )(sharded_input_ids_2d, sharded_positions_2d, sharded_attention_mask, sharded_seq_lens)
+        # 第六步：分片预计算的数据
+        print(f"  🔄 分片预计算的数据...")
         
-        print(f"  ✅ 扁平化完成! 扁平化后形状: {sharded_input_ids_flat.shape}")
+        # 由于每个设备的token数量可能不同，我们需要pad到相同长度
+        max_tokens_per_device = max(len(tokens) for tokens in device_input_ids)
+        max_seqs_per_device = max(len(seq_lens) for seq_lens in device_seq_lens)
         
-        # 第六步：创建其他ForwardBatch所需的分片数据
-        def create_cache_and_batch_data(seq_lens):
-            """在每个设备上创建cache_loc等数据"""
-            total_tokens = jnp.sum(seq_lens)
-            cache_loc = jnp.arange(total_tokens, dtype=jnp.int32)
-            batch_size_device = len(seq_lens)
-            return cache_loc, batch_size_device, total_tokens
+        # Pad所有设备的数据到相同长度
+        padded_input_ids = []
+        padded_positions = []
+        padded_seq_lens = []
+        padded_cache_locs = []
+        padded_extend_start_locs = []
         
-        (sharded_cache_loc, 
-         sharded_batch_sizes, 
-         sharded_total_tokens) = jax.pmap(
-            create_cache_and_batch_data,
-            axis_name='data'
-        )(sharded_seq_lens)
+        for device_id in range(device_count):
+            # Pad input_ids和positions
+            tokens = device_input_ids[device_id]
+            positions = device_positions[device_id]
+            padded_tokens = jnp.concatenate([tokens, jnp.zeros(max_tokens_per_device - len(tokens), dtype=jnp.int32)])
+            padded_pos = jnp.concatenate([positions, jnp.zeros(max_tokens_per_device - len(positions), dtype=jnp.int32)])
+            
+            # Pad seq_lens
+            seq_lens = device_seq_lens[device_id]
+            padded_seq = jnp.concatenate([seq_lens, jnp.zeros(max_seqs_per_device - len(seq_lens), dtype=jnp.int32)])
+            
+            # Pad cache_loc
+            cache_loc = device_cache_locs[device_id]
+            padded_cache = jnp.concatenate([cache_loc, jnp.zeros(max_tokens_per_device - len(cache_loc), dtype=jnp.int32)])
+            
+            # Pad extend_start_loc
+            extend_start_loc = device_extend_start_locs[device_id]
+            padded_extend = jnp.concatenate([extend_start_loc, jnp.zeros(max_seqs_per_device - len(extend_start_loc), dtype=jnp.int32)])
+            
+            padded_input_ids.append(padded_tokens)
+            padded_positions.append(padded_pos)
+            padded_seq_lens.append(padded_seq)
+            padded_cache_locs.append(padded_cache)
+            padded_extend_start_locs.append(padded_extend)
         
-        # 第七步：创建KV缓存池 (在每个设备上复制)
+        # 堆叠为JAX数组
+        final_input_ids = jnp.stack(padded_input_ids)      # [device_count, max_tokens_per_device]
+        final_positions = jnp.stack(padded_positions)      # [device_count, max_tokens_per_device]
+        final_seq_lens = jnp.stack(padded_seq_lens)        # [device_count, max_seqs_per_device]
+        final_cache_locs = jnp.stack(padded_cache_locs)    # [device_count, max_tokens_per_device]
+        final_extend_start_locs = jnp.stack(padded_extend_start_locs)  # [device_count, max_seqs_per_device]
+        final_batch_sizes = jnp.array([seqs_per_device] * device_count, dtype=jnp.int32)  # [device_count]
+        
+        # 第七步：创建KV缓存池
         cache_pool = ReqToHashKVCachePool(
             head_num=model_config.num_key_value_heads,
             head_dim=model_config.head_dim,
@@ -327,13 +325,13 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             max_seq_len=128,
             max_batch_size=20,
         )
-        # cache_pool需要在每个设备上复制
-        sharded_cache_pool = jax.device_put(cache_pool, replicated_sharding)
         
-        # 第八步：直接在设备上创建ForwardBatch对象
-        def create_forward_batch_on_device(input_ids, positions, seq_lens, cache_loc, 
-                                          extend_start_loc, batch_size, token_to_kv_pool):
-            """在每个设备上创建ForwardBatch"""
+        # 第八步：创建ForwardBatch对象 - 简化版本
+        print(f"  🔄 创建ForwardBatch对象...")
+        
+        def create_simple_forward_batch(input_ids, positions, seq_lens, cache_loc, 
+                                      extend_start_loc, batch_size):
+            """简化的ForwardBatch创建"""
             return ForwardBatch(
                 forward_mode=ForwardMode.EXTEND,
                 batch_size=batch_size,
@@ -343,20 +341,17 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 cache_loc=cache_loc,
                 out_cache_loc=None,
                 extend_start_loc=extend_start_loc,
-                token_to_kv_pool=token_to_kv_pool,
+                token_to_kv_pool=cache_pool,
             )
         
-        print(f"  🔄 在设备上创建ForwardBatch对象...")
-        
-        # 使用pmap在每个设备上创建ForwardBatch
-        sharded_forward_batch = jax.pmap(create_forward_batch_on_device, axis_name='data')(
-            sharded_input_ids_flat,
-            sharded_positions_flat, 
-            sharded_seq_lens,
-            sharded_cache_loc,
-            sharded_extend_start_loc,
-            sharded_batch_sizes,
-            sharded_cache_pool
+        # 使用pmap创建ForwardBatch
+        sharded_forward_batch = jax.pmap(create_simple_forward_batch, axis_name='data')(
+            final_input_ids,
+            final_positions, 
+            final_seq_lens,
+            final_cache_locs,
+            final_extend_start_locs,
+            final_batch_sizes
         )
         
         print(f"  ✅ DP批次创建完成! ForwardBatch已在所有设备上准备就绪")
