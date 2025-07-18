@@ -688,7 +688,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     model.config, input_texts, tokenizer)
 
                 # 创建真正的并行前向传播+采样函数
-                def dp_forward_and_sample(forward_batch, temps, top_ps, top_ks, min_ps):
+                def dp_forward_and_sample(model, sampler, forward_batch, temps, top_ps, top_ks, min_ps):
                     """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
                     # 1. 模型前向传播
                     outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
@@ -707,7 +707,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 # 使用pmap实现真正的数据并行 - 一个函数搞定前向+采样！
                 print(f"\n🔄 Creating unified data parallel forward+sample function...")
-                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data')
+                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data', static_broadcasted_argnums=(0, 1))
                 
                 print(f"\n🚀 Starting real parallel execution...")
                 print(f"  Device count: {device_count}")
@@ -760,6 +760,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                         
                         # 一次调用完成：前向传播 + 采样！
                         outputs, next_token_ids = dp_forward_sample(
+                            model,
+                            sampler,
                             sharded_forward_batch,
                             sampling_temps,
                             sampling_top_ps, 
