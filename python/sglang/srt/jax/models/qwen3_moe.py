@@ -244,7 +244,6 @@ class QWen3MoeModel(nnx.Module):
 
         self.norm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps, rngs=rngs)
 
-    @nnx.jit
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
@@ -288,7 +287,6 @@ class Qwen3MoeForCausalLMJaxModel(nnx.Module):
         pstate = jax.lax.with_sharding_constraint(model_state, pspecs)
         nnx.update(self, pstate)
 
-    @nnx.jit
     def __call__(self,
                  input_ids: jax.Array,
                  positions: jax.Array,
