@@ -709,33 +709,29 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     model.config, input_texts, tokenizer)
 
                 # 创建真正的并行前向传播+采样函数
-                def dp_forward_and_sample(model, sampler, forward_batch, temps, top_ps, top_ks, min_ps):
+                def dp_forward_and_sample(model, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
                     """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
                     # 1. 模型前向传播
                     outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
                     
                     # 2. 直接在同一个pmap中采样
-                    local_sampling_info = SamplingBatchInfo(
-                        temperatures=temps,
-                        top_ps=top_ps,
-                        top_ks=top_ks,
-                        min_ps=min_ps,
-                        vocab_size=model.config.vocab_size,
-                    )
-                    next_token_ids = sampler(outputs, sampling_info=local_sampling_info)
+                    # 手动实现采样逻辑，以避免有状态的sampler对象
+                    key, new_key = jax.random.split(rng_key)
+                    next_token_ids = jax.random.categorical(key, outputs.next_token_logits, axis=-1)
+                    next_token_ids = next_token_ids[..., None]
                     
-                    return outputs, next_token_ids
+                    return (outputs, next_token_ids), new_key
 
                 # 使用pmap实现真正的数据并行 - 一个函数搞定前向+采样！
                 print(f"\n🔄 Creating unified data parallel forward+sample function...")
-                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data', static_broadcasted_argnums=(0, 1))
+                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data', static_broadcasted_argnums=(0,))
                 
                 print(f"\n🚀 Starting real parallel execution...")
                 print(f"  Device count: {device_count}")
                 print(f"  Sequences per device: {len(input_texts) // device_count}")
                 
-                # 创建sampler用于token生成
-                sampler = Sampler(rngs=nnx.Rngs(0))
+                # 为每个设备创建分片的RNG keys
+                rng_keys = jax.random.split(jax.random.PRNGKey(0), self.dp_size)
                 
                 # if self.enable_debug_tracer:
                 #     global_tracer.start_session()
@@ -780,14 +776,14 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                         print(f"\n  🔄 DP parallel iteration {iteration + 1}/10")
                         
                         # 一次调用完成：前向传播 + 采样！
-                        outputs, next_token_ids = dp_forward_sample(
+                        (outputs, next_token_ids), rng_keys = dp_forward_sample(
                             model,
-                            sampler,
                             sharded_forward_batch,
                             sampling_temps,
                             sampling_top_ps, 
                             sampling_top_ks,
-                            sampling_min_ps
+                            sampling_min_ps,
+                            rng_keys
                         )
                         
                         if iteration == 0:
