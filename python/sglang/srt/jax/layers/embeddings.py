@@ -19,11 +19,18 @@ from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from flax import nnx
+from flax import nnx,struct
 from flax.nnx.nn import dtypes
 from flax.nnx.nn.linear import default_embed_init
 from flax.typing import PromoteDtypeFn
+from typing import Any
+from sglang.debug_tracer import global_tracer, trace_function
 
+@struct.dataclass
+class EmbedCls:
+    embedding: jax.Array
+    promote_dtype: Any
+    dtype: Any
 
 class Embed(nnx.Module):
     """A parameterized function from integers [0, n) to d-dimensional vectors.
@@ -175,6 +182,7 @@ class RotaryEmbedding(nnx.Module):
 
         self.cos_sin_cache = self._compute_cos_sin_cache().astype(dtype=dtype)
 
+    @trace_function(stage="ROTARYEMBEDDING", include_args=False, include_output=True)
     def __call__(
         self,
         positions: jax.Array,
@@ -218,7 +226,7 @@ class RotaryEmbedding(nnx.Module):
         return cache
 
 
-@partial(jax.jit, static_argnames=["rotary_dim", "head_size", "is_neox_style"])
+#@partial(jax.jit, static_argnames=["rotary_dim", "head_size", "is_neox_style"])
 def rotary_embedding_forward(
     positions: jax.Array,
     query: jax.Array,
@@ -252,7 +260,7 @@ def rotary_embedding_forward(
     return query, key
 
 
-@partial(jax.jit, static_argnames=["is_neox_style"])
+@trace_function(stage="APPLY_ROTARY_EMB", include_args=True, include_output=True)
 def _apply_rotary_emb(
     x: jax.Array,
     cos: jax.Array,

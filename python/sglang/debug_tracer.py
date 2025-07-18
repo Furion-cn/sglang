@@ -511,7 +511,8 @@ class UnifiedDebugTracer:
                 'std': std_val,
                 'has_nan': bool(jnp.any(jnp.isnan(tensor)).item()),
                 'has_inf': bool(jnp.any(jnp.isinf(tensor)).item()),
-                'extra_info': extra_info
+                'extra_info': extra_info,
+                'value':tensor,
             }
             
             # 改进的layer_id提取逻辑
@@ -592,10 +593,10 @@ class UnifiedDebugTracer:
             step_info = ""
             if 'forward_step' in stats:
                 step_info = f"[Step {stats['forward_step']}]"
-            
+            #if stats['stage'] == 'INTERNAL_ATTENTION_FORWARD_ATTENTION':
             print(f"{step_info}[{framework}][{stats['stage']}] {stats['name']}: shape={stats['shape']}, "
                   f"min={stats['min']:.6f}, max={stats['max']:.6f}, "
-                  f"mean={stats['mean']:.6f}, std={stats['std']:.6f}{nan_inf}{extra}")
+                  f"mean={stats['mean']:.6f}, std={stats['std']:.6f}{nan_inf}{extra}, value={stats['value']}")
     
     def get_records(self, key: str = None) -> Union[Dict[str, List], List]:
         with self.lock:
@@ -835,31 +836,45 @@ def trace_function(stage: str = "", include_args: bool = True, include_output: b
                 context_str = "_".join([f"{k}_{v}" for k, v in context_info.items() if k != "context_error"])
                 if context_str:
                     stage_name = f"{stage_name}_{context_str}"
+                
+            def need_print(**kwargs):
+                need_print=False
+                match_layer=False
+                match_step=False
+                for key, value in kwargs.items():
+                    if not match_layer and (key == 'layer_id' and value==0):
+                        match_layer=True
+                    if not match_step and (key == 'step' and value == 11):
+                        match_step=True
+                need_print=match_layer
+                return True
             
             if include_args:
-                for i, arg in enumerate(args):
-                    if hasattr(arg, 'shape'):
-                        global_tracer.print(arg, f"{func_name}_input_{i}", stage_name)
+                if need_print():
+                    for i, arg in enumerate(args):
+                        if hasattr(arg, 'shape'):
+                            global_tracer.print(arg, f"{func_name}_input_{i}", stage_name,f"layer[0], step[11]")
                 
-                for key, value in kwargs.items():
-                    if hasattr(value, 'shape'): 
-                        global_tracer.print(value, f"{func_name}_input_{key}", stage_name)
+                    for key, value in kwargs.items():
+                        if hasattr(value, 'shape'): 
+                            global_tracer.print(value, f"{func_name}_input_{key}", stage_name)
             
             result = func(*args, **kwargs)
             
             if include_output:
-                if hasattr(result, 'shape'): 
-                    global_tracer.print(result, f"{func_name}_output", stage_name)
-                elif isinstance(result, (tuple, list)): 
-                    for i, item in enumerate(result):
-                        if hasattr(item, 'shape'):
-                            global_tracer.print(item, f"{func_name}_output_{i}", stage_name)
-                elif hasattr(result, '__dict__'):
-                    for attr_name in dir(result):
-                        if not attr_name.startswith('_'):
-                            attr_value = getattr(result, attr_name)
-                            if hasattr(attr_value, 'shape'):
-                                global_tracer.print(attr_value, f"{func_name}_output_{attr_name}", stage_name)
+                if need_print():
+                    if hasattr(result, 'shape'): 
+                        global_tracer.print(result, f"{func_name}_output", stage_name)
+                    elif isinstance(result, (tuple, list)): 
+                        for i, item in enumerate(result):
+                            if hasattr(item, 'shape'):
+                                global_tracer.print(item, f"{func_name}_output_{i}", stage_name)
+                    elif hasattr(result, '__dict__'):
+                        for attr_name in dir(result):
+                            if not attr_name.startswith('_'):
+                                attr_value = getattr(result, attr_name)
+                                if hasattr(attr_value, 'shape'):
+                                    global_tracer.print(attr_value, f"{func_name}_output_{attr_name}", stage_name)
             
             return result
         return wrapper
