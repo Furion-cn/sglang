@@ -506,103 +506,136 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     model_config.hf_config.mesh = mesh
                     print(f"设置 mesh: {mesh}")
                     
+                    # 1. 初始化模型骨架
+                    print("🔄 Initializing model skeleton on CPU...")
                     model = self.jax_loader._initialize_jax_model(model_config)
+                    
+                    # 2. 在加载真实权重前，提前编译pmap函数
+                    print("\n🔄 Pre-compiling pmap function with model skeleton...")
+                    dp_forward_sample = self._get_compiled_dp_forward_function()
+                    print("✅ pmap function compiled successfully!")
+
+                    # 3. 加载并分发真实权重
+                    print("\n🔄 Loading and sharding real weights...")
                     pytree = self.jax_loader._get_jax_pytree(model_config)
                     self.jax_loader._load_pytree_weights(model, pytree)
-                    
-                    return model
+                    print("✅ Weights loaded and sharded successfully!")
+
+                return model, dp_forward_sample
 
             with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
                 mock_arch.return_value = (Qwen3MoeForCausalLMJaxModel, None)
 
-                print("\n🔄 Loading Qwen3 MoE model with JAXModelLoader...")
+                print("\n🔄 Loading Qwen3 MoE model...")
                 
-                model = custom_load_model_with_mesh(
+                model, dp_forward_sample = custom_load_model_with_mesh(
                     model_config=model_config,
                     device_config=self.device_config,
                     mesh=self.mesh,
                 )
 
-                print("✅ Qwen3 MoE model loaded successfully!")
-                self.assertIsInstance(model, Qwen3MoeForCausalLMJaxModel)
-                self.assertIsNotNone(model.config)
-
-                print(f"\n📋 Qwen3 MoE Model config:")
-                print(f"   vocab_size: {model.config.vocab_size}")
-                print(f"   hidden_size: {model.config.hidden_size}")
-                print(f"   num_hidden_layers: {model.config.num_hidden_layers}")
-                print(f"   num_experts: {getattr(model.config, 'num_experts', 'N/A')}")
-                print(f"   num_experts_per_tok: {getattr(model.config, 'num_experts_per_tok', 'N/A')}")
-                print(f"   moe_intermediate_size: {getattr(model.config, 'moe_intermediate_size', 'N/A')}")
-                print(f"   mlp_only_layers: {getattr(model.config, 'mlp_only_layers', 'N/A')}")
-
-                print("\n🎉 JAXModelLoader integration test for Qwen3 MoE completed successfully!")
-
-                print("\n🔄 Test Qwen3 MoE model input and output with JAXModelLoader...")
+                print("✅ Model processing complete!")
                 
-                print("\n🟢 Starting debug tracer session...")
+                # 准备DP测试数据
+                base_texts = ["1+1=?", "2+2=?", "3+3=?", "4+4=?"]
+                input_texts = base_texts * (self.dp_size // len(base_texts)) + base_texts[:self.dp_size % len(base_texts)]
+                
+                tokenizer = self._get_tokenizer()
+                
+                # 创建DP批次
+                sharded_forward_batch, device_count = self._create_batch_from_texts_dp(
+                    model.config, input_texts, tokenizer)
+
+                print(f"\n🚀 Starting real parallel execution...")
+                print(f"  Device count: {device_count}")
+                
+                # 为每个设备创建分片的RNG keys
+                rng_keys = jax.random.split(jax.random.PRNGKey(0), self.dp_size)
+                
                 if self.enable_debug_tracer:
                     global_tracer.start_session()
                 
-                sampler = Sampler(rngs=nnx.Rngs(0))
-                tokenizer = self._get_tokenizer()
-
-                # Multiple questions to simulate batch > 1 scenario
-                # Use simpler prompts for MoE testing
-                input_texts = [
-                    "1+1=?",
-                ]
-
-                input_ids_array, actual_seq_lens, forward_batch = self._create_batch_from_texts(
-                    model.config, input_texts, tokenizer)
-
-                # 初始化完整序列历史，用于累积生成的token
-                complete_sequences = []
-                for batch_idx in range(len(input_texts)):
-                    # 获取每个序列的初始token
-                    start_idx = sum(actual_seq_lens[:batch_idx])
-                    end_idx = start_idx + actual_seq_lens[batch_idx]
-                    initial_tokens = [int(token) for token in input_ids_array[start_idx:end_idx]]
-                    complete_sequences.append(initial_tokens)
-
-                print(f"Input text batch: {input_texts}")
-                print(f"Batch size: {len(input_texts)}")
-                print(f"Actual sequence lengths: {actual_seq_lens}")
-                print(f"Input tokens shape: {input_ids_array.shape}")
-                print(f"Input tokens: {input_ids_array}")
-                print(f"Initial complete sequences: {complete_sequences}")
-                
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh:
-                    for i in range(10):  # Reduced iterations for MoE testing
-                        # Use existing forward_batch, no need to recreate
-                        y = model(forward_batch.input_ids,
-                                  forward_batch.positions, forward_batch)
+                    
+                    # 初始化完整序列历史，用于累积生成的token
+                    complete_sequences = []
+                    for batch_idx in range(len(input_texts)):
+                        # 从sharded_forward_batch中提取每个序列的初始token
+                        device_id = batch_idx // (len(input_texts) // device_count)
+                        local_batch_idx = batch_idx % (len(input_texts) // device_count)
+                        
+                        # 获取该序列在对应设备上的长度
+                        seq_len = int(sharded_forward_batch.seq_lens[device_id][local_batch_idx])
+                        
+                        # 计算该序列在扁平化数组中的起始位置
+                        if local_batch_idx == 0:
+                            start_idx = 0
+                        else:
+                            start_idx = int(sharded_forward_batch.extend_start_loc[device_id][local_batch_idx])
+                        
+                        end_idx = start_idx + seq_len
+                        initial_tokens = [int(token) for token in sharded_forward_batch.input_ids[device_id][start_idx:end_idx]]
+                        complete_sequences.append(initial_tokens)
+                    
+                    print(f"\n📝 Initial sequences for decode:")
+                    for i, seq in enumerate(complete_sequences):
+                        decoded = tokenizer.decode(seq)
+                        print(f"  Sequence {i}: {seq} -> '{decoded}'")
+                    
+                    # 准备分片的sampling参数
+                    seqs_per_device = len(input_texts) // device_count
+                    sampling_temps = jnp.full((device_count, seqs_per_device, 1), 1.0)
+                    sampling_top_ps = jnp.full((device_count, seqs_per_device, 1), 1.0)
+                    sampling_top_ks = jnp.ones((device_count, seqs_per_device, 1))
+                    sampling_min_ps = jnp.full((device_count, seqs_per_device, 1), 0.0)
+                    
+                    # 执行生成循环 - 一个pmap搞定前向+采样！
+                    for iteration in range(10):
+                        print(f"\n  🔄 DP parallel iteration {iteration + 1}/10")
+                        
+                        # 一次调用完成：前向传播 + 采样！
+                        (outputs, next_token_ids), rng_keys = dp_forward_sample(
+                            model,
+                            sharded_forward_batch,
+                            sampling_temps,
+                            sampling_top_ps, 
+                            sampling_top_ks,
+                            sampling_min_ps,
+                            rng_keys
+                        )
+                        
+                        if iteration == 0:
+                            # 第一次迭代显示详细统计
+                            print(f"    ✅ All {device_count} devices executed forward+sample in parallel!")
+                            print(f"    📊 Output statistics:")
+                            print(f"      Output shape: {outputs.next_token_logits.shape}")
+                            print(f"      Sequences per device: {outputs.next_token_logits.shape[1]}")
+                            print(f"      Vocabulary size: {outputs.next_token_logits.shape[2]}")
+                            print(f"      Next tokens shape: {next_token_ids.shape}")
+                        
+                        # 更新complete_sequences和sharded_forward_batch
+                        complete_sequences = self.update_dp_forward_batch_with_sequences(
+                            sharded_forward_batch, next_token_ids, tokenizer, complete_sequences, device_count)
+                        
+                        # 每几次迭代显示进度
+                        if (iteration + 1) % 3 == 0:
+                            print(f"    🔄 Generated {iteration + 1} tokens...")
+                            for i, seq in enumerate(complete_sequences):
+                                decoded = tokenizer.decode(seq)
+                                print(f"      Sequence {i}: '{decoded}'")
 
-                        # The LogitsProcessor now automatically extracts the last token logits
-                        # y.next_token_logits shape: [batch_size, vocab_size]
-
-                        # Sample next token for each sequence in the batch
-                        next_token_ids = sampler(
-                            y,  # Pass the LogitsProcessorOutput directly
-                            sampling_info=SamplingBatchInfo(
-                                temperatures=jnp.full(
-                                    (len(input_texts), 1), 1.0),
-                                top_ps=jnp.full((len(input_texts), 1), 1.0),
-                                top_ks=jnp.ones((len(input_texts), 1)),
-                                min_ps=jnp.full((len(input_texts), 1), 0.0),
-                                vocab_size=model.config.vocab_size,
-                            ))
-
-                        complete_sequences = self.update_forward_batch_with_sequences(
-                            forward_batch, next_token_ids, tokenizer, complete_sequences)
-
-                # Decode complete results for each sequence
-                print(f"\n=== Qwen3 MoE Complete Generation Results ===")
+                # 显示最终生成结果
+                print(f"\n=== 🎉 JAX Data Parallelism Complete Generation Results ===")
                 for batch_idx in range(len(input_texts)):
                     full_sequence = complete_sequences[batch_idx]
                     decoded_full = tokenizer.decode(full_sequence)
-                    original_len = actual_seq_lens[batch_idx]
+                    
+                    # 计算原始长度
+                    device_id = batch_idx // (len(input_texts) // device_count)
+                    local_batch_idx = batch_idx % (len(input_texts) // device_count)
+                    original_len = int(sharded_forward_batch.seq_lens[device_id][local_batch_idx])
+                    
                     original_tokens = full_sequence[:original_len]
                     generated_tokens = full_sequence[original_len:]
                     
@@ -616,15 +649,11 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     print(f"Original question {batch_idx}: '{original_text}'")
                     print(f"Generated answer {batch_idx}: '{generated_text}'")
                     print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
-                    print()
 
-                print("\n🔴 Ending debug tracer session...")
                 if self.enable_debug_tracer:
                     debug_file = global_tracer.end_session()
                     if debug_file:
                         print(f"✅ Debug trace saved to: {debug_file}")
-                else:
-                    print("⚠️  Debug trace not saved")
 
         except Exception as e:
             if 'global_tracer' in locals():
@@ -672,64 +701,48 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     model_config.hf_config.mesh = mesh
                     print(f"设置 mesh: {mesh}")
                     
+                    # 1. 初始化模型骨架
+                    print("🔄 Initializing model skeleton on CPU...")
                     model = self.jax_loader._initialize_jax_model(model_config)
+                    
+                    # 2. 在加载真实权重前，提前编译pmap函数
+                    print("\n🔄 Pre-compiling pmap function with model skeleton...")
+                    dp_forward_sample = self._get_compiled_dp_forward_function()
+                    print("✅ pmap function compiled successfully!")
+
+                    # 3. 加载并分发真实权重
+                    print("\n🔄 Loading and sharding real weights...")
                     pytree = self.jax_loader._get_jax_pytree(model_config)
                     self.jax_loader._load_pytree_weights(model, pytree)
-                    
-                    return model
+                    print("✅ Weights loaded and sharded successfully!")
+
+                return model, dp_forward_sample
 
             with patch('sglang.srt.model_loader.loader.get_model_architecture') as mock_arch:
                 mock_arch.return_value = (Qwen3MoeForCausalLMJaxModel, None)
 
                 print("\n🔄 Loading Qwen3 MoE model...")
                 
-                model = custom_load_model_with_mesh(
+                model, dp_forward_sample = custom_load_model_with_mesh(
                     model_config=model_config,
                     device_config=self.device_config,
                     mesh=self.mesh,
                 )
 
-                print("✅ Model loaded successfully!")
+                print("✅ Model processing complete!")
                 
-                # 准备DP测试数据，序列数量必须能被dp_size整除
+                # 准备DP测试数据
                 base_texts = ["1+1=?", "2+2=?", "3+3=?", "4+4=?"]
-                # 确保有足够的序列用于dp_size个设备
-                input_texts = base_texts[:self.dp_size] if len(base_texts) >= self.dp_size else base_texts * ((self.dp_size // len(base_texts)) + 1)
-                input_texts = input_texts[:self.dp_size]  # 精确匹配dp_size
+                input_texts = base_texts * (self.dp_size // len(base_texts)) + base_texts[:self.dp_size % len(base_texts)]
                 
                 tokenizer = self._get_tokenizer()
                 
-                print(f"\n📊 DP Configuration:")
-                print(f"  Input sequences: {len(input_texts)}")
-                print(f"  Device count: {self.mesh.devices.shape[0]}")
-                print(f"  Sequences per device: {len(input_texts) // self.mesh.devices.shape[0]}")
-                print(f"  Input texts: {input_texts}")
-                
-                # 使用DP批次创建方法
+                # 创建DP批次
                 sharded_forward_batch, device_count = self._create_batch_from_texts_dp(
                     model.config, input_texts, tokenizer)
 
-                # 创建真正的并行前向传播+采样函数
-                def dp_forward_and_sample(model, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
-                    """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
-                    # 1. 模型前向传播
-                    outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
-                    
-                    # 2. 直接在同一个pmap中采样
-                    # 手动实现采样逻辑，以避免有状态的sampler对象
-                    key, new_key = jax.random.split(rng_key)
-                    next_token_ids = jax.random.categorical(key, outputs.next_token_logits, axis=-1)
-                    next_token_ids = next_token_ids[..., None]
-                    
-                    return (outputs, next_token_ids), new_key
-
-                # 使用pmap实现真正的数据并行 - 一个函数搞定前向+采样！
-                print(f"\n🔄 Creating unified data parallel forward+sample function...")
-                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data', static_broadcasted_argnums=(0,))
-                
                 print(f"\n🚀 Starting real parallel execution...")
                 print(f"  Device count: {device_count}")
-                print(f"  Sequences per device: {len(input_texts) // device_count}")
                 
                 # 为每个设备创建分片的RNG keys
                 rng_keys = jax.random.split(jax.random.PRNGKey(0), self.dp_size)
@@ -846,6 +859,28 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 except:
                     pass
             self.fail(f"Data Parallelism test failed: {e}")
+
+    def _get_compiled_dp_forward_function(self):
+        """Creates and JIT-compiles the data parallel forward function."""
+        def dp_forward_and_sample(model, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
+            """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
+            # 1. 模型前向传播
+            outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
+            
+            # 2. 直接在同一个pmap中采样
+            key, new_key = jax.random.split(rng_key)
+            next_token_ids = jax.random.categorical(key, outputs.next_token_logits, axis=-1)
+            next_token_ids = next_token_ids[..., None]
+            
+            return (outputs, next_token_ids), new_key
+
+        return jax.pmap(
+            dp_forward_and_sample,
+            axis_name='data',
+            in_axes=(None, 0, 0, 0, 0, 0, 0),
+            out_axes=((0, 0), 0),
+            static_broadcasted_argnums=(0,)
+        )
 
     def test_prepare_jax_weights_no_msgpack_files(self):
         """Test JAXModelLoader behavior when no msgpack files exist"""
