@@ -42,21 +42,39 @@ class Attention(nnx.Module):
         Returns:
             Output tensor of shape [total_tokens, hidden_size]
         """
-
-        k_buffer, v_buffer = self._get_and_set_kv_cache(
-            q, k, v, forward_batch, layer_id)
-
         head_dim = q.shape[1] // self.num_heads
-
         if self.scale is None:
             scale = 1.0 / jnp.sqrt(head_dim)
         else:
             scale = self.scale
 
-        if forward_batch.forward_mode == ForwardMode.DECODE:
-            is_causal = False
+        is_extend_mode = forward_batch.forward_mode == ForwardMode.EXTEND
 
-        return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, is_causal, forward_batch.forward_mode)
+        def extend_path():
+            # Set KV cache for EXTEND mode
+            forward_batch.token_to_kv_pool.set_kv_buffer(
+                layer_id, forward_batch.cache_loc, k, v)
+            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
+            
+            # In EXTEND, is_causal is True
+            # The mode passed to forward_attention must be a concrete value for static_argnames
+            return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, True, ForwardMode.EXTEND)
+
+        def decode_path():
+            # Set KV cache for DECODE mode
+            forward_batch.token_to_kv_pool.set_kv_buffer(
+                layer_id, forward_batch.out_cache_loc, k, v)
+            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
+
+            # In DECODE, is_causal is False
+            # The mode passed to forward_attention must be a concrete value for static_argnames
+            return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, False, ForwardMode.DECODE)
+
+        # Use jax.lax.cond to handle dynamic control flow based on forward_mode.
+        # NOTE: This works because the underlying `set_kv_buffer` and `get_kv_buffer`
+        # likely use functional JAX operations (.at[...].set) that are compatible
+        # with being traced in both branches of lax.cond.
+        return jax.lax.cond(is_extend_mode, extend_path, decode_path)
 
     def _get_and_set_kv_cache(
         self,
