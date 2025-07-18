@@ -25,7 +25,6 @@ from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.jax.layers.sampler import Sampler
 from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.jax.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.jax.models.qwen3_moe import Qwen3MoeForCausalLMJaxModel
 from sglang.srt.jax.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.model_loader.loader import JAXModelLoader
@@ -33,7 +32,6 @@ from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 import jax.tree_util
-import numpy as np
 
 # Register ForwardBatch as a JAX PyTree to allow it to be passed through jax.pmap.
 # This separates the object's fields into dynamic JAX arrays (children) and
@@ -79,26 +77,6 @@ def _forward_batch_unflatten(aux_data, children):
 
 jax.tree_util.register_pytree_node(
     ForwardBatch, _forward_batch_flatten, _forward_batch_unflatten
-)
-
-# Register LogitsProcessorOutput as a JAX PyTree. This allows it to be returned
-# from JIT-compiled functions. The `next_token_logits` is the only dynamic
-# JAX array (child), and there is no static metadata.
-def _logits_processor_output_flatten(output: LogitsProcessorOutput):
-    """Flattens the LogitsProcessorOutput for JAX transformations."""
-    children = (output.next_token_logits,)
-    aux_data = None
-    return children, aux_data
-
-def _logits_processor_output_unflatten(aux_data, children):
-    """Unflattens the LogitsProcessorOutput from JAX representations."""
-    (next_token_logits,) = children
-    return LogitsProcessorOutput(next_token_logits=next_token_logits)
-
-jax.tree_util.register_pytree_node(
-    LogitsProcessorOutput,
-    _logits_processor_output_flatten,
-    _logits_processor_output_unflatten,
 )
 
 
@@ -391,7 +369,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
             head_num=model_config.num_key_value_heads,
             head_dim=model_config.head_dim,
             layer_num=model_config.num_hidden_layers,
-            dtype=jnp.bfloat16,
+            dtype=jnp.bfloat16 if model_config.torch_dtype == "bfloat16" else jnp.float32,
             max_seq_len=128,
             max_batch_size=20,
         )
@@ -691,18 +669,6 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 print("✅ Model loaded successfully!")
                 
-                # 分离模型定义和状态，以避免JAX捕获巨大的常量
-                model_def, model_state = nnx.split(model)
-                
-                # 过滤State，只保留权重数组，以创建一个可安全分发的“纯净”PyTree
-                pure_weights = {
-                    path: value for path, value in model_state.items() 
-                    if isinstance(value, (jnp.ndarray, np.ndarray))
-                }
-
-                # 手动将纯净的权重PyTree复制到所有设备上
-                sharded_weights = jax.device_put(pure_weights, self.mesh.devices)
-                
                 # 准备DP测试数据，序列数量必须能被dp_size整除
                 base_texts = ["1+1=?", "2+2=?", "3+3=?", "4+4=?"]
                 # 确保有足够的序列用于dp_size个设备
@@ -719,46 +685,39 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 
                 # 使用DP批次创建方法
                 sharded_forward_batch, device_count = self._create_batch_from_texts_dp(
-                    model_config, input_texts, tokenizer)
+                    model.config, input_texts, tokenizer)
 
                 # 创建真正的并行前向传播+采样函数
-                def dp_forward_and_sample(model_def, sharded_weights, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
+                def dp_forward_and_sample(model, sampler, forward_batch, temps, top_ps, top_ks, min_ps):
                     """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
-                    # 1. 从纯净的权重字典恢复State
-                    model_state = nnx.State(sharded_weights)
-                    
-                    # 2. 重新组合模型
-                    model = nnx.merge(model_def, model_state)
-                    
-                    # 3. 模型前向传播
+                    # 1. 模型前向传播
                     outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
                     
-                    # 4. 直接在同一个pmap中采样
-                    key, new_key = jax.random.split(rng_key)
-                    next_token_ids = jax.random.categorical(key, outputs.next_token_logits, axis=-1)
-                    next_token_ids = next_token_ids[..., None]
+                    # 2. 直接在同一个pmap中采样
+                    local_sampling_info = SamplingBatchInfo(
+                        temperatures=temps,
+                        top_ps=top_ps,
+                        top_ks=top_ks,
+                        min_ps=min_ps,
+                        vocab_size=model.config.vocab_size,
+                    )
+                    next_token_ids = sampler(outputs, sampling_info=local_sampling_info)
                     
-                    return (outputs, next_token_ids), new_key
+                    return outputs, next_token_ids
 
                 # 使用pmap实现真正的数据并行 - 一个函数搞定前向+采样！
                 print(f"\n🔄 Creating unified data parallel forward+sample function...")
-                dp_forward_sample = jax.pmap(
-                    dp_forward_and_sample,
-                    axis_name='data',
-                    in_axes=(None, 0, 0, 0, 0, 0, 0, 0),  # model_def(static), sharded_weights, forward_batch, ...
-                    out_axes=((0, 0), 0),
-                    static_broadcasted_argnums=(0,)
-                )
+                dp_forward_sample = jax.pmap(dp_forward_and_sample, axis_name='data', static_broadcasted_argnums=(0, 1))
                 
                 print(f"\n🚀 Starting real parallel execution...")
                 print(f"  Device count: {device_count}")
                 print(f"  Sequences per device: {len(input_texts) // device_count}")
                 
-                # 为每个设备创建分片的RNG keys
-                rng_keys = jax.random.split(jax.random.PRNGKey(0), self.dp_size)
+                # 创建sampler用于token生成
+                sampler = Sampler(rngs=nnx.Rngs(0))
                 
-                # if self.enable_debug_tracer:
-                #     global_tracer.start_session()
+                if self.enable_debug_tracer:
+                    global_tracer.start_session()
                 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
                 with self.mesh:
@@ -800,15 +759,14 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                         print(f"\n  🔄 DP parallel iteration {iteration + 1}/10")
                         
                         # 一次调用完成：前向传播 + 采样！
-                        (outputs, next_token_ids), rng_keys = dp_forward_sample(
-                            model_def,
-                            sharded_weights,
+                        outputs, next_token_ids = dp_forward_sample(
+                            model,
+                            sampler,
                             sharded_forward_batch,
                             sampling_temps,
                             sampling_top_ps, 
                             sampling_top_ks,
-                            sampling_min_ps,
-                            rng_keys
+                            sampling_min_ps
                         )
                         
                         if iteration == 0:
@@ -856,19 +814,19 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                     print(f"Generated answer {batch_idx}: '{generated_text}'")
                     print(f"Total length {batch_idx}: {len(full_sequence)} (original: {original_len}, generated: {len(generated_tokens)})")
 
-                # if self.enable_debug_tracer:
-                #     debug_file = global_tracer.end_session()
-                #     if debug_file:
-                #         print(f"✅ Debug trace saved to: {debug_file}")
+                if self.enable_debug_tracer:
+                    debug_file = global_tracer.end_session()
+                    if debug_file:
+                        print(f"✅ Debug trace saved to: {debug_file}")
 
         except Exception as e:
-            # if 'global_tracer' in locals():
-            #     try:
-            #         if self.enable_debug_tracer:
-            #             global_tracer.end_session()
-            #             print("🔴 Debug tracer session ended due to exception")
-            #     except:
-            #         pass
+            if 'global_tracer' in locals():
+                try:
+                    if self.enable_debug_tracer:
+                        global_tracer.end_session()
+                        print("🔴 Debug tracer session ended due to exception")
+                except:
+                    pass
             self.fail(f"Data Parallelism test failed: {e}")
 
     def test_prepare_jax_weights_no_msgpack_files(self):
