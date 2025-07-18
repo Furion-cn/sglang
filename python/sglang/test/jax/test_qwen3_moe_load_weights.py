@@ -690,6 +690,9 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
 
                 print("✅ Model loaded successfully!")
                 
+                # 分离模型定义和状态，以避免JAX捕获巨大的常量
+                model_state, model_def = nnx.split(model)
+                
                 # 准备DP测试数据，序列数量必须能被dp_size整除
                 base_texts = ["1+1=?", "2+2=?", "3+3=?", "4+4=?"]
                 # 确保有足够的序列用于dp_size个设备
@@ -706,16 +709,18 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 
                 # 使用DP批次创建方法
                 sharded_forward_batch, device_count = self._create_batch_from_texts_dp(
-                    model.config, input_texts, tokenizer)
+                    model_config, input_texts, tokenizer)
 
                 # 创建真正的并行前向传播+采样函数
-                def dp_forward_and_sample(model, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
+                def dp_forward_and_sample(model_def, model_state, forward_batch, temps, top_ps, top_ks, min_ps, rng_key):
                     """数据并行：前向传播 + 采样 - 在每个设备上同时执行完整流程"""
-                    # 1. 模型前向传播
+                    # 1. 重新组合模型
+                    model = nnx.merge(model_def, model_state)
+                    
+                    # 2. 模型前向传播
                     outputs = model(forward_batch.input_ids, forward_batch.positions, forward_batch)
                     
-                    # 2. 直接在同一个pmap中采样
-                    # 手动实现采样逻辑，以避免有状态的sampler对象
+                    # 3. 直接在同一个pmap中采样
                     key, new_key = jax.random.split(rng_key)
                     next_token_ids = jax.random.categorical(key, outputs.next_token_logits, axis=-1)
                     next_token_ids = next_token_ids[..., None]
@@ -777,7 +782,8 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                         
                         # 一次调用完成：前向传播 + 采样！
                         (outputs, next_token_ids), rng_keys = dp_forward_sample(
-                            model,
+                            model_def,
+                            model_state,
                             sharded_forward_batch,
                             sampling_temps,
                             sampling_top_ps, 
