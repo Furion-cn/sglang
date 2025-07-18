@@ -503,7 +503,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 print(f"Initial complete sequences: {complete_sequences}")
                 
                 jax_profiling_dir = os.environ.get("JAX_TRACE_PROFILING_DIR", "/tmp/jax_profiling")
-                with self.mesh, jax_trace_context(jax_profiling_dir):
+                with self.mesh:
                     for i in range(10):  # Reduced iterations for MoE testing
                         # Use existing forward_batch, no need to recreate
                         y = model(forward_batch.input_ids,
