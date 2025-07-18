@@ -33,6 +33,7 @@ from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 import jax.tree_util
+import numpy as np
 
 # Register ForwardBatch as a JAX PyTree to allow it to be passed through jax.pmap.
 # This separates the object's fields into dynamic JAX arrays (children) and
