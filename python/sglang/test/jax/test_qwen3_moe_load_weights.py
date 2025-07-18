@@ -691,7 +691,7 @@ class TestQwen3MoeLoadWeights(CustomTestCase):
                 print("✅ Model loaded successfully!")
                 
                 # 分离模型定义和状态，以避免JAX捕获巨大的常量
-                model_state, model_def = nnx.split(model)
+                model_def, model_state = nnx.split(model)
                 
                 # 将可变的State转换为不可变的、可哈希的元组，以便安全地作为静态参数传递
                 hashable_model_state = tuple(model_state.items())
