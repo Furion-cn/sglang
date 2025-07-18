@@ -31,6 +31,54 @@ from sglang.srt.model_loader.loader import JAXModelLoader
 from sglang.test.jax.test_utils import create_device_mesh, jax_trace_context
 from sglang.test.test_utils import CustomTestCase
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
+import jax.tree_util
+
+# Register ForwardBatch as a JAX PyTree to allow it to be passed through jax.pmap.
+# This separates the object's fields into dynamic JAX arrays (children) and
+# static metadata (aux_data). The `token_to_kv_pool` is treated as static
+# because it's a complex object that should not be traced by JAX.
+def _forward_batch_flatten(fb: ForwardBatch):
+    """Flattens the ForwardBatch for JAX transformations."""
+    children = (
+        fb.input_ids,
+        fb.seq_lens,
+        fb.positions,
+        fb.cache_loc,
+        fb.out_cache_loc,
+        fb.extend_start_loc,
+        fb.batch_size,  # batch_size is traced as a JAX array
+    )
+    aux_data = (fb.forward_mode, fb.token_to_kv_pool)
+    return children, aux_data
+
+def _forward_batch_unflatten(aux_data, children):
+    """Unflattens the ForwardBatch from JAX representations."""
+    forward_mode, token_to_kv_pool = aux_data
+    (
+        input_ids,
+        seq_lens,
+        positions,
+        cache_loc,
+        out_cache_loc,
+        extend_start_loc,
+        batch_size,
+    ) = children
+    return ForwardBatch(
+        forward_mode=forward_mode,
+        batch_size=batch_size,
+        input_ids=input_ids,
+        seq_lens=seq_lens,
+        positions=positions,
+        cache_loc=cache_loc,
+        out_cache_loc=out_cache_loc,
+        extend_start_loc=extend_start_loc,
+        token_to_kv_pool=token_to_kv_pool,
+    )
+
+jax.tree_util.register_pytree_node(
+    ForwardBatch, _forward_batch_flatten, _forward_batch_unflatten
+)
+
 
 class Sequence:
     def __init__(self, tokenizer, input_text: str):
