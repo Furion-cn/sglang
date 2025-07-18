@@ -28,22 +28,31 @@ class LogitsProcessor(nnx.Module):
         lm_head: Embed,
         forward_batch: ForwardBatch,
     ) -> LogitsProcessorOutput:
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
-            logits=_logits_processor_forward_extend(
+        # if forward_batch.forward_mode == ForwardMode.EXTEND:
+        #     logits=_logits_processor_forward_extend(
+        #         hidden_states,
+        #         forward_batch.extend_start_loc,
+        #         forward_batch.seq_lens,
+        #         lm_head.promote_dtype,
+        #         lm_head.embedding.value,
+        #         lm_head.dtype,
+        #         self.vocab_size,
+        #     )
+        # else:
+        #     logits=_logits_processor_forward_decode(
+        #         hidden_states,
+        #         lm_head.promote_dtype,
+        #         lm_head.embedding.value,
+        #         forward_batch.batch_size,
+        #         lm_head.dtype,
+        #         self.vocab_size,
+        #     )
+        logits=_logits_processor_forward_extend(
                 hidden_states,
                 forward_batch.extend_start_loc,
                 forward_batch.seq_lens,
                 lm_head.promote_dtype,
                 lm_head.embedding.value,
-                lm_head.dtype,
-                self.vocab_size,
-            )
-        else:
-            logits=_logits_processor_forward_decode(
-                hidden_states,
-                lm_head.promote_dtype,
-                lm_head.embedding.value,
-                forward_batch.batch_size,
                 lm_head.dtype,
                 self.vocab_size,
             )
