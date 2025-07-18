@@ -79,12 +79,13 @@ class TestQwen3LoadWeights(CustomTestCase):
             jnp.arange(x.shape[1]) for _ in range(x.shape[0])
         ]).reshape(x.shape[0], x.shape[1])
 
-    def _create_batch_from_texts(self, model_config, texts, tokenizer):
+    def _create_batch_from_texts(self, model_config, texts, tokenizer, cache_pool):
         """Create initial batch from texts with tokenization (no padding needed)
 
         Args:
             texts: List[str] input texts to process
             tokenizer: tokenizer to use for encoding
+            cache_pool: The shared ReqToHashKVCachePool instance.
 
         Returns:
             tuple: (input_ids_array, actual_seq_lens, forward_batch)
@@ -114,17 +115,7 @@ class TestQwen3LoadWeights(CustomTestCase):
         extend_start_loc = jnp.cumsum(
             jnp.concatenate([jnp.array([0]), seq_lens[:-1]]))
 
-        # new kv cache
-        cache_pool = ReqToHashKVCachePool(
-            head_num=model_config.num_key_value_heads,
-            head_dim=model_config.head_dim,
-            layer_num=model_config.num_hidden_layers,
-            dtype=jnp.bfloat16 if model_config.torch_dtype == "bfloat16" else jnp.float32,
-            max_seq_len=128,
-            max_batch_size=20,
-        )
-
-        # Create ForwardBatch
+        # Create ForwardBatch using the provided shared cache_pool
         forward_batch = ForwardBatch(
             forward_mode=ForwardMode.EXTEND,
             batch_size=len(actual_seq_lens),
@@ -268,8 +259,18 @@ class TestQwen3LoadWeights(CustomTestCase):
                 
                 print(f"Input texts split into {self.dp_degree} groups of size {group_size}")
 
+                # Create a single shared KV cache pool
+                cache_pool = ReqToHashKVCachePool(
+                    head_num=model.config.num_key_value_heads,
+                    head_dim=model.config.head_dim,
+                    layer_num=model.config.num_hidden_layers,
+                    dtype=jnp.bfloat16 if model.config.torch_dtype == "bfloat16" else jnp.float32,
+                    max_seq_len=128,
+                    max_batch_size=20,
+                )
+
                 # Create batches for each data parallel group
-                batches = [self._create_batch_from_texts(model.config, texts, tokenizer) for texts in input_texts_per_group]
+                batches = [self._create_batch_from_texts(model.config, texts, tokenizer, cache_pool) for texts in input_texts_per_group]
                 
                 # Unzip batches into separate lists
                 input_ids_list, actual_seq_lens_list, forward_batch_list = zip(*batches)
