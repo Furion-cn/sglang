@@ -37,3 +37,44 @@ class ForwardBatch:
     extend_start_loc: jax.Array = None
     # token to kv cache pool
     token_to_kv_pool: ReqToHashKVCachePool = None
+
+    def tree_flatten(self):
+        children = (
+            self.forward_mode,
+            self.batch_size,
+            self.input_ids,
+            self.seq_lens,
+            self.cache_loc,
+            self.out_cache_loc,
+            self.positions,
+            self.extend_start_loc,
+        )
+        aux_data = (self.token_to_kv_pool,)
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (token_to_kv_pool,) = aux_data
+        (
+            forward_mode,
+            batch_size,
+            input_ids,
+            seq_lens,
+            cache_loc,
+            out_cache_loc,
+            positions,
+            extend_start_loc,
+        ) = children
+        return cls(
+            forward_mode=forward_mode,
+            batch_size=batch_size,
+            input_ids=input_ids,
+            seq_lens=seq_lens,
+            cache_loc=cache_loc,
+            out_cache_loc=out_cache_loc,
+            positions=positions,
+            extend_start_loc=extend_start_loc,
+            token_to_kv_pool=token_to_kv_pool,
+        )
+
+jax.tree_util.register_pytree_node_class(ForwardBatch)
