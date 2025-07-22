@@ -1,12 +1,14 @@
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from typing import Optional
 
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_DECODE,FORWARD_MODE_EXTEND
+from sglang.srt.jax.mem_cache.hash_kvcache import get_kv_buffer,set_kv_buffer
+from sglang.debug_tracer import global_tracer, trace_function
 
 
 class Attention(nnx.Module):
@@ -17,14 +19,21 @@ class Attention(nnx.Module):
                  # add kv_heads for GQA attention and MQA attention
                  num_kv_heads: Optional[int] = None,
                  scale: float = None,
-                 rngs: nnx.Rngs = None):
+                 rngs: nnx.Rngs = None,
+                 max_seq_len:int =None,
+                 max_batch_size:int =None,
+                 ):
+        assert max_seq_len is not None and max_batch_size is not None
         self.scale = scale
         self.num_heads = num_heads
         if num_kv_heads is not None:
             self.num_kv_heads = num_kv_heads
         else:
             self.num_kv_heads = num_heads
-
+        self.max_seq_len = max_seq_len
+        self.max_batch_size = max_batch_size
+        
+    @trace_function(stage="INTERNAL_ATTENTION", include_args=False, include_output=True)
     def __call__(self,
                  q: jax.Array,
                  k: jax.Array,
@@ -32,7 +41,9 @@ class Attention(nnx.Module):
                  forward_batch: ForwardBatch,
                  layer_id: int,
                  attention_mask: jax.Array = None,
-                 is_causal: bool = True):
+                 is_causal: bool = True,
+                 forward_mode:str=None,
+                 ):
         """
         Args:
             q, k, v: Input tensors of shape [total_tokens, hidden_size]
@@ -43,8 +54,12 @@ class Attention(nnx.Module):
             Output tensor of shape [total_tokens, hidden_size]
         """
 
-        k_buffer, v_buffer = self._get_and_set_kv_cache(
-            q, k, v, forward_batch, layer_id)
+        k_buffer, v_buffer, forward_batch = self._get_and_set_kv_cache(
+            q, k, v, forward_batch, layer_id,forward_mode,self.max_seq_len,self.max_batch_size,self.num_kv_heads)
+
+
+        if layer_id in [0]:
+            global_tracer.print(k_buffer, f"k_buffer", f"k_buffer_{layer_id}")
 
         head_dim = q.shape[1] // self.num_heads
 
@@ -53,40 +68,71 @@ class Attention(nnx.Module):
         else:
             scale = self.scale
 
-        if forward_batch.forward_mode == ForwardMode.DECODE:
+        if forward_mode == FORWARD_MODE_DECODE:
             is_causal = False
 
-        return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, is_causal, forward_batch.forward_mode)
-
+        return forward_attention(q, k_buffer, v_buffer, forward_batch.seq_lens, forward_batch.cache_loc, self.num_heads, self.num_kv_heads, scale, attention_mask, is_causal, forward_mode,layer_id), forward_batch
+    @trace_function(stage="INTERNAL_ATTENTION_GET_AND_SET_KV_CACHE", include_args=False, include_output=True)
     def _get_and_set_kv_cache(
         self,
         q: jax.Array,
         k: jax.Array,
         v: jax.Array,
         forward_batch: ForwardBatch,
-        layer_id: int
-    ) -> Tuple[jax.Array, jax.Array]:
+        layer_id: int,
+        forward_mode:str,
+        max_seq_len:int,
+        max_batch_size:int,
+        num_kv_heads:int,
+    ):
         """
         Get the kv cache from the forward batch.
         """
-        if forward_batch.forward_mode == ForwardMode.EXTEND:
-            forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer_id, forward_batch.cache_loc, k, v)
+        num_tokens,hidden_dim=k.shape[0],k.shape[1]
+        reshaped_k=k.reshape(num_tokens,num_kv_heads,hidden_dim//num_kv_heads)
+        reshaped_v=v.reshape(num_tokens,num_kv_heads,hidden_dim//num_kv_heads)
+        offset_to_kv_cache = layer_id * max_seq_len * max_batch_size
+        if forward_mode ==FORWARD_MODE_EXTEND:
+            concat_seq_lens=jnp.concat([jnp.array([0]),forward_batch.seq_lens],axis=0)
+            cumsum_seq_lens=jnp.cumsum(concat_seq_lens)
+            kv_start_loc=cumsum_seq_lens[:-1]
+            kv_cache_start_loc=kv_start_loc + offset_to_kv_cache
+            seq_lens = forward_batch.seq_lens
+            forward_batch.k_cache,forward_batch.v_cache=set_kv_buffer(
+                reshaped_k,
+                reshaped_v,
+                forward_batch.k_cache,
+                forward_batch.v_cache,
+                seq_lens,
+                kv_start_loc,
+                kv_cache_start_loc,
+            )
         else:
-            forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer_id, forward_batch.out_cache_loc, k, v)
+            batch_size =q.shape[0]
+            seq_lens=jnp.array([1]*batch_size)
+            kv_start_loc=jnp.array(range(batch_size))
+            kv_cache_start_loc = forward_batch.out_cache_loc + offset_to_kv_cache
+            forward_batch.k_cache,forward_batch.v_cache=set_kv_buffer(
+                reshaped_k,
+                reshaped_v,
+                forward_batch.k_cache,
+                forward_batch.v_cache,
+                seq_lens,
+                kv_start_loc,
+                kv_cache_start_loc,
+            ) 
 
-        return forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
+        k_buffer,v_buffer=get_kv_buffer(forward_batch.k_cache,forward_batch.v_cache,offset_to_kv_cache,offset_to_kv_cache+max_seq_len * max_batch_size)
+        return k_buffer.reshape(k_buffer.shape[0],-1), v_buffer.reshape(k_buffer.shape[0],-1), forward_batch
 
-
-@partial(jax.jit, static_argnames=["num_heads", "num_kv_heads", "is_causal", "mode"])
+@trace_function(stage="INTERNAL_ATTENTION_FORWARD_ATTENTION", include_args=True, include_output=True)
 def forward_attention(q: jax.Array,
                       k_cache: jax.Array,
                       v_cache: jax.Array,
                       seq_lengths: jax.Array,
                       loc: jax.Array,
                       num_heads, num_kv_heads,
-                      scale=None, attention_mask=None, is_causal=True, mode=ForwardMode.DECODE):
+                      scale=None, attention_mask=None, is_causal=True, mode=FORWARD_MODE_DECODE,layer_id=None):
     """
     Forward pass using native JAX implementation with block-diagonal attention.
     This avoids padding while maintaining efficient matrix operations.
@@ -152,10 +198,13 @@ def forward_attention(q: jax.Array,
 
     attn_output = jnp.matmul(attn_weights, v_t)
     attn_output = jnp.transpose(attn_output, (1, 0, 2))
-    return attn_output.reshape(num_tokens, hidden_size)
+
+    tmp=attn_output.reshape(num_tokens, hidden_size)
+    return tmp
 
 
-def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: ForwardMode):
+@trace_function(stage="INTERNAL_ATTENTION_APPLY_SEQUENCE_MASK", include_args=True, include_output=True)
+def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: str):
     """Create a sequence mask that ensures tokens only attend within their sequence."""
     batch_size = seq_lengths.shape[0]
     _, query_len, key_len = attn_weights.shape
@@ -195,7 +244,7 @@ def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: 
                     (all_positions[None, :] < seq_ends[:, None]))
         return seq_mask
 
-    if mode == ForwardMode.EXTEND:
+    if mode == FORWARD_MODE_EXTEND:
         mask = create_extend_sequence_mask()
     else:
         mask = create_decode_sequence_mask()
@@ -204,7 +253,7 @@ def _apply_sequence_mask(attn_weights: jax.Array, seq_lengths: jax.Array, mode: 
     mask = mask[None, :, :]
     return jnp.where(mask, attn_weights, mask_value)
 
-
+@trace_function(stage="INTERNAL_ATTENTION_APPLY_CAUSAL_MASK", include_args=False, include_output=True)
 def _apply_causal_mask(attn_weights: jax.Array, seq_lengths: jax.Array):
     """Create a causal mask."""
     _, query_len, key_len = attn_weights.shape

@@ -9,48 +9,87 @@ import torch.nn.functional as F
 from flax import nnx
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 from sglang.srt.jax.layers.attention import Attention
-from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.jax.model_executor.forward_batch_info import ForwardBatch, ForwardMode,FORWARD_MODE_EXTEND,FORWARD_MODE_DECODE
 from sglang.test.test_utils import CustomTestCase
 
+MAX_SEQ_LEN = 128
 
 def create_forward_batch(seq_lengths, input_ids=None, model_config=None):
     """Create a real ForwardBatch for testing."""
     batch_size = len(seq_lengths)
     total_tokens = sum(seq_lengths)
+    head_dim=128
+    layer_num=1
+    max_batch_size=20
+    num_kv_heads=32
+    if model_config is not None:
+        head_dim=model_config['head_dim']
+        layer_num=model_config['num_hidden_layers']
+        num_kv_heads=model_config['num_kv_heads']
 
     # Create dummy input_ids if not provided
     if input_ids is None:
-        input_ids = jnp.arange(total_tokens, dtype=jnp.int32)
+        valid_input_ids = jnp.arange(total_tokens, dtype=jnp.int32)
+        invalid_input_ids = jnp.array([-1]*int(MAX_SEQ_LEN*len(seq_lengths)-valid_input_ids.size))
+        input_ids=jnp.concat([valid_input_ids,invalid_input_ids],axis=0)
 
     # Create sequence lengths array
     seq_lens = jnp.array(seq_lengths, dtype=jnp.int32)
 
     # Create positions (sequential positions for each token)
-    positions = jnp.arange(total_tokens, dtype=jnp.int32)
+    invalid_positions_arr_flat=[]
+    for seq_len in seq_lengths:
+        invalid_positions_arr_flat.extend(range(seq_len,MAX_SEQ_LEN))
+        
+    valid_positions = jnp.arange(total_tokens, dtype=jnp.int32)
+    invalid_positions= jnp.array(invalid_positions_arr_flat)
+    positions=jnp.concat([valid_positions,invalid_positions],axis=0)
 
     # Create extend_start_loc (start position of each sequence)
     extend_start_loc = jnp.array([sum(seq_lengths[:i])
                                  for i in range(batch_size)], dtype=jnp.int32)
+    
+    k_cache,v_cache = _create_kv_cache(head_dim,max_batch_size,num_kv_heads,head_dim,layer_num=layer_num)
 
-    current_kv_cache = [ReqToHashKVCachePool(
-            seq_len=seq_len,
-            head_num=model_config["num_kv_heads"],
-            head_dim=model_config["head_dim"],
-            layer_num=model_config["num_hidden_layers"],
-            dtype=jnp.bfloat16 if model_config["bf16"] else jnp.float32
-        ) for seq_len in seq_lens]
+    valid_cache_loc=jnp.arange(jnp.sum(seq_lens), dtype=jnp.int32)
+    invalid_cache_loc=jnp.array([i for i in range(jnp.sum(seq_lens),MAX_SEQ_LEN*len(seq_lengths))])
+    cache_loc =jnp.concat([valid_cache_loc,invalid_cache_loc],axis=0)
+
+    # TODO: aolemila
     return ForwardBatch(
-        forward_mode=ForwardMode.EXTEND,
         batch_size=batch_size,
         input_ids=input_ids,
         seq_lens=seq_lens,
+        cache_loc=cache_loc,
+        out_cache_loc=None,
         positions=positions,
         extend_start_loc=extend_start_loc,
-        current_kv_cache=current_kv_cache,
-        total_tokens=total_tokens
+        k_cache=k_cache,
+        v_cache=v_cache,
     )
 
 
+
+def _create_kv_cache(
+    max_seq_len,
+    max_batch_size,
+    head_num,
+    head_dim,
+    layer_num,
+    dtype=jnp.bfloat16,
+    ):
+    max_tokens = max_seq_len * max_batch_size
+    hidden_dim = head_num * head_dim
+
+    k_cache = jnp.zeros(
+        (layer_num, max_tokens, hidden_dim),
+        dtype=dtype
+    )
+    v_cache = jnp.zeros(
+        (layer_num, max_tokens, hidden_dim),
+        dtype=dtype
+    )
+    return k_cache, v_cache
 class TestAttention(CustomTestCase):
     """Test cases for the Attention layer."""
 
@@ -172,12 +211,13 @@ class TestAttention(CustomTestCase):
                               1], (total_tokens, hidden_size))
 
         # Test attention
-        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
+        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
         # Check output shape and properties
         self.assertEqual(output.shape, (total_tokens, hidden_size))
         self.assertTrue(jnp.isfinite(output).all())
         self.assertEqual(output.dtype, q.dtype)
+
 
     def test_attention_accuracy(self):
         """Test JAX attention accuracy against PyTorch reference"""
@@ -192,7 +232,8 @@ class TestAttention(CustomTestCase):
         batch_size = 2
         seq_lengths = [6, 8]
         total_tokens = sum(seq_lengths)
-        max_seq_len = max(seq_lengths)
+        #max_seq_len = max(seq_lengths)
+        max_seq_len=MAX_SEQ_LEN
 
         # Create mock forward_batch
         forward_batch = create_forward_batch(seq_lengths, model_config={
@@ -204,17 +245,28 @@ class TestAttention(CustomTestCase):
 
         # Create test data
         key = jax.random.PRNGKey(42)
+        #q_jax=jnp.arange( len(seq_lengths)* MAX_SEQ_LEN * hidden_size,dtype=jnp.bfloat16).reshape(-1,hidden_size)
+        #k_jax=jnp.arange( len(seq_lengths)* MAX_SEQ_LEN * hidden_size,dtype=jnp.bfloat16).reshape(-1,hidden_size)
+        #v_jax=jnp.arange( len(seq_lengths)* MAX_SEQ_LEN * hidden_size,dtype=jnp.bfloat16).reshape(-1,hidden_size)
         q_jax = jax.random.normal(
-            key, (total_tokens, hidden_size), dtype=jnp.bfloat16)
+            key, (len(seq_lengths)* MAX_SEQ_LEN , hidden_size), dtype=jnp.bfloat16).reshape(-1,hidden_size)
         k_jax = jax.random.normal(jax.random.split(
-            key)[0], (total_tokens, hidden_size), dtype=jnp.bfloat16)
+            key)[0], (len(seq_lengths)* MAX_SEQ_LEN , hidden_size), dtype=jnp.bfloat16).reshape(-1,hidden_size)
         v_jax = jax.random.normal(jax.random.split(
-            key)[1], (total_tokens, hidden_size), dtype=jnp.bfloat16)
+            key)[1], (len(seq_lengths)* MAX_SEQ_LEN , hidden_size), dtype=jnp.bfloat16).reshape(-1,hidden_size)
+        #q_jax = jax.random.normal(
+        #    key, (total_tokens, hidden_size), dtype=jnp.bfloat16)
+        #k_jax = jax.random.normal(jax.random.split(
+        #    key)[0], (total_tokens, hidden_size), dtype=jnp.bfloat16)
+        #v_jax = jax.random.normal(jax.random.split(
+        #    key)[1], (total_tokens, hidden_size), dtype=jnp.bfloat16)
 
         # JAX attention
         jax_attention = Attention(num_heads=num_heads, scale=scale)
         jax_output = jax_attention(
-            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True)
+            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
+
+        
 
         # Create PyTorch equivalent data
         def to_pytorch_batched(tensor, seq_lengths, max_seq_len):
@@ -277,10 +329,10 @@ class TestAttention(CustomTestCase):
         pytorch_output_flat = torch.cat(pytorch_output_flat, dim=0)
 
         # Compare results - convert to float32 for proper comparison
-        jax_np = np.array(jax_output.astype(jnp.float32))
+        jax_np = np.array(jax_output[0].astype(jnp.float32))
         pytorch_np = pytorch_output_flat.to(torch.float32).numpy()
 
-        abs_diff = np.abs(jax_np - pytorch_np)
+        abs_diff = np.abs(jax_np[:14] - pytorch_np)
         rel_diff = abs_diff / (np.abs(pytorch_np) + 1e-8)
 
         max_abs_error = np.max(abs_diff)
@@ -288,17 +340,25 @@ class TestAttention(CustomTestCase):
         max_rel_error = np.max(rel_diff)
         mean_rel_error = np.mean(rel_diff)
 
-        print(f"JAX output shape: {jax_output.shape}")
+        print(f"JAX output shape: {jax_output[0].shape}")
         print(f"PyTorch output shape: {pytorch_output_flat.shape}")
         print(f"Max absolute error: {max_abs_error:.8f}")
         print(f"Mean absolute error: {mean_abs_error:.8f}")
         print(f"Max relative error: {max_rel_error:.8f}")
         print(f"Mean relative error: {mean_rel_error:.8f}")
 
+        print(f"jax_output[0][:14].shape: {jax_output[0][:14].shape}")
+        print(f"{jax_output[0][:14]}")
+        print(f"PyTorch output shape: {pytorch_np.shape}")
+        print(f"{pytorch_np}")
+
+        #for i in range(512):
+        #    print(f"{jax_output[0][0,i].item()},")
+
         # Test with reasonable thresholds for BFloat16 precision
         rtol = 2e-2  # Relative tolerance
         atol = 1e-2  # Absolute tolerance
-        are_close = np.allclose(jax_np, pytorch_np, rtol=rtol, atol=atol)
+        are_close = np.allclose(jax_np[:14], pytorch_np, rtol=rtol, atol=atol)
         print(f"Are outputs close (rtol={rtol}, atol={atol})? {are_close}")
 
         assert are_close, f"JAX and PyTorch outputs differ significantly! Max abs error: {max_abs_error}, Max rel error: {max_rel_error}"
@@ -390,7 +450,7 @@ class TestGroupedQueryAttention(CustomTestCase):
                               1], (total_tokens, kv_size))
 
         # Test attention
-        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True)
+        output = attention(q, k, v, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
 
         # Check output shape and properties
@@ -409,12 +469,12 @@ class TestGroupedQueryAttention(CustomTestCase):
         for dtype in [jnp.float32, jnp.float16, jnp.bfloat16]:
             with self.subTest(dtype=dtype):
                 q, k, v, forward_batch = self._create_test_inputs(dtype=dtype)
-                output = attention_layer(q, k, v, layer_id=0, forward_batch=forward_batch)
+                output = attention_layer(q, k, v, layer_id=0, forward_batch=forward_batch,forward_mode=FORWARD_MODE_EXTEND)
                 
                 self.assertEqual(output.dtype, dtype)
                 self.assertTrue(jnp.all(jnp.isfinite(output)))
     
-    def test_attention_accuracy(self):
+    def test_attention_accuracy_v2(self):
         """Test JAX attention accuracy against PyTorch reference"""
         import torch
         import torch.nn.functional as F
@@ -451,7 +511,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         # JAX attention
         jax_attention = Attention(num_heads=num_heads, num_kv_heads=num_kv_heads, scale=scale)
         jax_output = jax_attention(
-            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True)
+            q_jax, k_jax, v_jax, layer_id=0, forward_batch=forward_batch, is_causal=True,forward_mode=FORWARD_MODE_EXTEND)
 
         # Create PyTorch equivalent data
         def to_pytorch_batched(tensor, seq_lengths, max_seq_len):
@@ -526,7 +586,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         pytorch_output_flat = torch.cat(pytorch_output_flat, dim=0)
 
         # Compare results - convert to float32 for proper comparison
-        jax_np = np.array(jax_output.astype(jnp.float32))
+        jax_np = np.array(jax_output[0].astype(jnp.float32))
         pytorch_np = pytorch_output_flat.to(torch.float32).numpy()
 
         abs_diff = np.abs(jax_np - pytorch_np)
@@ -537,7 +597,7 @@ class TestGroupedQueryAttention(CustomTestCase):
         max_rel_error = np.max(rel_diff)
         mean_rel_error = np.mean(rel_diff)
 
-        print(f"JAX output shape: {jax_output.shape}")
+        print(f"JAX output shape: {jax_output[0].shape}")
         print(f"PyTorch output shape: {pytorch_output_flat.shape}")
         print(f"Max absolute error: {max_abs_error:.8f}")
         print(f"Mean absolute error: {mean_abs_error:.8f}")

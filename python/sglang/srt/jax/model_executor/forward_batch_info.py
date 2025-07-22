@@ -1,12 +1,12 @@
-from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import List
+from typing import List,Any
+from flax import struct
 
 import jax
 
 from sglang.srt.jax.mem_cache.hash_kvcache import ReqToHashKVCachePool
 
-
+@struct.dataclass
 class ForwardMode(IntEnum):
     # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
     # It is also called "prefill" in common terminology.
@@ -14,13 +14,15 @@ class ForwardMode(IntEnum):
     # Decode one token.
     DECODE = auto()
 
+FORWARD_MODE_EXTEND="extend"
+FORWARD_MODE_DECODE="decode"
 
-@dataclass
+KCACHE=Any
+VCACHE=Any
+
+@struct.dataclass(frozen=False)
 class ForwardBatch:
     """Store all inputs of a forward pass."""
-
-    # The forward mode
-    forward_mode: ForwardMode
     # The batch size
     batch_size: int
     # The input ids [total_tokens]
@@ -32,8 +34,10 @@ class ForwardBatch:
     # decode token position in kv cache
     out_cache_loc: jax.Array
     # Position information [total_tokens]
-    positions: jax.Array = None
+    positions: jax.Array
     # Start position for each sequence in extend mode [batch_size]
-    extend_start_loc: jax.Array = None
+    extend_start_loc: jax.Array
     # token to kv cache pool
-    token_to_kv_pool: ReqToHashKVCachePool = None
+    k_cache:jax.Array
+    v_cache:jax.Array
+

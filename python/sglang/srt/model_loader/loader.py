@@ -1458,11 +1458,13 @@ class JAXModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         mesh: jax.sharding.Mesh,
+        max_seq_len:int,
+        max_batch_size:int,
     ) -> Any:
         with mesh:
             model_config.hf_config.mesh = mesh
             # Initialize JAX model
-            model = self._initialize_jax_model(model_config)
+            model = self._initialize_jax_model(model_config,max_seq_len,max_batch_size)
             
             # Load PyTree weights
             pytree = self._get_jax_pytree(model_config)
@@ -1472,7 +1474,7 @@ class JAXModelLoader(BaseModelLoader):
         
             return model
 
-    def _initialize_jax_model(self, model_config: ModelConfig) -> Any:
+    def _initialize_jax_model(self, model_config: ModelConfig,max_seq_len:int,max_batch_size:int) -> Any:
         model_class, _ = get_model_architecture(model_config)
         
         # Check if this is a JAX model
@@ -1484,7 +1486,7 @@ class JAXModelLoader(BaseModelLoader):
         
         from flax import nnx
         
-        return model_class(config=model_config.hf_config, rngs=nnx.Rngs(0))
+        return model_class(config=model_config.hf_config, rngs=nnx.Rngs(0),max_seq_len=max_seq_len,max_batch_size=max_batch_size)
 
     def _get_jax_pytree(self, model_config: ModelConfig) -> Pytree:
         source = self.JAXSource.init_new(model_config)
