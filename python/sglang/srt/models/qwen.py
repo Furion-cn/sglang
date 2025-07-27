@@ -152,8 +152,14 @@ class QWenAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+        global_tracer.print(q, "q_proj", f"qkv_proj_layer_id_{self.layer_id}")
+        global_tracer.print(k, "k_proj", f"qkv_proj_layer_id_{self.layer_id}")
+        global_tracer.print(v, "v_proj", f"qkv_proj_layer_id_{self.layer_id}")
         q, k = self.rotary_emb(positions, q, k)
+        global_tracer.print(q, "q_rotary", f"qkv_proj_layer_id_{self.layer_id}")
+        global_tracer.print(k, "k_rotary", f"qkv_proj_layer_id_{self.layer_id}")
         attn_output = self.attn(q, k, v, forward_batch)
+        global_tracer.print(attn_output, "attn_output", f"attn_layer_id_{self.layer_id}")
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -335,6 +341,8 @@ class QWenLMHeadModel(nn.Module):
                     "logits": result.next_token_logits,
                     "logits_shape": list(result.next_token_logits.shape)
                 })
+            
+            global_tracer.print(result.next_token_logits, "next_token_logits", "logits_all")
             
             global_tracer.accumulate_step(input_data, output_data)
             
