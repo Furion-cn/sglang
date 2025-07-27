@@ -269,7 +269,7 @@ class QWenModel(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        global_tracer.print(input_ids, "embedding_input", "embedding_all")
+        #global_tracer.print(input_ids, "embedding_input", "embedding_all")
         hidden_states = self.wte(input_ids)
         global_tracer.print(hidden_states, "embedding_output", "embedding_all")
         
